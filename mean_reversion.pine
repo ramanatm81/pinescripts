@@ -1,178 +1,155 @@
 //@version=6
-indicator("Session Anchor Ladder (Mean Reversion Cycles)", overlay=true, max_lines_count=500, max_labels_count=500)
+indicator("Mean Reversion Ladder Anchors (ETH Reset)", overlay=true, max_lines_count=500, max_labels_count=500)
 
-// =========================
-// 🔧 USER INPUTS
-// =========================
-sessionHour   = input.int(23, "Session Start Hour")
-sessionMinute = input.int(0,  "Session Start Minute")
+//=============================
+// 🔧 Inputs
+//=============================
+thresholdPts   = input.float(50,  "Impulse Threshold (points)")
+tolerancePts   = input.float(3,   "Anchor Reversion Tolerance")
+anchorResetStr = input.string("1700", "Daily Anchor Reset Time (HHMM exchange time)")
+showLabels     = input.bool(true, "Show Anchor Labels")
+showLines      = input.bool(true, "Connect Anchors")
 
-thresholdPts  = input.float(50.0, "Displacement Threshold (pts)")
-tolerancePts  = input.float(5.0,  "Reversion Tolerance (pts)")
+//=============================
+// 🕒 Parse reset time
+//=============================
+resetHour   = str.tonumber(str.substring(anchorResetStr, 0, 2))
+resetMinute = str.tonumber(str.substring(anchorResetStr, 2, 4))
 
-showLabels    = input.bool(true, "Show Anchor Labels")
-showDurations = input.bool(true, "Show Cycle Durations")
+// current bar time components (exchange time)
+curHour   = hour(time)
+curMinute = minute(time)
 
-// =========================
-// 🕒 SESSION START DETECTION
-// =========================
-isSessionStart = (hour == sessionHour and minute == sessionMinute)
+// detect crossing of reset time
+crossedReset =
+     (curHour == resetHour and curMinute == resetMinute) and
+     not (hour(time[1]) == resetHour and minute(time[1]) == resetMinute)
 
-// =========================
-// 📦 STATE VARIABLES
-// =========================
+//=============================
+// 🧱 State Variables
+//=============================
 var float current_anchor = na
-var int   anchor_bar_index = na
+var int   anchor_bar     = na
 
-var bool impulse_detected = false
-var int  impulse_dir = 0            // +1 up, -1 down
-var int  impulse_bar_index = na
+var bool  impulse_detected = false
+var bool  reversion_done   = false
+var int   impulse_bar_index = na
+var int   impulse_dir = 0  // +1 up, -1 down
 
-var bool reversion_done = false
+// storage for ladder drawing
+var anchor_levels = array.new_float()
+var anchor_bars   = array.new_int()
 
-// ladder arrays
-var float[] anchor_levels = array.new_float()
-var int[]   anchor_bars   = array.new_int()
+// stats
+var up_cycles   = array.new_int()
+var down_cycles = array.new_int()
 
-// stats arrays
-var int[] up_cycles   = array.new_int()
-var int[] down_cycles = array.new_int()
-
-// line/label storage
-var line[] ladder_lines = array.new_line()
-var label[] ladder_labels = array.new_label()
-
-// =========================
-// 🔄 RESET AT SESSION START
-// =========================
-if isSessionStart
-    // reset everything
+//=============================
+// 🔁 Reset at ETH open (17:00)
+//=============================
+if crossedReset
     current_anchor := open
-    anchor_bar_index := bar_index
+    anchor_bar     := bar_index
 
     impulse_detected := false
+    reversion_done   := false
+    impulse_bar_index := na
     impulse_dir := 0
-    reversion_done := false
 
-    // clear arrays
     array.clear(anchor_levels)
     array.clear(anchor_bars)
-    array.clear(up_cycles)
-    array.clear(down_cycles)
 
-    // store first anchor
     array.push(anchor_levels, current_anchor)
-    array.push(anchor_bars, anchor_bar_index)
+    array.push(anchor_bars, bar_index)
 
-    // optional label
-    if showLabels
-        label.new(bar_index, current_anchor, "A0\n" + str.tostring(current_anchor), style=label.style_label_down, color=color.rgb(59, 128, 255))
+//=============================
+// 🟡 Step 1: Detect impulse from anchor
+//=============================
+if not impulse_detected and not na(current_anchor)
+    dist = close - current_anchor
 
-// =========================
-// 🚦 STATE MACHINE LOGIC
-// =========================
-
-// --- Step 1: detect displacement from current anchor
-distance = close - current_anchor
-
-if not impulse_detected
-    if distance >= thresholdPts
+    if math.abs(dist) >= thresholdPts
         impulse_detected := true
-        impulse_dir := +1
         impulse_bar_index := bar_index
-    else if distance <= -thresholdPts
-        impulse_detected := true
-        impulse_dir := -1
-        impulse_bar_index := bar_index
+        impulse_dir := dist > 0 ? +1 : -1
 
-// --- Step 2: wait for reversion to anchor
+//=============================
+// 🔵 Step 2: Wait for reversion to anchor
+//=============================
 if impulse_detected and not reversion_done
-    reverted = math.abs(close - current_anchor) <= tolerancePts or
-               (impulse_dir == +1 and close < current_anchor) or
-               (impulse_dir == -1 and close > current_anchor)
+    revert_dist = math.abs(close - current_anchor)
 
-    if reverted
+    if revert_dist <= tolerancePts
         reversion_done := true
 
-// --- Step 3: wait for opposite displacement to form NEW anchor
+//=============================
+// 🔴 Step 3: Next displacement → new anchor (ANY direction)
+//=============================
 if impulse_detected and reversion_done
-    oppDistance = close - current_anchor
+    dist = close - current_anchor
 
-    new_anchor_condition =
-         (impulse_dir == +1 and oppDistance <= -thresholdPts) or
-         (impulse_dir == -1 and oppDistance >= thresholdPts)
+    if math.abs(dist) >= thresholdPts
+        // snap to ladder step
+        steps = math.round(dist / thresholdPts)
+        new_anchor = current_anchor + steps * thresholdPts
 
-    if new_anchor_condition
-        // determine new anchor level
-        float new_anchor = current_anchor + (impulse_dir == +1 ? -thresholdPts : thresholdPts)
+        // cycle duration
+        duration = bar_index - impulse_bar_index
 
-        // store cycle duration
-        int duration = bar_index - impulse_bar_index
-
-        if impulse_dir == +1
+        if dist > 0
             array.push(up_cycles, duration)
         else
             array.push(down_cycles, duration)
 
-        // store ladder anchor
+        // store ladder point
         array.push(anchor_levels, new_anchor)
         array.push(anchor_bars, bar_index)
 
-        // draw line between last two anchors
-        int size = array.size(anchor_levels)
-        if size >= 2
-            float prev_price = array.get(anchor_levels, size - 2)
-            int   prev_bar   = array.get(anchor_bars, size - 2)
+        // draw connecting line
+        if showLines and array.size(anchor_levels) >= 2
+            prev_level = array.get(anchor_levels, array.size(anchor_levels) - 2)
+            prev_bar   = array.get(anchor_bars,   array.size(anchor_bars) - 2)
 
-            line l = line.new(prev_bar, prev_price, bar_index, new_anchor, width=2,
-                 color = impulse_dir == +1 ? color.red : color.green)
-            array.push(ladder_lines, l)
+            line.new(prev_bar, prev_level, bar_index, new_anchor, width=2, color=color.orange)
 
-            if showDurations
-                label.new(bar_index, new_anchor,
-                    str.tostring(duration) + " bars",
-                    style=label.style_label_left,
-                    color=color.new(color.gray, 20))
-
-        // label new anchor
+        // label anchor
         if showLabels
             label.new(bar_index, new_anchor,
-                "A" + str.tostring(size-1) + "\n" + str.tostring(new_anchor),
-                style=label.style_label_down,
-                color=color.rgb(82, 196, 148))
+                text = "A\n" + str.tostring(new_anchor),
+                style = label.style_label_down,
+                size = size.small)
 
-        // update state for next cycle
+        // reset for next cycle
         current_anchor := new_anchor
-        anchor_bar_index := bar_index
+        anchor_bar     := bar_index
 
         impulse_detected := false
-        reversion_done := false
+        reversion_done   := false
+        impulse_bar_index := na
         impulse_dir := 0
 
-// =========================
-// 📊 STATS TABLE
-// =========================
-var table statsTable = table.new(position.top_right, 2, 3)
+//=============================
+// 📊 Plot current anchor
+//=============================
+plot(current_anchor, title="Current Anchor", color=color.yellow, linewidth=2)
 
-f_avg(arr) =>
-    int s = array.size(arr)
-    if s == 0
-        na
-    else
-        float sum = 0.0
-        for i = 0 to s - 1
-            sum += array.get(arr, i)
-        sum / s
+//=============================
+// 📈 Stats table
+//=============================
+var table stats = table.new(position.top_right, 2, 4)
 
-if barstate.islast
-    float avgUp   = f_avg(up_cycles)
-    float avgDown = f_avg(down_cycles)
+avg_up = array.size(up_cycles) > 0 ? array.avg(up_cycles) : na
+avg_dn = array.size(down_cycles) > 0 ? array.avg(down_cycles) : na
 
-    table.cell(statsTable, 0, 0, "Up Cycles Avg Bars")
-    table.cell(statsTable, 1, 0, str.tostring(avgUp, "#.0"))
+if bar_index % 10 == 0
+    table.cell(stats, 0, 0, "Metric", bgcolor=color.gray)
+    table.cell(stats, 1, 0, "Value", bgcolor=color.gray)
 
-    table.cell(statsTable, 0, 1, "Down Cycles Avg Bars")
-    table.cell(statsTable, 1, 1, str.tostring(avgDown, "#.0"))
+    table.cell(stats, 0, 1, "Avg Up Cycle")
+    table.cell(stats, 1, 1, str.tostring(avg_up))
 
-    table.cell(statsTable, 0, 2, "Total Anchors")
-    table.cell(statsTable, 1, 2, str.tostring(array.size(anchor_levels)))
+    table.cell(stats, 0, 2, "Avg Down Cycle")
+    table.cell(stats, 1, 2, str.tostring(avg_dn))
+
+    table.cell(stats, 0, 3, "Total Anchors")
+    table.cell(stats, 1, 3, str.tostring(array.size(anchor_levels)))
