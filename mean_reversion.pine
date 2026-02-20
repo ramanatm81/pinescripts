@@ -2,16 +2,16 @@
 indicator("Mean Reversion Ladder Anchors (ETH Reset)", overlay=true, max_lines_count=500, max_labels_count=500)
 
 //=============================
-// 🔧 Inputs
+// Inputs
 //=============================
 thresholdPts   = input.float(50,  "Impulse Threshold (points)")
 tolerancePts   = input.float(3,   "Anchor Reversion Tolerance")
 anchorResetStr = input.string("1700", "Daily Anchor Reset Time (HHMM exchange time)")
-showLabels     = input.bool(true, "Show Anchor Labels")
+showLabels     = input.bool(true, "Show Reset Labels")
 showLines      = input.bool(true, "Connect Anchors")
 
 //=============================
-// 🕒 Parse reset time
+// Parse reset time
 //=============================
 resetHour   = str.tonumber(str.substring(anchorResetStr, 0, 2))
 resetMinute = str.tonumber(str.substring(anchorResetStr, 2, 4))
@@ -24,31 +24,29 @@ crossedReset =
      not (hour(time[1]) == resetHour and minute(time[1]) == resetMinute)
 
 //=============================
-// 🧱 State Variables
+// State Variables
 //=============================
 var float current_anchor = na
 var int   anchor_bar     = na
 
-var bool  impulse_detected = false
-var bool  reversion_done   = false
+var bool  impulse_detected  = false
 var int   impulse_bar_index = na
-var int   impulse_dir = 0
+var float impulse_dist      = na
 
 // ladder storage
 var anchor_levels = array.new_float()
 var anchor_bars   = array.new_int()
 
 //=============================
-// 🔁 Reset at ETH open
+// Reset at ETH open
 //=============================
 if crossedReset
     current_anchor := open
     anchor_bar     := bar_index
 
-    impulse_detected := false
-    reversion_done   := false
+    impulse_detected  := false
     impulse_bar_index := na
-    impulse_dir := 0
+    impulse_dist      := na
 
     array.clear(anchor_levels)
     array.clear(anchor_bars)
@@ -56,45 +54,44 @@ if crossedReset
     array.push(anchor_levels, current_anchor)
     array.push(anchor_bars, bar_index)
 
+    if showLabels
+        label.new(bar_index, current_anchor,
+            text = "RESET" +
+                "\nL:" + str.tostring(current_anchor, "#.##"),
+            
+            style = label.style_label_down,
+            size = size.normal,
+            color = color.new(color.blue, 0),
+            textcolor = color.white)
+
 //=============================
-// 🟡 Step 1: Detect impulse
+// Step 1: Detect impulse
 //=============================
 if not impulse_detected and not na(current_anchor)
     dist = close - current_anchor
 
     if math.abs(dist) >= thresholdPts
-        impulse_detected := true
+        impulse_detected  := true
         impulse_bar_index := bar_index
-        impulse_dir := dist > 0 ? +1 : -1
+        impulse_dist      := dist
+
+        label.new(bar_index, close,
+            text = "#" + str.tostring(bar_index) + "\n" + str.tostring(close, "#.##"),
+            style = dist > 0 ? label.style_label_down : label.style_label_up,
+            size = size.small,
+            color = dist > 0 ? color.new(color.green, 0) : color.new(color.red, 0),
+            textcolor = color.white)
 
 //=============================
-// 🔵 Step 2: Reversion back to anchor
+// Step 2: Reversion back to anchor
 //=============================
-if impulse_detected and not reversion_done
-    revert_dist = math.abs(close - current_anchor)
+if impulse_detected
+    // use low for upward impulse (price dropping back to anchor), high for downward
+    touch_price = impulse_dist > 0 ? low : high
+    revert_dist = math.abs(touch_price - current_anchor)
 
     if revert_dist <= tolerancePts
-        reversion_done := true
-
-        // 🏷️ label how many bars it took to revert
-        bars_to_revert = bar_index - impulse_bar_index
-
-        if showLabels
-            label.new(bar_index, current_anchor,
-                text = "R:" + str.tostring(bars_to_revert),
-                style = label.style_label_up,
-                size = size.small,
-                color = color.new(color.green, 0))
-
-//=============================
-// 🔴 Step 3: New anchor (any direction)
-//=============================
-if impulse_detected and reversion_done
-    dist = close - current_anchor
-
-    if math.abs(dist) >= thresholdPts
-        steps = math.round(dist / thresholdPts)
-        new_anchor = current_anchor + steps * thresholdPts
+        new_anchor = current_anchor  // snap to the anchor level that was touched, not the close
 
         // store ladder point
         array.push(anchor_levels, new_anchor)
@@ -107,24 +104,21 @@ if impulse_detected and reversion_done
 
             line.new(prev_bar, prev_level, bar_index, new_anchor, width=2, color=color.orange)
 
-        // label anchor
-        if showLabels
-            label.new(bar_index, new_anchor,
-                text = "A\n" + str.tostring(new_anchor),
-                style = label.style_label_down,
-                size = size.small)
+        label.new(bar_index, close,
+            text = "ANCHOR\n#" + str.tostring(bar_index) + "\n" + str.tostring(close, "#.##"),
+            style = impulse_dist > 0 ? label.style_label_up : label.style_label_down,
+            size = size.small,
+            color = color.new(color.orange, 0),
+            textcolor = color.white)
 
-        // reset for next cycle
+        // reset for next cycle from the reversion point
         current_anchor := new_anchor
         anchor_bar     := bar_index
-
         impulse_detected := false
-        reversion_done   := false
         impulse_bar_index := na
-        impulse_dir := 0
 
 //=============================
-// 📈 Stats Table (unchanged)
+// Stats Table
 //=============================
 var up_cycles   = array.new_int()
 var down_cycles = array.new_int()
