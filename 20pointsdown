@@ -1,0 +1,71 @@
+//@version=6
+indicator("Configurable Down Pattern + Cumulative Volume (Dual Time Windows)", overlay=true)
+
+// Inputs for pattern detection
+downPoints = input.float(20, title="Total Down Points Threshold")
+streakBars = input.int(3, title="Consecutive Candles Required", minval=1)
+tolerance = input.float(2, title="Max Allowable Up Move per Candle")
+
+// Inputs for Time Window 1
+startHour1 = input.int(8, title="Session 1 Start Hour (24h)", minval=0, maxval=23)
+startMinute1 = input.int(0, title="Session 1 Start Minute", minval=0, maxval=59)
+endHour1 = input.int(13, title="Session 1 End Hour (24h)", minval=0, maxval=23)
+endMinute1 = input.int(30, title="Session 1 End Minute", minval=0, maxval=59)
+
+// Inputs for Time Window 2
+startHour2 = input.int(15, title="Session 2 Start Hour (24h)", minval=0, maxval=23)
+startMinute2 = input.int(30, title="Session 2 Start Minute", minval=0, maxval=59)
+endHour2 = input.int(20, title="Session 2 End Hour (24h)", minval=0, maxval=23)
+endMinute2 = input.int(0, title="Session 2 End Minute", minval=0, maxval=59)
+
+// Time filtering logic
+currentTime = hour * 60 + minute
+startTime1 = startHour1 * 60 + startMinute1
+endTime1 = endHour1 * 60 + endMinute1
+startTime2 = startHour2 * 60 + startMinute2
+endTime2 = endHour2 * 60 + endMinute2
+
+inSession = (currentTime >= startTime1 and currentTime <= endTime1) or (currentTime >= startTime2 and currentTime <= endTime2)
+
+// Variables
+var float streakFall = na
+var int streakLength = 0
+var float streakVolume = na
+var bool patternLocked = false
+
+// Candle change logic
+candleChange = close - open
+
+plot(currentTime, title="Current Time (minutes)")
+hline(480, "08:00", color=color.blue)
+hline(810, "13:30", color=color.blue)
+hline(870, "14:30", color=color.red)
+hline(1200, "20:00", color=color.red)
+
+if inSession and (candleChange <= tolerance)  // Allow small up candles within tolerance
+    streakFall := na(streakFall) ? -candleChange : streakFall - candleChange
+    streakLength += 1
+    streakVolume := na(streakVolume) ? volume : streakVolume + volume
+else if not inSession
+    streakFall := na
+    streakLength := 0
+    streakVolume := na
+    patternLocked := false
+else
+    streakFall := na
+    streakLength := 0
+    streakVolume := na
+    patternLocked := false
+
+// Detect pattern
+patternFound = inSession and (streakLength >= streakBars) and (streakFall >= downPoints) and not patternLocked
+
+if patternFound
+    patternLocked := true
+
+// Plot marker
+plotshape(patternFound, location=location.belowbar, color=color.red, style=shape.triangledown, size=size.small, text="Down Pattern")
+
+// Label for cumulative volume
+if patternFound
+    label.new(bar_index, low, text="Vol: " + str.tostring(streakVolume), color=color.red, textcolor=color.white, size=size.small)

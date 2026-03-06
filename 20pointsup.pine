@@ -1,0 +1,30 @@
+//@version=5
+indicator("20 Points Up Pattern MNQ + Cumulative Volume Label", overlay=true)
+
+// Inputs
+upPoints = 20
+
+// Variables to track streak
+var float streakRise = na
+var int streakLength = 0
+var float streakVolume = na
+
+// Logic for consecutive green candles and rise accumulation
+if close > open
+    streakRise := na(streakRise) ? close - open : streakRise + close - open
+    streakLength += 1
+    streakVolume := na(streakVolume) ? volume : streakVolume + volume
+else
+    streakRise := na
+    streakLength := 0
+    streakVolume := na
+
+// Check for the pattern: 3 consecutive green candles AND 20+ points rise
+patternFound = (streakLength >= 3) and (streakRise >= upPoints)
+
+// Plot marker
+plotshape(patternFound, location=location.abovebar, color=color.green, style=shape.triangleup, size=size.small, text="20pt Up")
+
+// Display streakVolume as a label when pattern found
+if patternFound
+    label.new(bar_index, high, text="Vol: " + str.tostring(streakVolume), color=color.green, textcolor=color.white, size=size.small)
