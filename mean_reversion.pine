@@ -4,10 +4,12 @@ indicator("Mean Reversion Ladder Anchors (ETH Reset)", overlay=true, max_lines_c
 //=============================
 // Inputs
 //=============================
-thresholdPts   = input.float(50,  "Impulse Threshold (points)")
+thresholdPtsETH = input.float(50,  "Impulse Threshold - ETH (17:00–07:30)")
+thresholdPtsRTH = input.float(30,  "Impulse Threshold - RTH (09:30–17:00)")
 tolerancePts   = input.float(3,   "Anchor Reversion Tolerance")
+loiterPts      = input.float(20,  "Loiter Zone (points from anchor)")
 anchorResetStr = input.string("1700", "Daily Anchor Reset Time (HHMM exchange time)")
-showLabels     = input.bool(true, "Show Reset Labels")
+showLabels     = input.bool(true, "Show Markers")
 showLines      = input.bool(true, "Connect Anchors")
 
 //=============================
@@ -23,6 +25,18 @@ crossedReset =
      (curHour == resetHour and curMinute == resetMinute) and
      not (hour(time[1]) == resetHour and minute(time[1]) == resetMinute)
 
+// 09:30 market open hard reset
+crossedMarketOpen =
+     (curHour == 9 and curMinute == 30) and
+     not (hour(time[1]) == 9 and minute(time[1]) == 30)
+
+// skip all calculations during 08:30–09:29 (pre-market open noise)
+inSkipWindow = (curHour == 8 and curMinute >= 30) or (curHour == 9 and curMinute < 30)
+
+// RTH session: 09:30–17:00; everything else (including 07:30–08:30 gap) uses ETH threshold
+inRTH = (curHour == 9 and curMinute >= 30) or (curHour >= 10 and curHour < 17)
+activeThreshold = inRTH ? thresholdPtsRTH : thresholdPtsETH
+
 //=============================
 // State Variables
 //=============================
@@ -32,16 +46,15 @@ var int   anchor_bar     = na
 var bool  impulse_detected  = false
 var int   impulse_bar_index = na
 var float impulse_dist      = na
+var float impulse_price     = na  // close at the bar impulse was first detected
 
 // ladder storage
 var anchor_levels = array.new_float()
 var anchor_bars   = array.new_int()
 
 // reversion timing stats
-var int cur_loiter      = 0   // bars this cycle where close stayed on impulse side
 var int revert_count    = 0   // completed reversion cycles
 var int revert_bars_sum = 0   // sum of bars from impulse → reversion
-var int loiter_bars_sum = 0   // sum of loiter bars across cycles
 
 //=============================
 // Reset at ETH open
@@ -53,7 +66,7 @@ if crossedReset
     impulse_detected  := false
     impulse_bar_index := na
     impulse_dist      := na
-    cur_loiter        := 0
+    impulse_price     := na
 
     array.clear(anchor_levels)
     array.clear(anchor_bars)
@@ -62,76 +75,120 @@ if crossedReset
     array.push(anchor_bars, bar_index)
 
     if showLabels
-        label.new(bar_index, current_anchor,
-            text = "RESET" +
-                "\nL:" + str.tostring(current_anchor, "#.##"),
-            
-            style = label.style_label_down,
-            size = size.normal,
-            color = color.new(color.blue, 0),
-            textcolor = color.white)
+        label.new(bar_index, current_anchor, text="",
+            style = label.style_circle,
+            size = size.small,
+            color = color.new(color.blue, 0))
+
+//=============================
+// Hard reset at 09:30 market open
+//=============================
+if crossedMarketOpen
+    current_anchor := open
+    anchor_bar     := bar_index
+
+    impulse_detected  := false
+    impulse_bar_index := na
+    impulse_dist      := na
+    impulse_price     := na
+
+    array.clear(anchor_levels)
+    array.clear(anchor_bars)
+
+    array.push(anchor_levels, current_anchor)
+    array.push(anchor_bars, bar_index)
+
+    if showLabels
+        label.new(bar_index, current_anchor, text="",
+            style = label.style_circle,
+            size = size.small,
+            color = color.new(color.yellow, 0))
 
 //=============================
 // Step 1: Detect impulse
+// (skip on the same bar as a session reset to avoid phantom state)
 //=============================
-if not impulse_detected and not na(current_anchor)
+sessionReset = crossedReset or crossedMarketOpen
+
+if not impulse_detected and not na(current_anchor) and not inSkipWindow and not sessionReset
     dist = close - current_anchor
 
-    if math.abs(dist) >= thresholdPts
+    if math.abs(dist) >= activeThreshold
         impulse_detected  := true
         impulse_bar_index := bar_index
         impulse_dist      := dist
+        impulse_price     := close
 
-        label.new(bar_index, close,
-            text = "#" + str.tostring(bar_index) + "\n" + str.tostring(close, "#.##"),
-            style = dist > 0 ? label.style_label_down : label.style_label_up,
-            size = size.small,
-            color = dist > 0 ? color.new(color.green, 0) : color.new(color.red, 0),
-            textcolor = color.white)
+        if showLabels
+            label.new(bar_index, close, text="",
+                style = label.style_circle,
+                size = size.small,
+                color = dist > 0 ? color.new(color.green, 0) : color.new(color.red, 0))
 
 //=============================
 // Step 2: Reversion back to anchor
+// (skip on reset bars; extended and reverted are mutually exclusive)
 //=============================
-if impulse_detected
-    // count bars where close is still on the impulse side (loitering above/below anchor)
-    if (impulse_dist > 0 and close > current_anchor) or (impulse_dist < 0 and close < current_anchor)
-        cur_loiter += 1
+if impulse_detected and not inSkipWindow and not sessionReset
+    // extension: price ran loiterPts beyond the impulse price → new anchor, restart cycle
+    extended = impulse_dist > 0
+         ? close >= impulse_price + loiterPts
+         : close <= impulse_price - loiterPts
 
-    // reversion: candle crosses back past the anchor from the impulse side
-    reverted = impulse_dist > 0 ? low <= current_anchor : high >= current_anchor
+    if extended
+        if showLabels
+            label.new(bar_index, close, text="",
+                style = label.style_circle,
+                size = size.small,
+                color = color.new(color.purple, 0))
 
-    if reverted
-        new_anchor = close  // use close as new anchor; candle touched the level but may have overshot
+        alert(
+            (impulse_dist > 0 ? "▲ LONG EXT" : "▼ SHORT EXT") +
+            " | New Anchor: " + str.tostring(close, "#.##") +
+            " | Bar #" + str.tostring(bar_index),
+            alert.freq_once_per_bar)
 
-        // store ladder point
-        array.push(anchor_levels, new_anchor)
-        array.push(anchor_bars, bar_index)
-
-        // draw connecting line
-        if showLines and array.size(anchor_levels) >= 2
-            prev_level = array.get(anchor_levels, array.size(anchor_levels) - 2)
-            prev_bar   = array.get(anchor_bars,   array.size(anchor_bars) - 2)
-
-            line.new(prev_bar, prev_level, bar_index, new_anchor, width=2, color=color.orange)
-
-        label.new(bar_index, close,
-            text = "ANCHOR\n#" + str.tostring(bar_index) + "\n" + str.tostring(close, "#.##"),
-            style = impulse_dist > 0 ? label.style_label_up : label.style_label_down,
-            size = size.small,
-            color = color.new(color.orange, 0),
-            textcolor = color.white)
-
-        // accumulate timing stats
-        revert_count    += 1
-        revert_bars_sum += bar_index - impulse_bar_index
-        loiter_bars_sum += cur_loiter
-        cur_loiter       := 0
-
-        // reset for next cycle from the reversion point
-        current_anchor    := new_anchor
+        current_anchor    := close
         anchor_bar        := bar_index
         impulse_detected  := false
         impulse_bar_index := na
+        impulse_dist      := na
+        impulse_price     := na
+
+    else
+        // reversion: candle crosses back past the anchor from the impulse side
+        reverted = impulse_dist > 0 ? low <= current_anchor : high >= current_anchor
+
+        if reverted
+            new_anchor = close  // use close as new anchor; candle touched the level but may have overshot
+
+            // store ladder point
+            array.push(anchor_levels, new_anchor)
+            array.push(anchor_bars, bar_index)
+
+            // draw connecting line
+            if showLines and array.size(anchor_levels) >= 2
+                prev_level = array.get(anchor_levels, array.size(anchor_levels) - 2)
+                prev_bar   = array.get(anchor_bars,   array.size(anchor_bars) - 2)
+
+                line.new(prev_bar, prev_level, bar_index, new_anchor, width=2, color=color.fuchsia)
+
+            if showLabels
+                label.new(bar_index, close, text="",
+                    style = label.style_circle,
+                    size = size.small,
+                    color = color.new(color.fuchsia, 0))
+
+            // accumulate timing stats
+            revert_count    += 1
+            revert_bars_sum += bar_index - impulse_bar_index
+
+            // reset for next cycle from the reversion point
+            current_anchor    := new_anchor
+            anchor_bar        := bar_index
+            impulse_detected  := false
+            impulse_bar_index := na
+            impulse_price     := na
 
 //=============================
 // Stats Table
@@ -139,11 +196,37 @@ if impulse_detected
 var up_cycles   = array.new_int()
 var down_cycles = array.new_int()
 
-var table stats = table.new(position.top_right, 2, 5)
+var table stats = table.new(position.top_right, 2, 4)
+
+//=============================
+// Legend Table
+//=============================
+var table legend = table.new(position.bottom_right, 2, 7, border_width=1)
+
+if barstate.islast
+    table.cell(legend, 0, 0, "Marker",   bgcolor=color.gray, text_color=color.white, text_size=size.small)
+    table.cell(legend, 1, 0, "Meaning",  bgcolor=color.gray, text_color=color.white, text_size=size.small)
+
+    table.cell(legend, 0, 1, "●", bgcolor=color.new(color.blue,   0), text_color=color.white, text_size=size.small)
+    table.cell(legend, 1, 1, "Reset (17:00)",          text_size=size.small)
+
+    table.cell(legend, 0, 2, "●", bgcolor=color.new(color.yellow, 0), text_color=color.black, text_size=size.small)
+    table.cell(legend, 1, 2, "Reset (09:30)",          text_size=size.small)
+
+    table.cell(legend, 0, 3, "●", bgcolor=color.new(color.green,  0), text_color=color.white, text_size=size.small)
+    table.cell(legend, 1, 3, "Impulse Up",             text_size=size.small)
+
+    table.cell(legend, 0, 4, "●", bgcolor=color.new(color.red,    0), text_color=color.white, text_size=size.small)
+    table.cell(legend, 1, 4, "Impulse Down",           text_size=size.small)
+
+    table.cell(legend, 0, 5, "●", bgcolor=color.new(color.fuchsia, 0), text_color=color.white, text_size=size.small)
+    table.cell(legend, 1, 5, "Anchor (Reversion)",     text_size=size.small)
+
+    table.cell(legend, 0, 6, "●", bgcolor=color.new(color.purple, 0), text_color=color.white, text_size=size.small)
+    table.cell(legend, 1, 6, "Extended Anchor",        text_size=size.small)
 
 if bar_index % 20 == 0
     avg_revert = revert_count > 0 ? revert_bars_sum / revert_count : 0
-    avg_loiter = revert_count > 0 ? loiter_bars_sum / revert_count : 0
 
     table.cell(stats, 0, 0, "Metric",       bgcolor=color.gray, text_color=color.white)
     table.cell(stats, 1, 0, "Value",        bgcolor=color.gray, text_color=color.white)
@@ -156,6 +239,3 @@ if bar_index % 20 == 0
 
     table.cell(stats, 0, 3, "Avg Bars→Revert")
     table.cell(stats, 1, 3, str.tostring(math.round(avg_revert)))
-
-    table.cell(stats, 0, 4, "Avg Loiter Bars")
-    table.cell(stats, 1, 4, str.tostring(math.round(avg_loiter)))
