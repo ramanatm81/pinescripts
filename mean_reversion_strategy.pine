@@ -52,6 +52,8 @@ var float impulsePrice = na
 var float prevAnchPrice  = na
 var int   prevAnchBi     = na
 var bool  reversionFired = false
+var label liveLabel      = na
+var int   impulseTime    = na  // Unix ms timestamp when last impulse fired
 
 //=============================
 // Session reset
@@ -65,6 +67,7 @@ if sessionReset
     prevAnchPrice   := open
     prevAnchBi      := bar_index
     reversionFired  := false
+    impulseTime     := na
     if showMarkers
         label.new(bar_index, open, text="", style=label.style_circle, size=size.small, color=col)
 
@@ -90,6 +93,7 @@ if not na(anchor) and not inSkipWindow and not sessionReset
             inImpulse      := true
             impulseDist    := upDist
             impulsePrice   := high
+            impulseTime    := time
             reversionFired := false
             if showMarkers
                 label.new(bar_index, high, text="", style=label.style_circle, size=size.small,
@@ -99,6 +103,7 @@ if not na(anchor) and not inSkipWindow and not sessionReset
             inImpulse      := true
             impulseDist    := low - anchor
             impulsePrice   := low
+            impulseTime    := time
             reversionFired := false
             if showMarkers
                 label.new(bar_index, low, text="", style=label.style_circle, size=size.small,
@@ -113,13 +118,21 @@ if not na(anchor) and not inSkipWindow and not sessionReset
                    : low  <= impulsePrice - activeThreshold
 
         if extended
+            extTimeMins = not na(impulseTime) ? math.round((time - impulseTime) / 60000) : 0
+            extHrPart   = math.floor(extTimeMins / 60)
+            extMnPart   = extTimeMins - extHrPart * 60
+            extTimeStr  = not na(impulseTime)
+                           ? (extTimeMins >= 60
+                              ? str.tostring(extHrPart, "#") + "h " + str.tostring(extMnPart, "#") + "m"
+                              : str.tostring(extTimeMins, "#") + "m")
+                           : ""
             if showLines
                 line.new(prevAnchBi, prevAnchPrice, bar_index, close, width=2, color=color.purple)
             if showMarkers
                 label.new(bar_index, close, text="", style=label.style_circle, size=size.small,
                           color=color.new(color.purple, 0))
                 label.new(bar_index, close,
-                          text  = "EXT\n" + str.tostring(close, "#.##"),
+                          text  = "EXT\n" + str.tostring(close, "#.##") + (not na(impulseTime) ? "\n" + extTimeStr : ""),
                           style = impulseDist > 0 ? label.style_label_down : label.style_label_up,
                           size  = size.small,
                           color = color.new(color.purple, 0),
@@ -141,6 +154,7 @@ if not na(anchor) and not inSkipWindow and not sessionReset
             inImpulse      := false
             impulseDist    := na
             impulsePrice   := na
+            impulseTime    := na
             reversionFired := false
 
         else
@@ -149,11 +163,25 @@ if not na(anchor) and not inSkipWindow and not sessionReset
             //--------------------------------------------------
             reverted = impulseDist > 0 ? low <= anchor : high >= anchor
             if reverted and not reversionFired
+                revTimeMins = not na(impulseTime) ? math.round((time - impulseTime) / 60000) : 0
+                revHrPart   = math.floor(revTimeMins / 60)
+                revMnPart   = revTimeMins - revHrPart * 60
+                revTimeStr  = not na(impulseTime)
+                               ? (revTimeMins >= 60
+                                  ? str.tostring(revHrPart, "#") + "h " + str.tostring(revMnPart, "#") + "m"
+                                  : str.tostring(revTimeMins, "#") + "m")
+                               : ""
                 if showLines
                     line.new(prevAnchBi, prevAnchPrice, bar_index, close, width=2, color=color.fuchsia)
                 if showMarkers
                     label.new(bar_index, close, text="", style=label.style_circle, size=size.small,
                               color=color.new(color.fuchsia, 0))
+                    label.new(bar_index, close,
+                              text      = revTimeStr,
+                              style     = impulseDist > 0 ? label.style_label_down : label.style_label_up,
+                              size      = size.small,
+                              color     = color.new(color.fuchsia, 60),
+                              textcolor = color.white)
                 prevAnchPrice  := close
                 prevAnchBi     := bar_index
                 reversionFired := true
@@ -169,6 +197,7 @@ if not na(anchor) and not inSkipWindow and not sessionReset
                     inImpulse      := true
                     impulseDist    := low - anchor    // negative
                     impulsePrice   := low
+                    impulseTime    := time
                     reversionFired := false
                     if showMarkers
                         label.new(bar_index, low, text="", style=label.style_circle, size=size.small,
@@ -178,10 +207,45 @@ if not na(anchor) and not inSkipWindow and not sessionReset
                     inImpulse      := true
                     impulseDist    := high - anchor   // positive
                     impulsePrice   := high
+                    impulseTime    := time
                     reversionFired := false
                     if showMarkers
                         label.new(bar_index, high, text="", style=label.style_circle, size=size.small,
                                   color=color.new(color.green, 0))
+
+//=============================
+// Live anchor distance label (current bar)
+//=============================
+if barstate.islast and not na(anchor)
+    dist      = close - anchor
+    absDist   = math.abs(dist)
+    remaining = activeThreshold - absDist
+    dirStr    = dist >= 0 ? "▲" : "▼"
+    line1     = "Anchor " + str.tostring(anchor, "#.##") + "  |  " + dirStr + " " + str.tostring(math.round(absDist * 10) / 10, "#.#") + " pts"
+    line2     = inImpulse
+                 ? "Impulse active " + (impulseDist > 0 ? "↑" : "↓")
+                 : (remaining > 0
+                    ? str.tostring(math.round(remaining * 10) / 10, "#.#") + " pts to impulse"
+                    : "Threshold reached")
+    impDistStr = not na(impulsePrice)
+                  ? "\nFrom impulse pt " + str.tostring(impulsePrice, "#.##") + "  |  " + (close >= impulsePrice ? "▲" : "▼") + " " + str.tostring(math.round(math.abs(close - impulsePrice) * 10) / 10, "#.#") + " pts"
+                  : ""
+    liveMins   = not na(impulseTime) ? math.round((time - impulseTime) / 60000) : 0
+    liveHrPart = math.floor(liveMins / 60)
+    liveMnPart = liveMins - liveHrPart * 60
+    liveTimeStr = not na(impulseTime)
+                   ? "\n" + (liveMins >= 60
+                      ? str.tostring(liveHrPart, "#") + "h " + str.tostring(liveMnPart, "#") + "m since impulse"
+                      : str.tostring(liveMins, "#") + "m since impulse")
+                   : ""
+    labelTxt  = line1 + "\n" + line2 + impDistStr + liveTimeStr
+    if na(liveLabel)
+        liveLabel := label.new(bar_index, close, text=labelTxt,
+                               style=label.style_label_left, size=size.small,
+                               color=color.new(color.gray, 50), textcolor=color.white)
+    else
+        label.set_xy(liveLabel, bar_index, close)
+        label.set_text(liveLabel, labelTxt)
 
 //=============================
 // Legend
