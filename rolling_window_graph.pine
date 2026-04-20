@@ -1,0 +1,175 @@
+//@version=6
+indicator("Rolling Window Graph", overlay=false)
+
+//=============================
+// Inputs
+//=============================
+winSize   = input.int(5,     "Window Size (bars)", minval=2, maxval=20)
+showTable = input.bool(true, "Show Mini Chart Table")
+int ROWS  = 14   // price level resolution in table
+
+//=============================
+// Build rolling window arrays dynamically
+// index 0 = oldest bar, index winSize-1 = current bar
+//=============================
+arrC = array.new_float(winSize)
+arrH = array.new_float(winSize)
+arrL = array.new_float(winSize)
+arrO = array.new_float(winSize)
+
+for i = 0 to winSize - 1
+    offset = winSize - 1 - i
+    array.set(arrC, i, close[offset])
+    array.set(arrH, i, high[offset])
+    array.set(arrL, i, low[offset])
+    array.set(arrO, i, open[offset])
+
+winHigh  = array.max(arrH)
+winLow   = array.min(arrL)
+winRange = winHigh - winLow
+
+//=============================
+// Helper: price → table row
+// row 0 = top (highest price) | row ROWS-1 = bottom (lowest price)
+//=============================
+priceToRow(p) =>
+    winRange > 0 ? ROWS - 1 - math.round((p - winLow) / winRange * (ROWS - 1)) : ROWS / 2
+
+//=============================
+// Indicator panel: net move from window start to current bar
+//=============================
+delta = close - close[winSize - 1]
+
+plot(delta, "Net Move",
+     style     = plot.style_histogram,
+     color     = delta >= 0 ? color.new(color.teal, 20) : color.new(color.red, 20),
+     linewidth = 2)
+
+plot(delta, "Net Move Line",
+     color     = delta >= 0 ? color.teal : color.red,
+     linewidth = 1)
+
+hline(0, "Zero", color=color.gray, linestyle=hline.style_dashed)
+
+//=============================
+// Rolling window stats
+//=============================
+// Per-bar ranges (high - low) and their peak/avg
+peakHighRange = 0.0
+peakLowRange  = 1e10
+totalRange    = 0.0
+for i = 0 to winSize - 1
+    barRange      = array.get(arrH, i) - array.get(arrL, i)
+    peakHighRange := math.max(peakHighRange, barRange)
+    peakLowRange  := math.min(peakLowRange,  barRange)
+    totalRange    += barRange
+avgRange = totalRange / winSize
+
+//=============================
+// Table: mini candlestick chart of the rolling window
+//
+// Layout
+//   col 0            → y-axis price labels
+//   col 1–winSize    → one column per candle (oldest … current)
+//   col winSize+1    → right spacer / x-axis corner label
+//   row 0            → title row
+//   row 1–ROWS       → chart body
+//   row ROWS+1       → x-axis bar-offset labels
+//=============================
+// Stats table is always shown (3 rows: peak high, peak low, avg range)
+var table stats = table.new(
+     position.bottom_right,
+     2, 3,
+     border_width = 1,
+     border_color = color.new(color.gray, 70),
+     bgcolor      = color.new(color.black, 88))
+
+// Mini chart table — created regardless, cells only filled when showTable=true
+var table g = table.new(
+     position.bottom_left,
+     winSize + 2, ROWS + 2,
+     border_width = 1,
+     border_color = color.new(color.gray, 70),
+     bgcolor      = color.new(color.black, 88))
+
+if barstate.islast
+
+    // ── Stats table ────────────────────────────────────────────────
+    table.cell(stats, 0, 0, "Peak Range High",
+               text_size=size.tiny, text_color=color.new(color.silver, 20))
+    table.cell(stats, 1, 0, str.tostring(math.round(peakHighRange * 10) / 10, "#.0") + " pts",
+               text_size=size.tiny, text_color=color.lime)
+
+    table.cell(stats, 0, 1, "Peak Range Low",
+               text_size=size.tiny, text_color=color.new(color.silver, 20))
+    table.cell(stats, 1, 1, str.tostring(math.round(peakLowRange * 10) / 10, "#.0") + " pts",
+               text_size=size.tiny, text_color=color.red)
+
+    table.cell(stats, 0, 2, "Avg Bar Range",
+               text_size=size.tiny, text_color=color.new(color.silver, 20))
+    table.cell(stats, 1, 2, str.tostring(math.round(avgRange * 10) / 10, "#.0") + " pts",
+               text_size=size.tiny, text_color=color.yellow)
+
+    // ── Mini chart table (optional) ────────────────────────────────
+    if showTable
+
+        // Title
+        table.cell(g, 0, 0, str.tostring(winSize) + "-Candle Window",
+                   text_size=size.tiny, text_color=color.silver)
+
+        // Net move summary
+        moveStr = (delta >= 0 ? "▲ +" : "▼ ") + str.tostring(math.round(delta * 10) / 10, "#.0") + " pts"
+        table.cell(g, 1, 0, moveStr,
+                   text_size=size.tiny, text_color=delta >= 0 ? color.teal : color.red)
+
+        // Y-axis: price labels
+        for r = 0 to ROWS - 1
+            lvl = winHigh - r * winRange / (ROWS - 1)
+            table.cell(g, 0, r + 1,
+                       str.tostring(lvl, "#.0"),
+                       text_size   = size.tiny,
+                       text_color  = color.new(color.silver, 20),
+                       text_halign = text.align_right,
+                       width       = 6)
+
+        // Candle columns
+        for col = 0 to winSize - 1
+            cl = array.get(arrC, col)
+            hi = array.get(arrH, col)
+            lo = array.get(arrL, col)
+            op = array.get(arrO, col)
+
+            bull    = cl >= op
+            bodyTop = bull ? cl : op
+            bodyBot = bull ? op : cl
+
+            hiRow = priceToRow(hi)
+            loRow = priceToRow(lo)
+            btRow = priceToRow(bodyTop)
+            bbRow = priceToRow(bodyBot)
+
+            isCurrent = col == winSize - 1
+
+            // X-axis label: bar offset from current (e.g. -4 … 0)
+            xLbl = str.tostring(col - (winSize - 1))
+            table.cell(g, col + 1, ROWS + 1, xLbl,
+                       text_size=size.tiny, text_color=color.gray, width=3)
+
+            // Fill each price-level cell
+            for row = 0 to ROWS - 1
+                inBody = row >= btRow and row <= bbRow
+                inWick = row >= hiRow and row <= loRow
+
+                bg = inBody
+                      ? (bull
+                          ? (isCurrent ? color.new(color.lime, 5)  : color.new(color.lime, 30))
+                          : (isCurrent ? color.new(color.red,  5)  : color.new(color.red,  30)))
+                      : inWick
+                          ? (isCurrent ? color.new(color.gray, 35) : color.new(color.gray, 60))
+                      : color.new(color.black, 92)
+
+                table.cell(g, col + 1, row + 1, "", bgcolor=bg, width=3, height=1)
+
+        // X-axis corner label
+        table.cell(g, winSize + 1, ROWS + 1, "→ bars",
+                   text_size=size.tiny, text_color=color.gray)

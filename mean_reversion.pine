@@ -8,29 +8,36 @@ thresholdPtsETH = input.float(50,     "Impulse Threshold - ETH (points)")
 thresholdPtsRTH = input.float(30,     "Impulse Threshold - RTH (points)")
 ethResetStr     = input.string("1700", "ETH Reset Time (HHMM exchange time)")
 mktOpenStr      = input.string("0930", "Market Open Reset Time (HHMM exchange time)")
+skipStartStr    = input.string("0000", "Skip Window Start (HHMM, 0000=off)")
 showMarkers     = input.bool(true,    "Show Markers")
 showLines       = input.bool(true,    "Connect Anchors")
 showLevels      = input.bool(false,   "Show Level Labels")
+loiterMins      = input.int(90,       "Loiter Reset (min, 0=off)", minval=0)
+fastImpulseMins = input.int(10,       "Directional Threshold (min) — impulses faster than this", minval=1)
+slowImpulseMins = input.int(30,       "Reversal Threshold (min) — impulses slower than this",    minval=1)
 
 //=============================
 // Time helpers
 //=============================
-ethH = math.round(str.tonumber(str.substring(ethResetStr, 0, 2)))
-ethM = math.round(str.tonumber(str.substring(ethResetStr, 2, 4)))
-moH  = math.round(str.tonumber(str.substring(mktOpenStr,  0, 2)))
-moM  = math.round(str.tonumber(str.substring(mktOpenStr,  2, 4)))
+ethH  = math.round(str.tonumber(str.substring(ethResetStr,  0, 2)))
+ethM  = math.round(str.tonumber(str.substring(ethResetStr,  2, 4)))
+moH   = math.round(str.tonumber(str.substring(mktOpenStr,   0, 2)))
+moM   = math.round(str.tonumber(str.substring(mktOpenStr,   2, 4)))
+skipH = math.round(str.tonumber(str.substring(skipStartStr, 0, 2)))
+skipM = math.round(str.tonumber(str.substring(skipStartStr, 2, 4)))
 
 curMins  = hour(time) * 60 + minute(time)
 prevMins = hour(time[1]) * 60 + minute(time[1])
-ethMins  = ethH * 60 + ethM
-moMins   = moH  * 60 + moM
+ethMins  = ethH  * 60 + ethM
+moMins   = moH   * 60 + moM
+skipMins = skipH * 60 + skipM
 
 crossedETH   = curMins == ethMins and prevMins != ethMins
 crossedMO    = curMins == moMins  and prevMins != moMins
 sessionReset = crossedETH or crossedMO
 
-// Skip pre-market noise: 08:30 until market open
-inSkipWindow = curMins >= 510 and curMins < moMins  // 510 = 08:30
+// Skip window: configurable start until market open (set to 0000 to disable)
+inSkipWindow = skipMins > 0 and curMins >= skipMins and curMins < moMins
 
 // RTH: market open → ETH reset; everything else uses ETH threshold
 inRTH           = curMins >= moMins and curMins < ethMins
@@ -52,6 +59,18 @@ var int   extCount       = 0   // extended anchors
 var int   normCount      = 0   // resets + reversions
 var label liveLabel      = na
 var int   impulseTime    = na  // Unix ms timestamp when last impulse fired
+var int   anchorSetTime  = na  // Unix ms timestamp when anchor was last placed
+
+// Alert flags — non-var, reset to false every bar, set true when event fires
+bool alertImpulseUp   = false
+bool alertImpulseDown = false
+bool alertExtension   = false
+bool alertReversion   = false
+bool alertLoiter      = false
+
+// Impulse cadence tracking
+var int   prevImpulseTime = na  // timestamp of the impulse before the current one
+var int   lastGapMs       = na  // ms between last two impulses
 
 //=============================
 // Session reset — ETH (blue) or market open (yellow)
@@ -66,7 +85,10 @@ if sessionReset
     prevAnchBi      := bar_index
     reversionFired  := false
     impulseTime     := na
+    anchorSetTime   := time
     normCount       += 1
+    prevImpulseTime := na
+    lastGapMs       := na
     if showMarkers
         label.new(bar_index, open, text="", style=label.style_circle, size=size.small, color=col)
     if showLevels
@@ -84,6 +106,26 @@ if not na(anchor) and not inSkipWindow and not sessionReset
 
     if not inImpulse
         //--------------------------------------------------
+        // Loiter reset: anchor idle > loiterMins with no impulse
+        //--------------------------------------------------
+        loitered = loiterMins > 0 and not na(anchorSetTime) and
+                   (time - anchorSetTime) >= loiterMins * 60000
+        if loitered
+            alertLoiter := true
+            if showLines
+                line.new(prevAnchBi, prevAnchPrice, bar_index, close,
+                         width=1, color=color.orange, style=line.style_dashed)
+            if showMarkers
+                label.new(bar_index, close, text="", style=label.style_circle,
+                          size=size.small, color=color.new(color.orange, 0))
+            anchor          := close
+            anchorSetTime   := time
+            prevAnchPrice   := close
+            prevAnchBi      := bar_index
+            normCount       += 1
+            prevImpulseTime := time  // cadence: next impulse gap measured from loiter anchor
+
+        //--------------------------------------------------
         // Step 1: Detect impulse using high/low (intrabar breach counts)
         //--------------------------------------------------
         upDist   = high - anchor
@@ -92,40 +134,60 @@ if not na(anchor) and not inSkipWindow and not sessionReset
         isUp   = upDist   >= activeThreshold
         isDown = downDist >= activeThreshold
 
-        // If both breach (large-range bar), use close direction to decide
-        takeUp   = isUp   and (not isDown or close >= anchor)
+        // If both breach (large-range bar), take whichever side traveled further
+        takeUp   = isUp   and (not isDown or upDist >= downDist)
         takeDown = isDown and not takeUp
 
+        // Time since anchor was last set (for impulse label)
+        anchElapsedMins = not na(anchorSetTime) ? math.round((time - anchorSetTime) / 60000) : 0
+        anchElHr        = math.floor(anchElapsedMins / 60)
+        anchElMn        = anchElapsedMins - anchElHr * 60
+        anchElStr       = not na(anchorSetTime)
+                           ? (anchElapsedMins >= 60
+                              ? str.tostring(anchElHr, "#") + "h " + str.tostring(anchElMn, "#") + "m"
+                              : str.tostring(anchElapsedMins, "#") + "m")
+                           : ""
+
         if takeUp
+            alertImpulseUp := true
             inImpulse      := true
             impulseDist    := upDist          // positive
             impulsePrice   := high
             impulseTime    := time
             reversionFired := false
             if showMarkers
-                label.new(bar_index, high, text="", style=label.style_circle, size=size.small,
-                          color=color.new(color.green, 0))
+                label.new(bar_index, high,
+                          text      = anchElStr,
+                          style     = label.style_label_down,
+                          size      = size.small,
+                          color     = color.new(color.green, 0),
+                          textcolor = color.white)
             if showLevels
                 label.new(bar_index, high,
                           text      = str.tostring(high, "#.##"),
-                          style     = label.style_label_down,
+                          style     = label.style_label_up,
                           size      = size.small,
                           color     = color.new(color.green, 0),
                           textcolor = color.white)
 
         else if takeDown
+            alertImpulseDown := true
             inImpulse      := true
             impulseDist    := low - anchor    // negative
             impulsePrice   := low
             impulseTime    := time
             reversionFired := false
             if showMarkers
-                label.new(bar_index, low, text="", style=label.style_circle, size=size.small,
-                          color=color.new(color.red, 0))
+                label.new(bar_index, low,
+                          text      = anchElStr,
+                          style     = label.style_label_up,
+                          size      = size.small,
+                          color     = color.new(color.red, 0),
+                          textcolor = color.white)
             if showLevels
                 label.new(bar_index, low,
                           text      = str.tostring(low, "#.##"),
-                          style     = label.style_label_up,
+                          style     = label.style_label_down,
                           size      = size.small,
                           color     = color.new(color.red, 0),
                           textcolor = color.white)
@@ -139,6 +201,7 @@ if not na(anchor) and not inSkipWindow and not sessionReset
                    : low  <= impulsePrice - activeThreshold
 
         if extended
+            alertExtension := true
             extTimeMins = not na(impulseTime) ? math.round((time - impulseTime) / 60000) : 0
             extHrPart   = math.floor(extTimeMins / 60)
             extMnPart   = extTimeMins - extHrPart * 60
@@ -159,6 +222,7 @@ if not na(anchor) and not inSkipWindow and not sessionReset
                           color = color.new(color.purple, 0),
                           textcolor = color.white)
             anchor         := close
+            anchorSetTime  := time
             prevAnchPrice  := close
             prevAnchBi     := bar_index
             inImpulse      := false
@@ -174,6 +238,7 @@ if not na(anchor) and not inSkipWindow and not sessionReset
             //--------------------------------------------------
             reverted = impulseDist > 0 ? low <= anchor : high >= anchor
             if reverted and not reversionFired
+                alertReversion := true
                 revTimeMins = not na(impulseTime) ? math.round((time - impulseTime) / 60000) : 0
                 revHrPart   = math.floor(revTimeMins / 60)
                 revMnPart   = revTimeMins - revHrPart * 60
@@ -203,49 +268,141 @@ if not na(anchor) and not inSkipWindow and not sessionReset
                 // Marker only — do NOT reset inImpulse; extension can still fire
                 prevAnchPrice  := close
                 prevAnchBi     := bar_index
+                anchorSetTime  := time   // reversion creates a new anchor reference point
                 reversionFired := true
                 normCount      += 1
+                prevImpulseTime := time  // cadence: next impulse gap measured from here
 
             else if reversionFired
                 //--------------------------------------------------
-                // Step 2c: After reversion, detect impulse in the OPPOSITE direction
+                // Step 2c: After reversion, detect impulse in either direction
+                // Opposite direction: new impulse cycle
+                // Same direction: re-impulse — reset impulsePrice so extension
+                //                 is measured from the new breach point
                 //--------------------------------------------------
-                oppDown = impulseDist > 0 and anchor - low  >= activeThreshold
-                oppUp   = impulseDist < 0 and high - anchor >= activeThreshold
+                oppDown  = impulseDist > 0 and anchor - low  >= activeThreshold
+                oppUp    = impulseDist < 0 and high - anchor >= activeThreshold
+                sameUp   = impulseDist > 0 and high - anchor >= activeThreshold
+                sameDown = impulseDist < 0 and anchor - low  >= activeThreshold
+
+                // Time since reversion anchor (anchorSetTime updated on reversion)
+                reAnchMins = not na(anchorSetTime) ? math.round((time - anchorSetTime) / 60000) : 0
+                reAnchHr   = math.floor(reAnchMins / 60)
+                reAnchMn   = reAnchMins - reAnchHr * 60
+                reAnchStr  = not na(anchorSetTime)
+                              ? (reAnchMins >= 60
+                                 ? str.tostring(reAnchHr, "#") + "h " + str.tostring(reAnchMn, "#") + "m"
+                                 : str.tostring(reAnchMins, "#") + "m")
+                              : ""
 
                 if oppDown
+                    alertImpulseDown := true
                     inImpulse      := true
                     impulseDist    := low - anchor    // negative
                     impulsePrice   := low
                     impulseTime    := time
                     reversionFired := false
                     if showMarkers
-                        label.new(bar_index, low, text="", style=label.style_circle, size=size.small,
-                                  color=color.new(color.red, 0))
+                        label.new(bar_index, low,
+                                  text      = reAnchStr,
+                                  style     = label.style_label_up,
+                                  size      = size.small,
+                                  color     = color.new(color.red, 0),
+                                  textcolor = color.white)
                     if showLevels
                         label.new(bar_index, low,
                                   text      = str.tostring(low, "#.##"),
-                                  style     = label.style_label_up,
+                                  style     = label.style_label_down,
                                   size      = size.small,
                                   color     = color.new(color.red, 0),
                                   textcolor = color.white)
 
                 else if oppUp
+                    alertImpulseUp := true
                     inImpulse      := true
                     impulseDist    := high - anchor   // positive
                     impulsePrice   := high
                     impulseTime    := time
                     reversionFired := false
                     if showMarkers
-                        label.new(bar_index, high, text="", style=label.style_circle, size=size.small,
-                                  color=color.new(color.green, 0))
-                    if showLevels
                         label.new(bar_index, high,
-                                  text      = str.tostring(high, "#.##"),
+                                  text      = reAnchStr,
                                   style     = label.style_label_down,
                                   size      = size.small,
                                   color     = color.new(color.green, 0),
                                   textcolor = color.white)
+                    if showLevels
+                        label.new(bar_index, high,
+                                  text      = str.tostring(high, "#.##"),
+                                  style     = label.style_label_up,
+                                  size      = size.small,
+                                  color     = color.new(color.green, 0),
+                                  textcolor = color.white)
+
+                else if sameUp
+                    alertImpulseUp := true
+                    // inImpulse stays true; reset impulsePrice to the new breach point
+                    impulseDist    := high - anchor
+                    impulsePrice   := high
+                    impulseTime    := time
+                    reversionFired := false
+                    if showMarkers
+                        label.new(bar_index, high,
+                                  text      = reAnchStr,
+                                  style     = label.style_label_down,
+                                  size      = size.small,
+                                  color     = color.new(color.green, 0),
+                                  textcolor = color.white)
+                    if showLevels
+                        label.new(bar_index, high,
+                                  text      = str.tostring(high, "#.##"),
+                                  style     = label.style_label_up,
+                                  size      = size.small,
+                                  color     = color.new(color.green, 0),
+                                  textcolor = color.white)
+
+                else if sameDown
+                    alertImpulseDown := true
+                    impulseDist    := low - anchor
+                    impulsePrice   := low
+                    impulseTime    := time
+                    reversionFired := false
+                    if showMarkers
+                        label.new(bar_index, low,
+                                  text      = reAnchStr,
+                                  style     = label.style_label_up,
+                                  size      = size.small,
+                                  color     = color.new(color.red, 0),
+                                  textcolor = color.white)
+                    if showLevels
+                        label.new(bar_index, low,
+                                  text      = str.tostring(low, "#.##"),
+                                  style     = label.style_label_down,
+                                  size      = size.small,
+                                  color     = color.new(color.red, 0),
+                                  textcolor = color.white)
+
+//=============================
+// Impulse cadence — update gap on every new impulse
+//=============================
+if alertImpulseUp or alertImpulseDown or alertExtension
+    if not na(prevImpulseTime)
+        lastGapMs := time - prevImpulseTime
+    prevImpulseTime := time
+
+//=============================
+// Alerts
+//=============================
+anchorStr = not na(anchor) ? " | Anchor: " + str.tostring(anchor, "#.##") : ""
+
+alertcondition(crossedETH,      title="Session Reset (ETH)",       message="Mean Reversion: ETH session reset{{anchorStr}}")
+alertcondition(crossedMO,       title="Session Reset (Mkt Open)",  message="Mean Reversion: Market open session reset{{anchorStr}}")
+alertcondition(alertLoiter,     title="Loiter Reset",               message="Mean Reversion: Anchor loiter reset — new anchor: {{close}}")
+alertcondition(alertImpulseUp,  title="Impulse Up",                 message="Mean Reversion: Impulse UP fired | Price: {{high}} | Anchor: {{close}}")
+alertcondition(alertImpulseDown,title="Impulse Down",               message="Mean Reversion: Impulse DOWN fired | Price: {{low}} | Anchor: {{close}}")
+alertcondition(alertExtension,  title="Extension",                  message="Mean Reversion: EXTENSION — impulse continued | Price: {{close}}")
+alertcondition(alertReversion,  title="Reversion",                  message="Mean Reversion: REVERSION to anchor | Price: {{close}}")
+alertcondition(alertImpulseUp   or alertImpulseDown, title="Any Impulse",  message="Mean Reversion: Impulse fired | Price: {{close}}")
 
 //=============================
 // Live anchor distance label (current bar)
@@ -282,6 +439,29 @@ if barstate.islast and not na(anchor)
         label.set_text(liveLabel, labelTxt)
 
 //=============================
+// Impulse cadence status (bottom left)
+// Status = live elapsed since last event (updates every bar)
+// Last gap shown as context only
+//=============================
+var table cadence = table.new(position.bottom_left, 1, 2, border_width=2, frame_width=2, frame_color=color.new(color.white, 60))
+if barstate.islast and not na(prevImpulseTime)
+    elapsedMs  = time - prevImpulseTime
+    elapsedMin = math.round(elapsedMs / 60000)
+    elHr       = math.floor(elapsedMin / 60)
+    elMn       = elapsedMin - elHr * 60
+    elStr      = elapsedMin >= 60
+                  ? str.tostring(elHr, "#") + "h " + str.tostring(elMn, "#") + "m since last event"
+                  : str.tostring(elapsedMin, "#") + "m since last event"
+
+    isDirectional = elapsedMin < fastImpulseMins
+    isPotReversal = elapsedMin > slowImpulseMins
+    statusStr = isDirectional ? "⚡ DIRECTIONAL" : isPotReversal ? "↺ POTENTIAL REVERSAL" : "● TRENDING"
+    statusBg  = isDirectional ? color.new(color.red, 0) : isPotReversal ? color.new(color.orange, 10) : color.new(color.gray, 40)
+
+    table.cell(cadence, 0, 0, elStr,     text_size=size.small, text_color=color.white, bgcolor=color.new(color.black, 40))
+    table.cell(cadence, 0, 1, statusStr, text_size=size.large,  text_color=color.white, bgcolor=statusBg)
+
+//=============================
 // Stats
 //=============================
 var table stats = table.new(position.top_right, 2, 3, border_width=1)
@@ -298,7 +478,7 @@ if barstate.islast
 //=============================
 // Legend
 //=============================
-var table legend = table.new(position.bottom_right, 2, 6, border_width=1)
+var table legend = table.new(position.bottom_right, 2, 7, border_width=1)
 if barstate.islast
     table.cell(legend, 0, 0, "●", bgcolor=color.new(color.blue,    0), text_color=color.white, text_size=size.small)
     table.cell(legend, 1, 0, "Reset (ETH)",         text_size=size.small)
@@ -312,3 +492,5 @@ if barstate.islast
     table.cell(legend, 1, 4, "Anchor (Reversion)",  text_size=size.small)
     table.cell(legend, 0, 5, "●", bgcolor=color.new(color.purple,  0), text_color=color.white, text_size=size.small)
     table.cell(legend, 1, 5, "Extended Anchor",      text_size=size.small)
+    table.cell(legend, 0, 6, "●", bgcolor=color.new(color.orange,  0), text_color=color.white, text_size=size.small)
+    table.cell(legend, 1, 6, "Loiter Reset",         text_size=size.small)

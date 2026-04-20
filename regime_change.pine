@@ -1,0 +1,75 @@
+//@version=6
+indicator("Regime Change", overlay=true)
+
+//=============================
+// Inputs
+//=============================
+showBg   = input.bool(true,  "Color Chart Background")
+minBody  = input.float(20.0, "Min Candle Body (points)", minval=0.0, step=1.0)
+
+//=============================
+// Candle direction
+// Only counts if body (open-close range) exceeds minBody
+//=============================
+body    = math.abs(close - open)
+isGreen = close > open and body >= minBody
+isRed   = close < open and body >= minBody
+// Small-body / doji candles do not affect the streak
+
+//=============================
+// Streak tracking
+// Positive = consecutive green run, negative = consecutive red run
+//=============================
+var int streak = 0
+
+if isGreen
+    streak := streak > 0 ? streak + 1 : 1
+else if isRed
+    streak := streak < 0 ? streak - 1 : -1
+// Doji: leave streak unchanged
+
+//=============================
+// Regime
+// 1 = Bullish, -1 = Bearish, 0 = Neutral (not yet established)
+// Only flips when 2 consecutive candles in opposite direction appear
+//=============================
+var int regime = 0
+
+if streak >= 2
+    regime := 1
+else if streak <= -2
+    regime := -1
+
+//=============================
+// Alert conditions
+// Detect on bar close (confirmed candle only)
+//=============================
+regimeFlipBull = regime ==  1 and regime[1] != 1   // just turned bullish
+regimeFlipBear = regime == -1 and regime[1] != -1  // just turned bearish
+qualGreenCandle = isGreen                           // any qualifying green candle
+qualRedCandle   = isRed                             // any qualifying red candle
+
+alertcondition(regimeFlipBull,  title="Regime → Bullish",         message="Regime Change: BULLISH confirmed — 2 consecutive green candles (body ≥ threshold)")
+alertcondition(regimeFlipBear,  title="Regime → Bearish",         message="Regime Change: BEARISH confirmed — 2 consecutive red candles (body ≥ threshold)")
+alertcondition(qualGreenCandle, title="Qualifying Green Candle",   message="Qualifying green candle — body ≥ threshold")
+alertcondition(qualRedCandle,   title="Qualifying Red Candle",     message="Qualifying red candle — body ≥ threshold")
+
+//=============================
+// Background tint
+//=============================
+bgBull = color.new(color.green, 92)
+bgBear = color.new(color.red,   92)
+bgcolor(showBg and regime ==  1 ? bgBull : na, title="Bullish Background")
+bgcolor(showBg and regime == -1 ? bgBear : na, title="Bearish Background")
+
+//=============================
+// Status table
+//=============================
+var table status = table.new(position.bottom_right, 1, 2, border_width=2, frame_width=2, frame_color=color.new(color.white, 50))
+
+if barstate.islast
+    regimeStr = regime ==  1 ? "▲  BULLISH" : regime == -1 ? "▼  BEARISH" : "—  NEUTRAL"
+    cellBg    = regime ==  1 ? color.new(color.green, 20) : regime == -1 ? color.new(color.red, 20) : color.new(color.gray, 40)
+
+    table.cell(status, 0, 0, "REGIME",   text_size=size.small, text_color=color.white, bgcolor=color.new(color.black, 30))
+    table.cell(status, 0, 1, regimeStr,  text_size=size.large, text_color=color.white, bgcolor=cellBg)
