@@ -69,8 +69,13 @@ bool alertReversion   = false
 bool alertLoiter      = false
 
 // Impulse cadence tracking
-var int   prevImpulseTime = na  // timestamp of the impulse before the current one
+var int   prevImpulseTime = na  // timestamp of last event (for elapsed display)
 var int   lastGapMs       = na  // ms between last two impulses
+
+// Reversal detection: two same-direction impulses within slowImpulseMins
+var int   lastImpDir      = 0   // direction of last impulse: 1=up, -1=down
+var int   lastImpTime     = na  // timestamp of last impulse
+var bool  reversalActive  = false
 
 //=============================
 // Session reset — ETH (blue) or market open (yellow)
@@ -89,6 +94,9 @@ if sessionReset
     normCount       += 1
     prevImpulseTime := na
     lastGapMs       := na
+    lastImpDir      := 0
+    lastImpTime     := na
+    reversalActive  := false
     if showMarkers
         label.new(bar_index, open, text="", style=label.style_circle, size=size.small, color=col)
     if showLevels
@@ -383,12 +391,24 @@ if not na(anchor) and not inSkipWindow and not sessionReset
                                   textcolor = color.white)
 
 //=============================
-// Impulse cadence — update gap on every new impulse
+// Impulse cadence — update on every new impulse/extension/reversion
 //=============================
 if alertImpulseUp or alertImpulseDown or alertExtension
     if not na(prevImpulseTime)
         lastGapMs := time - prevImpulseTime
     prevImpulseTime := time
+
+// Reversal detection — only on directional impulses (not extensions)
+// Two impulses in the same direction within slowImpulseMins = reversal
+if alertImpulseUp or alertImpulseDown
+    newDir = alertImpulseUp ? 1 : -1
+    if not na(lastImpTime) and newDir == lastImpDir
+        gapToLast = time - lastImpTime
+        reversalActive := gapToLast <= slowImpulseMins * 60000
+    else
+        reversalActive := false  // opposite direction clears reversal
+    lastImpDir  := newDir
+    lastImpTime := time
 
 //=============================
 // Alerts
@@ -454,9 +474,13 @@ if barstate.islast and not na(prevImpulseTime)
                   : str.tostring(elapsedMin, "#") + "m since last event"
 
     isDirectional = elapsedMin < fastImpulseMins
-    isPotReversal = elapsedMin > slowImpulseMins
-    statusStr = isDirectional ? "⚡ DIRECTIONAL" : isPotReversal ? "↺ POTENTIAL REVERSAL" : "● TRENDING"
-    statusBg  = isDirectional ? color.new(color.red, 0) : isPotReversal ? color.new(color.orange, 10) : color.new(color.gray, 40)
+    isRangeBound  = elapsedMin > slowImpulseMins and not reversalActive
+    statusStr = reversalActive   ? "⟳ REVERSAL"     :
+                isDirectional    ? "⚡ DIRECTIONAL"  :
+                isRangeBound     ? "◈ RANGE BOUND"   : "● TRENDING"
+    statusBg  = reversalActive   ? color.new(color.yellow, 10) :
+                isDirectional    ? color.new(color.red,    0)  :
+                isRangeBound     ? color.new(color.blue,   20) : color.new(color.gray, 40)
 
     table.cell(cadence, 0, 0, elStr,     text_size=size.small, text_color=color.white, bgcolor=color.new(color.black, 40))
     table.cell(cadence, 0, 1, statusStr, text_size=size.large,  text_color=color.white, bgcolor=statusBg)
