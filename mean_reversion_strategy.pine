@@ -1,5 +1,5 @@
 //@version=6
-strategy("Mean Reversion Ladder – Strategy (MNQ)", overlay=true,
+strategy("Mean Reversion — Extension Fade", overlay=true,
          default_qty_type=strategy.fixed, default_qty_value=1,
          max_lines_count=500, max_labels_count=500,
          commission_type=strategy.commission.cash_per_contract, commission_value=0.62,
@@ -12,32 +12,33 @@ thresholdPtsETH = input.float(50,     "Impulse Threshold - ETH (points)")
 thresholdPtsRTH = input.float(30,     "Impulse Threshold - RTH (points)")
 ethResetStr     = input.string("1700", "ETH Reset Time (HHMM exchange time)")
 mktOpenStr      = input.string("0930", "Market Open Reset Time (HHMM exchange time)")
-slPts           = input.float(20,     "Stop Loss (points)")
-tpPts           = input.float(40,     "Take Profit (points)")
+skipStartStr    = input.string("0000", "Skip Window Start (HHMM, 0000=off)")
 showMarkers     = input.bool(true,    "Show Markers")
 showLines       = input.bool(true,    "Connect Anchors")
+loiterMins      = input.int(90,       "Loiter Reset (min, 0=off)", minval=0)
+contCandles     = input.int(10,       "Continuation — candles after extension with no half-reversal", minval=1)
 
 //=============================
 // Time helpers
 //=============================
-ethH = math.round(str.tonumber(str.substring(ethResetStr, 0, 2)))
-ethM = math.round(str.tonumber(str.substring(ethResetStr, 2, 4)))
-moH  = math.round(str.tonumber(str.substring(mktOpenStr,  0, 2)))
-moM  = math.round(str.tonumber(str.substring(mktOpenStr,  2, 4)))
+ethH  = math.round(str.tonumber(str.substring(ethResetStr,  0, 2)))
+ethM  = math.round(str.tonumber(str.substring(ethResetStr,  2, 4)))
+moH   = math.round(str.tonumber(str.substring(mktOpenStr,   0, 2)))
+moM   = math.round(str.tonumber(str.substring(mktOpenStr,   2, 4)))
+skipH = math.round(str.tonumber(str.substring(skipStartStr, 0, 2)))
+skipM = math.round(str.tonumber(str.substring(skipStartStr, 2, 4)))
 
 curMins  = hour(time) * 60 + minute(time)
 prevMins = hour(time[1]) * 60 + minute(time[1])
-ethMins  = ethH * 60 + ethM
-moMins   = moH  * 60 + moM
+ethMins  = ethH  * 60 + ethM
+moMins   = moH   * 60 + moM
+skipMins = skipH * 60 + skipM
 
 crossedETH   = curMins == ethMins and prevMins != ethMins
 crossedMO    = curMins == moMins  and prevMins != moMins
 sessionReset = crossedETH or crossedMO
 
-// Skip pre-market noise: 08:30 until market open
-inSkipWindow = curMins >= 510 and curMins < moMins  // 510 = 08:30
-
-// RTH: market open → ETH reset; everything else uses ETH threshold
+inSkipWindow    = skipMins > 0 and curMins >= skipMins and curMins < moMins
 inRTH           = curMins >= moMins and curMins < ethMins
 activeThreshold = inRTH ? thresholdPtsRTH : thresholdPtsETH
 
@@ -48,18 +49,36 @@ var float anchor       = na
 var bool  inImpulse    = false
 var float impulseDist  = na
 var float impulsePrice = na
-
 var float prevAnchPrice  = na
 var int   prevAnchBi     = na
 var bool  reversionFired = false
+var int   impulseTime    = na
+var int   anchorSetTime  = na
 var label liveLabel      = na
-var int   impulseTime    = na  // Unix ms timestamp when last impulse fired
+
+// Continuation tracking
+var bool  trackCont = false
+var int   extBarIdx = na
+var float extPrice  = na
+var int   extDir    = 0
+var float extThresh = na
+
+// Trade state
+var int   tradeDir  = 0   // 1 = long (fading down ext), -1 = short (fading up ext)
+
+//=============================
+// Event flags (reset each bar)
+//=============================
+bool evImpulseUp   = false
+bool evImpulseDown = false
+bool evExtension   = false
+bool evCont        = false
 
 //=============================
 // Session reset
 //=============================
 if sessionReset
-    col           = crossedETH ? color.new(color.blue, 0) : color.new(color.yellow, 0)
+    col = crossedETH ? color.new(color.blue, 0) : color.new(color.yellow, 0)
     anchor          := open
     inImpulse       := false
     impulseDist     := na
@@ -68,87 +87,115 @@ if sessionReset
     prevAnchBi      := bar_index
     reversionFired  := false
     impulseTime     := na
+    anchorSetTime   := time
+    trackCont       := false
+    extBarIdx       := na
+    extPrice        := na
+    extDir          := 0
+    extThresh       := na
+    strategy.close_all(comment="Session Reset")
+    tradeDir        := 0
     if showMarkers
         label.new(bar_index, open, text="", style=label.style_circle, size=size.small, color=col)
 
 //=============================
-// Main logic
+// Main detection logic
 //=============================
 if not na(anchor) and not inSkipWindow and not sessionReset
 
     if not inImpulse
         //--------------------------------------------------
-        // Step 1: Detect impulse using high/low
+        // Loiter reset
+        //--------------------------------------------------
+        loitered = loiterMins > 0 and not na(anchorSetTime) and
+                   (time - anchorSetTime) >= loiterMins * 60000
+        if loitered
+            if showLines
+                line.new(prevAnchBi, prevAnchPrice, bar_index, close,
+                         width=1, color=color.orange, style=line.style_dashed)
+            if showMarkers
+                label.new(bar_index, close, text="", style=label.style_circle,
+                          size=size.small, color=color.new(color.orange, 0))
+            anchor        := close
+            anchorSetTime := time
+            prevAnchPrice := close
+            prevAnchBi    := bar_index
+
+        //--------------------------------------------------
+        // Step 1: Impulse detection
         //--------------------------------------------------
         upDist   = high - anchor
         downDist = anchor - low
-
-        isUp   = upDist   >= activeThreshold
-        isDown = downDist >= activeThreshold
-
-        takeUp   = isUp   and (not isDown or close >= anchor)
+        isUp     = upDist   >= activeThreshold
+        isDown   = downDist >= activeThreshold
+        takeUp   = isUp   and (not isDown or upDist >= downDist)
         takeDown = isDown and not takeUp
 
+        anchElMins = not na(anchorSetTime) ? math.round((time - anchorSetTime) / 60000) : 0
+        anchElStr  = anchElMins >= 60 ? str.tostring(math.floor(anchElMins/60),"#") + "h " + str.tostring(anchElMins - math.floor(anchElMins/60)*60,"#") + "m" : str.tostring(anchElMins,"#") + "m"
+
         if takeUp
+            evImpulseUp    := true
             inImpulse      := true
             impulseDist    := upDist
             impulsePrice   := high
             impulseTime    := time
             reversionFired := false
             if showMarkers
-                label.new(bar_index, high, text="", style=label.style_circle, size=size.small,
-                          color=color.new(color.green, 0))
+                label.new(bar_index, high, text=anchElStr, style=label.style_label_down,
+                          size=size.small, color=color.new(color.green,0), textcolor=color.white)
 
         else if takeDown
+            evImpulseDown  := true
             inImpulse      := true
             impulseDist    := low - anchor
             impulsePrice   := low
             impulseTime    := time
             reversionFired := false
             if showMarkers
-                label.new(bar_index, low, text="", style=label.style_circle, size=size.small,
-                          color=color.new(color.red, 0))
+                label.new(bar_index, low, text=anchElStr, style=label.style_label_up,
+                          size=size.small, color=color.new(color.red,0), textcolor=color.white)
 
     else
         //--------------------------------------------------
-        // Step 2a: Extension — entry signal (fade the extension)
+        // Step 2a: Extension
         //--------------------------------------------------
-        extended = impulseDist > 0
-                   ? high >= impulsePrice + activeThreshold
-                   : low  <= impulsePrice - activeThreshold
+        extended = impulseDist > 0 ? high >= impulsePrice + activeThreshold
+                                   : low  <= impulsePrice - activeThreshold
 
         if extended
-            extTimeMins = not na(impulseTime) ? math.round((time - impulseTime) / 60000) : 0
-            extHrPart   = math.floor(extTimeMins / 60)
-            extMnPart   = extTimeMins - extHrPart * 60
-            extTimeStr  = not na(impulseTime)
-                           ? (extTimeMins >= 60
-                              ? str.tostring(extHrPart, "#") + "h " + str.tostring(extMnPart, "#") + "m"
-                              : str.tostring(extTimeMins, "#") + "m")
-                           : ""
-            if showLines
-                line.new(prevAnchBi, prevAnchPrice, bar_index, close, width=2, color=color.purple)
-            if showMarkers
-                label.new(bar_index, close, text="", style=label.style_circle, size=size.small,
-                          color=color.new(color.purple, 0))
-                label.new(bar_index, close,
-                          text  = "EXT\n" + str.tostring(close, "#.##") + (not na(impulseTime) ? "\n" + extTimeStr : ""),
-                          style = impulseDist > 0 ? label.style_label_down : label.style_label_up,
-                          size  = size.small,
-                          color = color.new(color.purple, 0),
-                          textcolor = color.white)
+            extCandleBody      = math.abs(close - open)
+            strongContinuation = extCandleBody >= activeThreshold * 2 / 3
 
-            // Fade the extension: short if extended up, long if extended down
-            if impulseDist > 0
-                strategy.entry("Short", strategy.short, comment="EXT Short")
-                strategy.exit("Short TP/SL", from_entry="Short",
-                              profit=tpPts, loss=slPts)
+            if strongContinuation
+                evCont := true
+                if showMarkers
+                    label.new(bar_index, impulseDist > 0 ? high : low,
+                              text="CONT", style=impulseDist > 0 ? label.style_label_down : label.style_label_up,
+                              size=size.small, color=color.new(color.teal,0), textcolor=color.white)
             else
-                strategy.entry("Long", strategy.long, comment="EXT Long")
-                strategy.exit("Long TP/SL", from_entry="Long",
-                              profit=tpPts, loss=slPts)
+                evExtension := true
+                extTimeMins = not na(impulseTime) ? math.round((time - impulseTime) / 60000) : 0
+                extTimeStr  = extTimeMins >= 60 ? str.tostring(math.floor(extTimeMins/60),"#") + "h " + str.tostring(extTimeMins - math.floor(extTimeMins/60)*60,"#") + "m" : str.tostring(extTimeMins,"#") + "m"
+                if showLines
+                    line.new(prevAnchBi, prevAnchPrice, bar_index, close, width=2, color=color.purple)
+                if showMarkers
+                    label.new(bar_index, close, text="", style=label.style_circle,
+                              size=size.small, color=color.new(color.purple,0))
+                    label.new(bar_index, close,
+                              text  = "EXT\n" + str.tostring(close,"#.##") + (not na(impulseTime) ? "\n" + extTimeStr : ""),
+                              style = impulseDist > 0 ? label.style_label_down : label.style_label_up,
+                              size  = size.small, color=color.new(color.purple,0), textcolor=color.white)
+
+            // Start continuation watch
+            trackCont := true
+            extBarIdx := bar_index
+            extPrice  := close
+            extDir    := impulseDist > 0 ? 1 : -1
+            extThresh := activeThreshold
 
             anchor         := close
+            anchorSetTime  := time
             prevAnchPrice  := close
             prevAnchBi     := bar_index
             inImpulse      := false
@@ -159,62 +206,131 @@ if not na(anchor) and not inSkipWindow and not sessionReset
 
         else
             //--------------------------------------------------
-            // Step 2b: Reversion — marker only, cycle continues
+            // Step 2b: Reversion
             //--------------------------------------------------
             reverted = impulseDist > 0 ? low <= anchor : high >= anchor
             if reverted and not reversionFired
                 revTimeMins = not na(impulseTime) ? math.round((time - impulseTime) / 60000) : 0
-                revHrPart   = math.floor(revTimeMins / 60)
-                revMnPart   = revTimeMins - revHrPart * 60
-                revTimeStr  = not na(impulseTime)
-                               ? (revTimeMins >= 60
-                                  ? str.tostring(revHrPart, "#") + "h " + str.tostring(revMnPart, "#") + "m"
-                                  : str.tostring(revTimeMins, "#") + "m")
-                               : ""
+                revTimeStr  = revTimeMins >= 60 ? str.tostring(math.floor(revTimeMins/60),"#") + "h " + str.tostring(revTimeMins - math.floor(revTimeMins/60)*60,"#") + "m" : str.tostring(revTimeMins,"#") + "m"
                 if showLines
                     line.new(prevAnchBi, prevAnchPrice, bar_index, close, width=2, color=color.fuchsia)
                 if showMarkers
-                    label.new(bar_index, close, text="", style=label.style_circle, size=size.small,
-                              color=color.new(color.fuchsia, 0))
-                    label.new(bar_index, close,
-                              text      = revTimeStr,
-                              style     = impulseDist > 0 ? label.style_label_down : label.style_label_up,
-                              size      = size.small,
-                              color     = color.new(color.fuchsia, 60),
-                              textcolor = color.white)
+                    label.new(bar_index, close, text="", style=label.style_circle,
+                              size=size.small, color=color.new(color.fuchsia,0))
+                    label.new(bar_index, close, text=revTimeStr,
+                              style=impulseDist > 0 ? label.style_label_down : label.style_label_up,
+                              size=size.small, color=color.new(color.fuchsia,60), textcolor=color.white)
                 prevAnchPrice  := close
                 prevAnchBi     := bar_index
                 reversionFired := true
 
             else if reversionFired
                 //--------------------------------------------------
-                // Step 2c: After reversion, detect impulse in the OPPOSITE direction
+                // Step 2c: Post-reversion impulse in any direction
                 //--------------------------------------------------
-                oppDown = impulseDist > 0 and anchor - low  >= activeThreshold
-                oppUp   = impulseDist < 0 and high - anchor >= activeThreshold
+                oppDown  = impulseDist > 0 and anchor - low  >= activeThreshold
+                oppUp    = impulseDist < 0 and high - anchor >= activeThreshold
+                sameUp   = impulseDist > 0 and high - anchor >= activeThreshold
+                sameDown = impulseDist < 0 and anchor - low  >= activeThreshold
+
+                reAnchMins = not na(anchorSetTime) ? math.round((time - anchorSetTime) / 60000) : 0
+                reAnchStr  = reAnchMins >= 60 ? str.tostring(math.floor(reAnchMins/60),"#") + "h " + str.tostring(reAnchMins - math.floor(reAnchMins/60)*60,"#") + "m" : str.tostring(reAnchMins,"#") + "m"
 
                 if oppDown
+                    evImpulseDown  := true
                     inImpulse      := true
-                    impulseDist    := low - anchor    // negative
+                    impulseDist    := low - anchor
                     impulsePrice   := low
                     impulseTime    := time
                     reversionFired := false
                     if showMarkers
-                        label.new(bar_index, low, text="", style=label.style_circle, size=size.small,
-                                  color=color.new(color.red, 0))
+                        label.new(bar_index, low, text=reAnchStr, style=label.style_label_up,
+                                  size=size.small, color=color.new(color.red,0), textcolor=color.white)
 
                 else if oppUp
+                    evImpulseUp    := true
                     inImpulse      := true
-                    impulseDist    := high - anchor   // positive
+                    impulseDist    := high - anchor
                     impulsePrice   := high
                     impulseTime    := time
                     reversionFired := false
                     if showMarkers
-                        label.new(bar_index, high, text="", style=label.style_circle, size=size.small,
-                                  color=color.new(color.green, 0))
+                        label.new(bar_index, high, text=reAnchStr, style=label.style_label_down,
+                                  size=size.small, color=color.new(color.green,0), textcolor=color.white)
+
+                else if sameUp
+                    evImpulseUp    := true
+                    impulseDist    := high - anchor
+                    impulsePrice   := high
+                    impulseTime    := time
+                    reversionFired := false
+                    if showMarkers
+                        label.new(bar_index, high, text=reAnchStr, style=label.style_label_down,
+                                  size=size.small, color=color.new(color.green,0), textcolor=color.white)
+
+                else if sameDown
+                    evImpulseDown  := true
+                    impulseDist    := low - anchor
+                    impulsePrice   := low
+                    impulseTime    := time
+                    reversionFired := false
+                    if showMarkers
+                        label.new(bar_index, low, text=reAnchStr, style=label.style_label_up,
+                                  size=size.small, color=color.new(color.red,0), textcolor=color.white)
 
 //=============================
-// Live anchor distance label (current bar)
+// Continuation watch (post-extension candles)
+//=============================
+if trackCont and not na(extBarIdx) and not sessionReset and bar_index > extBarIdx
+    halfThresh = extThresh / 2
+    revHalf    = extDir == 1 ? close <= extPrice - halfThresh : close >= extPrice + halfThresh
+    if revHalf
+        trackCont := false
+    else if bar_index - extBarIdx >= contCandles
+        stillDiverging = extDir == 1 ? close >= extPrice : close <= extPrice
+        if stillDiverging
+            evCont    := true
+            if showMarkers
+                label.new(bar_index, extDir == 1 ? high : low,
+                          text="CONT", style=extDir == 1 ? label.style_label_down : label.style_label_up,
+                          size=size.small, color=color.new(color.teal,0), textcolor=color.white)
+        trackCont := false
+
+//=============================
+// Strategy entries and exits
+//
+// Entry: on extension, fade it (opposite direction)
+//   Extension UP → SHORT
+//   Extension DOWN → LONG
+//
+// Exit:
+//   Continuation fires → close (market kept going, cut trade)
+//   Next impulse fires → close (mean reversion completed or invalidated)
+//=============================
+
+// --- Entries ---
+if evExtension
+    if extDir == 1  // extended up → fade short
+        strategy.close("Long",  comment="New EXT")
+        strategy.entry("Short", strategy.short, comment="Fade EXT↑")
+        tradeDir := -1
+    else            // extended down → fade long
+        strategy.close("Short", comment="New EXT")
+        strategy.entry("Long",  strategy.long,  comment="Fade EXT↓")
+        tradeDir := 1
+
+// --- Exit on Continuation (market didn't revert) ---
+if evCont and tradeDir != 0
+    strategy.close_all(comment="CONT — exit")
+    tradeDir := 0
+
+// --- Exit on next Impulse (reversion completed or new cycle) ---
+if (evImpulseUp or evImpulseDown) and tradeDir != 0
+    strategy.close_all(comment="Impulse — exit")
+    tradeDir := 0
+
+//=============================
+// Live anchor label
 //=============================
 if barstate.islast and not na(anchor)
     dist      = close - anchor
@@ -224,21 +340,9 @@ if barstate.islast and not na(anchor)
     line1     = "Anchor " + str.tostring(anchor, "#.##") + "  |  " + dirStr + " " + str.tostring(math.round(absDist * 10) / 10, "#.#") + " pts"
     line2     = inImpulse
                  ? "Impulse active " + (impulseDist > 0 ? "↑" : "↓")
-                 : (remaining > 0
-                    ? str.tostring(math.round(remaining * 10) / 10, "#.#") + " pts to impulse"
-                    : "Threshold reached")
-    impDistStr = not na(impulsePrice)
-                  ? "\nFrom impulse pt " + str.tostring(impulsePrice, "#.##") + "  |  " + (close >= impulsePrice ? "▲" : "▼") + " " + str.tostring(math.round(math.abs(close - impulsePrice) * 10) / 10, "#.#") + " pts"
-                  : ""
-    liveMins   = not na(impulseTime) ? math.round((time - impulseTime) / 60000) : 0
-    liveHrPart = math.floor(liveMins / 60)
-    liveMnPart = liveMins - liveHrPart * 60
-    liveTimeStr = not na(impulseTime)
-                   ? "\n" + (liveMins >= 60
-                      ? str.tostring(liveHrPart, "#") + "h " + str.tostring(liveMnPart, "#") + "m since impulse"
-                      : str.tostring(liveMins, "#") + "m since impulse")
-                   : ""
-    labelTxt  = line1 + "\n" + line2 + impDistStr + liveTimeStr
+                 : (remaining > 0 ? str.tostring(math.round(remaining * 10) / 10, "#.#") + " pts to impulse" : "Threshold reached")
+    tradeStr  = tradeDir == 1 ? "\n▲ LONG active" : tradeDir == -1 ? "\n▼ SHORT active" : ""
+    labelTxt  = line1 + "\n" + line2 + tradeStr
     if na(liveLabel)
         liveLabel := label.new(bar_index, close, text=labelTxt,
                                style=label.style_label_left, size=size.small,
@@ -250,19 +354,17 @@ if barstate.islast and not na(anchor)
 //=============================
 // Legend
 //=============================
-var table legend = table.new(position.bottom_right, 2, 7, border_width=1)
+var table legend = table.new(position.bottom_right, 2, 6, border_width=1)
 if barstate.islast
     table.cell(legend, 0, 0, "●", bgcolor=color.new(color.blue,    0), text_color=color.white, text_size=size.small)
-    table.cell(legend, 1, 0, "Reset (ETH)",         text_size=size.small)
-    table.cell(legend, 0, 1, "●", bgcolor=color.new(color.yellow,  0), text_color=color.black, text_size=size.small)
-    table.cell(legend, 1, 1, "Reset (Mkt Open)",    text_size=size.small)
-    table.cell(legend, 0, 2, "●", bgcolor=color.new(color.green,   0), text_color=color.white, text_size=size.small)
-    table.cell(legend, 1, 2, "Impulse Up",           text_size=size.small)
-    table.cell(legend, 0, 3, "●", bgcolor=color.new(color.red,     0), text_color=color.white, text_size=size.small)
-    table.cell(legend, 1, 3, "Impulse Down",         text_size=size.small)
-    table.cell(legend, 0, 4, "●", bgcolor=color.new(color.fuchsia, 0), text_color=color.white, text_size=size.small)
-    table.cell(legend, 1, 4, "Reversion",            text_size=size.small)
-    table.cell(legend, 0, 5, "●", bgcolor=color.new(color.purple,  0), text_color=color.white, text_size=size.small)
-    table.cell(legend, 1, 5, "EXT → Entry",          text_size=size.small)
-    table.cell(legend, 0, 6, "  ", bgcolor=color.new(color.gray,   80), text_size=size.small)
-    table.cell(legend, 1, 6, "SL " + str.tostring(slPts) + " / TP " + str.tostring(tpPts) + " pts", text_size=size.small)
+    table.cell(legend, 1, 0, "Session Reset",        text_size=size.small)
+    table.cell(legend, 0, 1, "●", bgcolor=color.new(color.green,   0), text_color=color.white, text_size=size.small)
+    table.cell(legend, 1, 1, "Impulse Up",           text_size=size.small)
+    table.cell(legend, 0, 2, "●", bgcolor=color.new(color.red,     0), text_color=color.white, text_size=size.small)
+    table.cell(legend, 1, 2, "Impulse Down",         text_size=size.small)
+    table.cell(legend, 0, 3, "●", bgcolor=color.new(color.fuchsia, 0), text_color=color.white, text_size=size.small)
+    table.cell(legend, 1, 3, "Reversion",            text_size=size.small)
+    table.cell(legend, 0, 4, "●", bgcolor=color.new(color.purple,  0), text_color=color.white, text_size=size.small)
+    table.cell(legend, 1, 4, "EXT → Entry",          text_size=size.small)
+    table.cell(legend, 0, 5, "●", bgcolor=color.new(color.teal,    0), text_color=color.white, text_size=size.small)
+    table.cell(legend, 1, 5, "CONT → Exit",          text_size=size.small)

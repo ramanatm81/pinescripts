@@ -13,8 +13,9 @@ showMarkers     = input.bool(true,    "Show Markers")
 showLines       = input.bool(true,    "Connect Anchors")
 showLevels      = input.bool(false,   "Show Level Labels")
 loiterMins      = input.int(90,       "Loiter Reset (min, 0=off)", minval=0)
-fastImpulseMins = input.int(10,       "Directional Threshold (min) — impulses faster than this", minval=1)
-slowImpulseMins = input.int(30,       "Reversal Threshold (min) — impulses slower than this",    minval=1)
+fastImpulseMins = input.int(7,        "Directional Threshold (min) — impulses faster than this", minval=1)
+slowImpulseMins = input.int(20,       "Range Bound / Reversal Threshold (min)",                  minval=1)
+contCandles     = input.int(10,       "Continuation — candles after extension with no half-reversal", minval=1)
 
 //=============================
 // Time helpers
@@ -73,9 +74,19 @@ var int   prevImpulseTime = na  // timestamp of last event (for elapsed display)
 var int   lastGapMs       = na  // ms between last two impulses
 
 // Reversal detection: two same-direction impulses within slowImpulseMins
-var int   lastImpDir      = 0   // direction of last impulse: 1=up, -1=down
-var int   lastImpTime     = na  // timestamp of last impulse
-var bool  reversalActive  = false
+var int    lastImpDir     = 0   // direction of last impulse: 1=up, -1=down
+var int    lastImpTime    = na  // timestamp of last impulse
+var bool   reversalActive = false
+var string lastStatus     = "WAITING"  // sticky status — only changes on event
+
+// Continuation tracking: after extension, watch for half-threshold reversal
+var bool  trackCont    = false  // actively watching for continuation
+var int   extBarIdx    = na     // bar_index when extension fired
+var float extPrice     = na     // price at extension (new anchor)
+var int   extDir       = 0      // direction of extension: 1=up, -1=down
+var float extThresh    = na     // threshold captured at extension time
+bool      alertCont        = false  // non-var: fires on continuation event
+bool      alertDirectional = false  // non-var: fires when event within slowImpulseMins/4
 
 //=============================
 // Session reset — ETH (blue) or market open (yellow)
@@ -97,6 +108,12 @@ if sessionReset
     lastImpDir      := 0
     lastImpTime     := na
     reversalActive  := false
+    lastStatus      := "WAITING"
+    trackCont       := false
+    extBarIdx       := na
+    extPrice        := na
+    extDir          := 0
+    extThresh       := na
     if showMarkers
         label.new(bar_index, open, text="", style=label.style_circle, size=size.small, color=col)
     if showLevels
@@ -180,7 +197,7 @@ if not na(anchor) and not inSkipWindow and not sessionReset
 
         else if takeDown
             alertImpulseDown := true
-            inImpulse      := true
+            inImpulse        := true
             impulseDist    := low - anchor    // negative
             impulsePrice   := low
             impulseTime    := time
@@ -209,26 +226,48 @@ if not na(anchor) and not inSkipWindow and not sessionReset
                    : low  <= impulsePrice - activeThreshold
 
         if extended
-            alertExtension := true
-            extTimeMins = not na(impulseTime) ? math.round((time - impulseTime) / 60000) : 0
-            extHrPart   = math.floor(extTimeMins / 60)
-            extMnPart   = extTimeMins - extHrPart * 60
-            extTimeStr  = not na(impulseTime)
-                           ? (extTimeMins >= 60
-                              ? str.tostring(extHrPart, "#") + "h " + str.tostring(extMnPart, "#") + "m"
-                              : str.tostring(extTimeMins, "#") + "m")
-                           : ""
-            if showLines
-                line.new(prevAnchBi, prevAnchPrice, bar_index, close, width=2, color=color.purple)
-            if showMarkers
-                label.new(bar_index, close, text="", style=label.style_circle, size=size.small,
-                          color=color.new(color.purple, 0))
-                label.new(bar_index, close,
-                          text  = "EXT\n" + str.tostring(close, "#.##") + (not na(impulseTime) ? "\n" + extTimeStr : ""),
-                          style = impulseDist > 0 ? label.style_label_down : label.style_label_up,
-                          size  = size.small,
-                          color = color.new(color.purple, 0),
-                          textcolor = color.white)
+            extCandleBody  = math.abs(close - open)
+            strongContinuation = extCandleBody >= activeThreshold * 2 / 3
+
+            if strongContinuation
+                // Big-body extension candle — treat as Continuation, not Extension
+                alertCont := true
+                if showMarkers
+                    label.new(bar_index, impulseDist > 0 ? high : low,
+                              text      = "CONT",
+                              style     = impulseDist > 0 ? label.style_label_down : label.style_label_up,
+                              size      = size.small,
+                              color     = color.new(color.teal, 0),
+                              textcolor = color.white)
+            else
+                alertExtension := true
+                extTimeMins = not na(impulseTime) ? math.round((time - impulseTime) / 60000) : 0
+                extHrPart   = math.floor(extTimeMins / 60)
+                extMnPart   = extTimeMins - extHrPart * 60
+                extTimeStr  = not na(impulseTime)
+                               ? (extTimeMins >= 60
+                                  ? str.tostring(extHrPart, "#") + "h " + str.tostring(extMnPart, "#") + "m"
+                                  : str.tostring(extTimeMins, "#") + "m")
+                               : ""
+                if showLines
+                    line.new(prevAnchBi, prevAnchPrice, bar_index, close, width=2, color=color.purple)
+                if showMarkers
+                    label.new(bar_index, close, text="", style=label.style_circle, size=size.small,
+                              color=color.new(color.purple, 0))
+                    label.new(bar_index, close,
+                              text  = "EXT\n" + str.tostring(close, "#.##") + (not na(impulseTime) ? "\n" + extTimeStr : ""),
+                              style = impulseDist > 0 ? label.style_label_down : label.style_label_up,
+                              size  = size.small,
+                              color = color.new(color.purple, 0),
+                              textcolor = color.white)
+
+            // Start continuation watch — capture direction before clearing impulseDist
+            trackCont  := true
+            extBarIdx  := bar_index
+            extPrice   := close
+            extDir     := impulseDist > 0 ? 1 : -1
+            extThresh  := activeThreshold
+
             anchor         := close
             anchorSetTime  := time
             prevAnchPrice  := close
@@ -274,12 +313,11 @@ if not na(anchor) and not inSkipWindow and not sessionReset
                               color     = color.new(color.fuchsia, 0),
                               textcolor = color.white)
                 // Marker only — do NOT reset inImpulse; extension can still fire
-                prevAnchPrice  := close
-                prevAnchBi     := bar_index
-                anchorSetTime  := time   // reversion creates a new anchor reference point
-                reversionFired := true
-                normCount      += 1
-                prevImpulseTime := time  // cadence: next impulse gap measured from here
+                prevAnchPrice   := close
+                prevAnchBi      := bar_index
+                reversionFired  := true
+                normCount       += 1
+                prevImpulseTime := time  // cadence + re-impulse label timing measured from here
 
             else if reversionFired
                 //--------------------------------------------------
@@ -293,11 +331,11 @@ if not na(anchor) and not inSkipWindow and not sessionReset
                 sameUp   = impulseDist > 0 and high - anchor >= activeThreshold
                 sameDown = impulseDist < 0 and anchor - low  >= activeThreshold
 
-                // Time since reversion anchor (anchorSetTime updated on reversion)
-                reAnchMins = not na(anchorSetTime) ? math.round((time - anchorSetTime) / 60000) : 0
+                // Time since reversion (prevImpulseTime set at reversion)
+                reAnchMins = not na(prevImpulseTime) ? math.round((time - prevImpulseTime) / 60000) : 0
                 reAnchHr   = math.floor(reAnchMins / 60)
                 reAnchMn   = reAnchMins - reAnchHr * 60
-                reAnchStr  = not na(anchorSetTime)
+                reAnchStr  = not na(prevImpulseTime)
                               ? (reAnchMins >= 60
                                  ? str.tostring(reAnchHr, "#") + "h " + str.tostring(reAnchMn, "#") + "m"
                                  : str.tostring(reAnchMins, "#") + "m")
@@ -391,22 +429,51 @@ if not na(anchor) and not inSkipWindow and not sessionReset
                                   textcolor = color.white)
 
 //=============================
+// Continuation check — after extension, no half-reversal within contCandles
+// Skip the extension bar itself (bar_index > extBarIdx)
+//=============================
+if trackCont and not na(extBarIdx) and not sessionReset and bar_index > extBarIdx
+    halfThresh = extThresh / 2
+    revHalf    = extDir == 1 ? close <= extPrice - halfThresh : close >= extPrice + halfThresh
+    if revHalf
+        trackCont := false  // reversed enough — no continuation
+    else if bar_index - extBarIdx >= contCandles
+        // Only fire if price is still diverging (at or beyond the extension price)
+        stillDiverging = extDir == 1 ? close >= extPrice : close <= extPrice
+        if stillDiverging
+            alertCont := true
+            if showMarkers
+                label.new(bar_index, extDir == 1 ? high : low,
+                          text      = "CONT",
+                          style     = extDir == 1 ? label.style_label_down : label.style_label_up,
+                          size      = size.small,
+                          color     = color.new(color.teal, 0),
+                          textcolor = color.white)
+        trackCont := false
+
+//=============================
 // Impulse cadence — update on every new impulse/extension/reversion
 //=============================
 if alertImpulseUp or alertImpulseDown or alertExtension
     if not na(prevImpulseTime)
         lastGapMs := time - prevImpulseTime
+        if lastGapMs <= (slowImpulseMins * 60000) / 4
+            alertDirectional := true
     prevImpulseTime := time
 
 // Reversal detection — only on directional impulses (not extensions)
 // Two impulses in the same direction within slowImpulseMins = reversal
 if alertImpulseUp or alertImpulseDown
-    newDir = alertImpulseUp ? 1 : -1
-    if not na(lastImpTime) and newDir == lastImpDir
-        gapToLast = time - lastImpTime
-        reversalActive := gapToLast <= slowImpulseMins * 60000
+    newDir    = alertImpulseUp ? 1 : -1
+    gapToLast = not na(lastImpTime) ? time - lastImpTime : na
+    if not na(lastImpTime) and newDir == lastImpDir and gapToLast <= slowImpulseMins * 60000
+        reversalActive := true
+        lastStatus     := "REVERSAL"
     else
-        reversalActive := false  // opposite direction clears reversal
+        reversalActive := false
+        // DIRECTIONAL if gap to previous event was fast, else TRENDING
+        elSincePrev = not na(prevImpulseTime) ? math.round((time - prevImpulseTime) / 60000) : 999
+        lastStatus  := elSincePrev < fastImpulseMins ? "DIRECTIONAL" : "TRENDING"
     lastImpDir  := newDir
     lastImpTime := time
 
@@ -422,7 +489,9 @@ alertcondition(alertImpulseUp,  title="Impulse Up",                 message="Mea
 alertcondition(alertImpulseDown,title="Impulse Down",               message="Mean Reversion: Impulse DOWN fired | Price: {{low}} | Anchor: {{close}}")
 alertcondition(alertExtension,  title="Extension",                  message="Mean Reversion: EXTENSION — impulse continued | Price: {{close}}")
 alertcondition(alertReversion,  title="Reversion",                  message="Mean Reversion: REVERSION to anchor | Price: {{close}}")
-alertcondition(alertImpulseUp   or alertImpulseDown, title="Any Impulse",  message="Mean Reversion: Impulse fired | Price: {{close}}")
+alertcondition(alertImpulseUp   or alertImpulseDown, title="Any Impulse",      message="Mean Reversion: Impulse fired | Price: {{close}}")
+alertcondition(alertCont,                           title="Continuation",        message="Mean Reversion: CONTINUATION — no half-reversal after extension | Price: {{close}}")
+alertcondition(alertDirectional,                    title="Directional",          message="Mean Reversion: DIRECTIONAL — impulse/extension within 1/4 range bound window | Price: {{close}}")
 
 //=============================
 // Live anchor distance label (current bar)
@@ -473,14 +542,10 @@ if barstate.islast and not na(prevImpulseTime)
                   ? str.tostring(elHr, "#") + "h " + str.tostring(elMn, "#") + "m since last event"
                   : str.tostring(elapsedMin, "#") + "m since last event"
 
-    isDirectional = elapsedMin < fastImpulseMins
-    isRangeBound  = elapsedMin > slowImpulseMins and not reversalActive
-    statusStr = reversalActive   ? "⟳ REVERSAL"     :
-                isDirectional    ? "⚡ DIRECTIONAL"  :
-                isRangeBound     ? "◈ RANGE BOUND"   : "● TRENDING"
-    statusBg  = reversalActive   ? color.new(color.yellow, 10) :
-                isDirectional    ? color.new(color.red,    0)  :
-                isRangeBound     ? color.new(color.blue,   20) : color.new(color.gray, 40)
+    // Only override to RANGE BOUND when idle too long — otherwise show last event's status
+    displayStatus = elapsedMin > slowImpulseMins ? "RANGE BOUND" : lastStatus
+    statusStr = displayStatus == "REVERSAL" ? "⟳ REVERSAL" : displayStatus == "DIRECTIONAL" ? "⚡ DIRECTIONAL" : displayStatus == "RANGE BOUND" ? "◈ RANGE BOUND" : displayStatus == "TRENDING" ? "● TRENDING" : "— WAITING"
+    statusBg  = displayStatus == "REVERSAL" ? color.new(color.yellow, 10) : displayStatus == "DIRECTIONAL" ? color.new(color.red, 0) : displayStatus == "RANGE BOUND" ? color.new(color.blue, 20) : displayStatus == "TRENDING" ? color.new(color.gray, 40) : color.new(color.gray, 60)
 
     table.cell(cadence, 0, 0, elStr,     text_size=size.small, text_color=color.white, bgcolor=color.new(color.black, 40))
     table.cell(cadence, 0, 1, statusStr, text_size=size.large,  text_color=color.white, bgcolor=statusBg)
