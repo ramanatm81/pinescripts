@@ -6,9 +6,6 @@ indicator("Mean Reversion Ladder", overlay=true, max_lines_count=500, max_labels
 //=============================
 thresholdPtsETH = input.float(50,     "Impulse Threshold - ETH (points)")
 thresholdPtsRTH = input.float(30,     "Impulse Threshold - RTH (points)")
-ethResetStr     = input.string("1700", "ETH Reset Time (HHMM exchange time)")
-mktOpenStr      = input.string("0930", "Market Open Reset Time (HHMM exchange time)")
-skipStartStr    = input.string("0000", "Skip Window Start (HHMM, 0000=off)")
 showMarkers     = input.bool(true,    "Show Markers")
 showLines       = input.bool(true,    "Connect Anchors")
 showLevels      = input.bool(false,   "Show Level Labels")
@@ -18,30 +15,23 @@ slowImpulseMins = input.int(20,       "Range Bound / Reversal Threshold (min)", 
 contCandles     = input.int(10,       "Continuation — candles after extension with no half-reversal", minval=1)
 
 //=============================
-// Time helpers
+// Time helpers (all exchange timezone)
 //=============================
-ethH  = math.round(str.tonumber(str.substring(ethResetStr,  0, 2)))
-ethM  = math.round(str.tonumber(str.substring(ethResetStr,  2, 4)))
-moH   = math.round(str.tonumber(str.substring(mktOpenStr,   0, 2)))
-moM   = math.round(str.tonumber(str.substring(mktOpenStr,   2, 4)))
-skipH = math.round(str.tonumber(str.substring(skipStartStr, 0, 2)))
-skipM = math.round(str.tonumber(str.substring(skipStartStr, 2, 4)))
+ETH_MINS  = 17 * 60       // 17:00 — ETH session reset
+MO_MINS   = 9  * 60 + 30  // 09:30 — market open / RTH start
+SKIP_MINS = 8  * 60 + 30  // 08:30 — skip window start
 
 curMins  = hour(time, syminfo.timezone) * 60 + minute(time, syminfo.timezone)
 prevMins = hour(time[1], syminfo.timezone) * 60 + minute(time[1], syminfo.timezone)
-ethMins  = ethH  * 60 + ethM
-moMins   = moH   * 60 + moM
-skipMins = skipH * 60 + skipM
 
-crossedETH   = curMins == ethMins and prevMins != ethMins
-crossedMO    = curMins == moMins  and prevMins != moMins
+crossedETH   = curMins == ETH_MINS and prevMins != ETH_MINS
+crossedMO    = curMins == MO_MINS  and prevMins != MO_MINS
 sessionReset = crossedETH or crossedMO
 
-// Skip window: configurable start until market open (set to 0000 to disable)
-inSkipWindow = skipMins > 0 and curMins >= skipMins and curMins < moMins
+inSkipWindow = curMins >= SKIP_MINS and curMins < MO_MINS
 
 // RTH: market open → ETH reset; everything else uses ETH threshold
-inRTH           = curMins >= moMins and curMins < ethMins
+inRTH           = curMins >= MO_MINS and curMins < ETH_MINS
 activeThreshold = inRTH ? thresholdPtsRTH : thresholdPtsETH
 
 //=============================

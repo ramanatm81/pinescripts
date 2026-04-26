@@ -1,5 +1,5 @@
 //@version=6
-strategy("Mean Reversion — Extension Fade", overlay=true,
+strategy("Momentum — Extension Follow", overlay=true,
          default_qty_type=strategy.fixed, default_qty_value=1,
          max_lines_count=500, max_labels_count=500,
          commission_type=strategy.commission.cash_per_contract, commission_value=0.62,
@@ -58,7 +58,7 @@ var int   extDir    = 0
 var float extThresh = na
 
 // Trade state
-var int   tradeDir  = 0   // 1 = long (fading down ext), -1 = short (fading up ext)
+var int   tradeDir  = 0   // 1 = long (following up ext), -1 = short (following down ext)
 var float tpPrice   = na  // fixed TP level set at entry
 
 //=============================
@@ -303,27 +303,27 @@ if trackCont and not na(extBarIdx) and not sessionReset and bar_index > extBarId
 //=============================
 // Strategy entries and exits
 //
-// Entry: on extension, fade it (opposite direction)
-//   Extension UP → SHORT
-//   Extension DOWN → LONG
+// Entry: on extension, follow it (same direction)
+//   Extension UP → LONG
+//   Extension DOWN → SHORT
 //
 // Exit: profit target (fixed limit price) or $ stop loss
 //=============================
 
 // --- Extension entries ---
 if evExtension
-    if extDir == 1  // extended up → fade short
-        strategy.close("Long",  comment="New EXT")
-        strategy.entry("Short", strategy.short, comment="Fade EXT↑")
-        tpPrice  := close - targetPts
-        strategy.exit("Short TP", "Short", limit=tpPrice)
-        tradeDir := -1
-    else            // extended down → fade long
+    if extDir == 1  // extended up → follow long
         strategy.close("Short", comment="New EXT")
-        strategy.entry("Long",  strategy.long,  comment="Fade EXT↓")
+        strategy.entry("Long",  strategy.long,  comment="Follow EXT↑")
         tpPrice  := close + targetPts
         strategy.exit("Long TP", "Long", limit=tpPrice)
         tradeDir := 1
+    else            // extended down → follow short
+        strategy.close("Long",  comment="New EXT")
+        strategy.entry("Short", strategy.short, comment="Follow EXT↓")
+        tpPrice  := close - targetPts
+        strategy.exit("Short TP", "Short", limit=tpPrice)
+        tradeDir := -1
 
 // --- Stop loss: close when open loss exceeds $ threshold ---
 if strategy.position_size != 0 and strategy.openprofit <= -slDollars
