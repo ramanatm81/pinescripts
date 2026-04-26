@@ -27,8 +27,8 @@ moM   = math.round(str.tonumber(str.substring(mktOpenStr,   2, 4)))
 skipH = math.round(str.tonumber(str.substring(skipStartStr, 0, 2)))
 skipM = math.round(str.tonumber(str.substring(skipStartStr, 2, 4)))
 
-curMins  = hour(time) * 60 + minute(time)
-prevMins = hour(time[1]) * 60 + minute(time[1])
+curMins  = hour(time, syminfo.timezone) * 60 + minute(time, syminfo.timezone)
+prevMins = hour(time[1], syminfo.timezone) * 60 + minute(time[1], syminfo.timezone)
 ethMins  = ethH  * 60 + ethM
 moMins   = moH   * 60 + moM
 skipMins = skipH * 60 + skipM

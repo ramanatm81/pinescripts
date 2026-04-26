@@ -3,7 +3,7 @@ strategy("Mean Reversion — Extension Fade", overlay=true,
          default_qty_type=strategy.fixed, default_qty_value=1,
          max_lines_count=500, max_labels_count=500,
          commission_type=strategy.commission.cash_per_contract, commission_value=0.62,
-         slippage=1)
+         slippage=1, pyramiding=10, calc_on_order_fills=true)
 
 //=============================
 // Inputs
@@ -17,6 +17,9 @@ showMarkers     = input.bool(true,    "Show Markers")
 showLines       = input.bool(true,    "Connect Anchors")
 loiterMins      = input.int(90,       "Loiter Reset (min, 0=off)", minval=0)
 contCandles     = input.int(10,       "Continuation — candles after extension with no half-reversal", minval=1)
+targetPts       = input.float(20.0,   "Profit Target (points)",  minval=1.0)
+maxTrades       = input.int(4,        "Max Trades (pyramid)",    minval=1, maxval=10)
+maxLossDollars  = input.float(500.0,  "Max Loss ($)",            minval=1.0)
 
 //=============================
 // Time helpers
@@ -28,8 +31,8 @@ moM   = math.round(str.tonumber(str.substring(mktOpenStr,   2, 4)))
 skipH = math.round(str.tonumber(str.substring(skipStartStr, 0, 2)))
 skipM = math.round(str.tonumber(str.substring(skipStartStr, 2, 4)))
 
-curMins  = hour(time) * 60 + minute(time)
-prevMins = hour(time[1]) * 60 + minute(time[1])
+curMins  = hour(time, syminfo.timezone) * 60 + minute(time, syminfo.timezone)
+prevMins = hour(time[1], syminfo.timezone) * 60 + minute(time[1], syminfo.timezone)
 ethMins  = ethH  * 60 + ethM
 moMins   = moH   * 60 + moM
 skipMins = skipH * 60 + skipM
@@ -38,7 +41,8 @@ crossedETH   = curMins == ethMins and prevMins != ethMins
 crossedMO    = curMins == moMins  and prevMins != moMins
 sessionReset = crossedETH or crossedMO
 
-inSkipWindow    = skipMins > 0 and curMins >= skipMins and curMins < moMins
+inSkipWindow     = skipMins > 0 and curMins >= skipMins and curMins < moMins
+skipWindowStart  = skipMins > 0 and curMins == skipMins and prevMins != skipMins
 inRTH           = curMins >= moMins and curMins < ethMins
 activeThreshold = inRTH ? thresholdPtsRTH : thresholdPtsETH
 
@@ -65,6 +69,8 @@ var float extThresh = na
 
 // Trade state
 var int   tradeDir  = 0   // 1 = long (fading down ext), -1 = short (fading up ext)
+var int   dcaCount  = 0   // pyramid additions made on current trade
+var float tpPrice   = na  // fixed TP level set at original entry, shared by all pyramid entries
 
 //=============================
 // Event flags (reset each bar)
@@ -73,6 +79,15 @@ bool evImpulseUp   = false
 bool evImpulseDown = false
 bool evExtension   = false
 bool evCont        = false
+
+//=============================
+// Skip window — close any open trade when window begins
+//=============================
+if skipWindowStart and strategy.position_size != 0
+    strategy.close_all(comment="Skip Window")
+    tradeDir := 0
+    dcaCount := 0
+    tpPrice  := na
 
 //=============================
 // Session reset
@@ -94,7 +109,9 @@ if sessionReset
     extDir          := 0
     extThresh       := na
     strategy.close_all(comment="Session Reset")
-    tradeDir        := 0
+    tradeDir  := 0
+    dcaCount  := 0
+    tpPrice   := na
     if showMarkers
         label.new(bar_index, open, text="", style=label.style_circle, size=size.small, color=col)
 
@@ -303,31 +320,45 @@ if trackCont and not na(extBarIdx) and not sessionReset and bar_index > extBarId
 //   Extension UP → SHORT
 //   Extension DOWN → LONG
 //
-// Exit:
-//   Continuation fires → close (market kept going, cut trade)
-//   Next impulse fires → close (mean reversion completed or invalidated)
+// DCA: add up to maxTrades entries every dcaStepPts against the position
+// Exit: profit target (from avg entry) or max $ loss
 //=============================
 
-// --- Entries ---
+// --- Extension entries ---
 if evExtension
     if extDir == 1  // extended up → fade short
         strategy.close("Long",  comment="New EXT")
         strategy.entry("Short", strategy.short, comment="Fade EXT↑")
+        tpPrice  := close - targetPts
+        strategy.exit("Short TP", "Short", limit=tpPrice)
         tradeDir := -1
+        dcaCount := 0
     else            // extended down → fade long
         strategy.close("Short", comment="New EXT")
         strategy.entry("Long",  strategy.long,  comment="Fade EXT↓")
+        tpPrice  := close + targetPts
+        strategy.exit("Long TP", "Long", limit=tpPrice)
         tradeDir := 1
+        dcaCount := 0
 
-// --- Exit on Continuation (market didn't revert) ---
-if evCont and tradeDir != 0
-    strategy.close_all(comment="CONT — exit")
-    tradeDir := 0
+// --- Pyramid: add on next impulse in the losing direction ---
+if strategy.position_size != 0 and dcaCount < maxTrades - 1 and not sessionReset
+    if tradeDir == -1 and evImpulseUp    // SHORT losing, impulse confirms move against us
+        strategy.entry("Short", strategy.short, comment="Pyramid " + str.tostring(dcaCount + 2))
+        strategy.exit("Short TP", "Short", limit=tpPrice)   // same original TP level
+        dcaCount += 1
+    else if tradeDir == 1 and evImpulseDown  // LONG losing, impulse confirms move against us
+        strategy.entry("Long", strategy.long, comment="Pyramid " + str.tostring(dcaCount + 2))
+        strategy.exit("Long TP", "Long", limit=tpPrice)     // same original TP level
+        dcaCount += 1
 
-// --- Exit on next Impulse (reversion completed or new cycle) ---
-if (evImpulseUp or evImpulseDown) and tradeDir != 0
-    strategy.close_all(comment="Impulse — exit")
-    tradeDir := 0
+// --- Max loss: close all when open loss exceeds threshold ---
+if strategy.position_size != 0 and strategy.openprofit <= -maxLossDollars
+    strategy.close_all(comment="Max Loss")
+    tradeDir  := 0
+    dcaCount  := 0
+    tpPrice   := na
+
 
 //=============================
 // Live anchor label
