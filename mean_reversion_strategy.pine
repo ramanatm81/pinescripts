@@ -8,14 +8,16 @@ strategy("Mean Reversion — Extension Fade", overlay=true,
 //=============================
 // Inputs
 //=============================
-thresholdPtsETH = input.float(50,     "Impulse Threshold - ETH (points)")
-thresholdPtsRTH = input.float(30,     "Impulse Threshold - RTH (points)")
-showMarkers     = input.bool(true,    "Show Markers")
-showLines       = input.bool(true,    "Connect Anchors")
-loiterMins      = input.int(90,       "Loiter Reset (min, 0=off)", minval=0)
-contCandles     = input.int(10,       "Continuation — candles after extension with no half-reversal", minval=1)
-targetPts       = input.float(20.0,   "Profit Target (points)",  minval=1.0)
-slDollars       = input.float(100.0,  "Stop Loss ($)",           minval=1.0)
+thresholdPtsETH = input.float(50,    "Impulse Threshold - ETH (points)")
+thresholdPtsRTH = input.float(30,    "Impulse Threshold - RTH (points)")
+showMarkers     = input.bool(true,   "Show Markers")
+showLines       = input.bool(true,   "Connect Anchors")
+loiterMins      = input.int(90,      "Loiter Reset (min, 0=off)", minval=0)
+contCandles     = input.int(10,      "Continuation — candles after extension with no half-reversal", minval=1)
+targetPts       = input.float(20.0,  "Profit Target (points)",           minval=1.0)
+tpTriggerPct    = input.float(66.67, "TP trigger — % of target reached", minval=1.0, maxval=100.0)
+slCandles       = input.int(4,       "Time Stop — close after N candles", minval=1)
+resetBuffer     = input.int(5,       "Reset Buffer — no entry N min before/after reset", minval=0)
 
 //=============================
 // Time helpers (all exchange timezone)
@@ -36,19 +38,25 @@ skipWindowStart = curMins == SKIP_MINS and prevMins != SKIP_MINS
 inRTH           = curMins >= MO_MINS and curMins < ETH_MINS
 activeThreshold = inRTH ? thresholdPtsRTH : thresholdPtsETH
 
+// True if current bar is within resetBuffer minutes of any reset boundary
+nearReset = resetBuffer > 0 and (
+     math.abs(curMins - ETH_MINS)  <= resetBuffer or
+     math.abs(curMins - MO_MINS)   <= resetBuffer or
+     math.abs(curMins - SKIP_MINS) <= resetBuffer)
+
 //=============================
 // State
 //=============================
-var float anchor       = na
-var bool  inImpulse    = false
-var float impulseDist  = na
-var float impulsePrice = na
-var float prevAnchPrice  = na
-var int   prevAnchBi     = na
+var float anchor        = na
+var bool  inImpulse     = false
+var float impulseDist   = na
+var float impulsePrice  = na
+var float prevAnchPrice = na
+var int   prevAnchBi    = na
 var bool  reversionFired = false
-var int   impulseTime    = na
-var int   anchorSetTime  = na
-var label liveLabel      = na
+var int   impulseTime   = na
+var int   anchorSetTime = na
+var label liveLabel     = na
 
 // Continuation tracking
 var bool  trackCont = false
@@ -58,8 +66,9 @@ var int   extDir    = 0
 var float extThresh = na
 
 // Trade state
-var int   tradeDir  = 0   // 1 = long (fading down ext), -1 = short (fading up ext)
-var float tpPrice   = na  // fixed TP level set at entry
+var int   tradeDir    = 0    // 1 = long, -1 = short
+var int   entryBar    = na   // bar_index of signal bar, for time stop
+var float signalPrice = na   // impulse high or low that triggered the trade
 
 //=============================
 // Event flags (reset each bar)
@@ -74,8 +83,9 @@ bool evCont        = false
 //=============================
 if skipWindowStart and strategy.position_size != 0
     strategy.close_all(comment="Skip Window")
-    tradeDir := 0
-    tpPrice  := na
+    tradeDir    := 0
+    entryBar    := na
+    signalPrice := na
 
 //=============================
 // Session reset
@@ -97,8 +107,9 @@ if sessionReset
     extDir          := 0
     extThresh       := na
     strategy.close_all(comment="Session Reset")
-    tradeDir  := 0
-    tpPrice   := na
+    tradeDir    := 0
+    entryBar    := na
+    signalPrice := na
     if showMarkers
         label.new(bar_index, open, text="", style=label.style_circle, size=size.small, color=col)
 
@@ -303,34 +314,68 @@ if trackCont and not na(extBarIdx) and not sessionReset and bar_index > extBarId
 //=============================
 // Strategy entries and exits
 //
-// Entry: on extension, fade it (opposite direction)
-//   Extension UP → SHORT
-//   Extension DOWN → LONG
+// Entry: fade impulse and extension (opposite direction), only when flat
+//   Impulse UP / Extension UP → SHORT
+//   Impulse DOWN / Extension DOWN → LONG
 //
-// Exit: profit target (fixed limit price) or $ stop loss
+// Exit: points-based TP and SL via strategy.exit (RTH/ETH configurable)
+// No new entries while a position is open
 //=============================
 
-// --- Extension entries ---
-if evExtension
-    if extDir == 1  // extended up → fade short
-        strategy.close("Long",  comment="New EXT")
+if strategy.position_size == 0 and not nearReset
+    // Impulse UP → fade short from the impulse high
+    if evImpulseUp
+        strategy.entry("Short", strategy.short, comment="Fade Impulse↑")
+        signalPrice := high
+        entryBar    := bar_index
+        tradeDir    := -1
+
+    // Impulse DOWN → fade long from the impulse low
+    else if evImpulseDown
+        strategy.entry("Long", strategy.long, comment="Fade Impulse↓")
+        signalPrice := low
+        entryBar    := bar_index
+        tradeDir    := 1
+
+    // Extension UP → fade short from the extension close (where label is placed)
+    else if evExtension and extDir == 1
         strategy.entry("Short", strategy.short, comment="Fade EXT↑")
-        tpPrice  := close - targetPts
-        strategy.exit("Short TP", "Short", limit=tpPrice)
-        tradeDir := -1
-    else            // extended down → fade long
-        strategy.close("Short", comment="New EXT")
-        strategy.entry("Long",  strategy.long,  comment="Fade EXT↓")
-        tpPrice  := close + targetPts
-        strategy.exit("Long TP", "Long", limit=tpPrice)
-        tradeDir := 1
+        signalPrice := close
+        entryBar    := bar_index
+        tradeDir    := -1
 
-// --- Stop loss: close when open loss exceeds $ threshold ---
-if strategy.position_size != 0 and strategy.openprofit <= -slDollars
-    strategy.close_all(comment="Stop Loss")
-    tradeDir := 0
-    tpPrice  := na
+    // Extension DOWN → fade long from the extension close
+    else if evExtension and extDir == -1
+        strategy.entry("Long", strategy.long, comment="Fade EXT↓")
+        signalPrice := close
+        entryBar    := bar_index
+        tradeDir    := 1
 
+// TP and SL checks — skip the signal bar itself (fill happens next bar open)
+// All levels measured from signalPrice (the label price), not the fill price
+if strategy.position_size != 0 and not na(signalPrice) and bar_index > entryBar
+    isLong      = strategy.position_size > 0
+    tpThreshold = targetPts * tpTriggerPct / 100.0
+
+    // TP: favorable move from signal price reaches threshold
+    tpHit = isLong ? (high - signalPrice)  >= tpThreshold
+                   : (signalPrice - low)   >= tpThreshold
+
+    // SL: only fires when losing; time stop OR 20pt adverse move from signal price
+    timeStop   = (bar_index - entryBar) >= slCandles + 1
+    pointsStop = isLong ? (signalPrice - low) >= 20.0 : (high - signalPrice) >= 20.0
+    slHit      = strategy.openprofit < 0 and (timeStop or pointsStop)
+
+    if tpHit
+        strategy.close_all(comment="TP")
+        tradeDir    := 0
+        entryBar    := na
+        signalPrice := na
+    else if slHit
+        strategy.close_all(comment=timeStop ? "Time Stop" : "Points Stop")
+        tradeDir    := 0
+        entryBar    := na
+        signalPrice := na
 
 //=============================
 // Live anchor label
@@ -370,4 +415,4 @@ if barstate.islast
     table.cell(legend, 0, 4, "●", bgcolor=color.new(color.purple,  0), text_color=color.white, text_size=size.small)
     table.cell(legend, 1, 4, "EXT → Entry",          text_size=size.small)
     table.cell(legend, 0, 5, "●", bgcolor=color.new(color.teal,    0), text_color=color.white, text_size=size.small)
-    table.cell(legend, 1, 5, "CONT → Exit",          text_size=size.small)
+    table.cell(legend, 1, 5, "CONT",                 text_size=size.small)
