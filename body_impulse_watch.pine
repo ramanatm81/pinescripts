@@ -1,0 +1,129 @@
+//@version=6
+indicator("Body Impulse Watch", overlay=true, max_labels_count=500)
+
+//=============================
+// Inputs
+//=============================
+bodyRTH   = input.float(15.0,  "Min Body Size RTH (points)",     minval=1.0,  step=0.5)
+bodyETH   = input.float(10.0,  "Min Body Size ETH (points)",     minval=1.0,  step=0.5)
+wickPct   = input.float(50.0,  "Max Wick (% of body)",           minval=5.0,  maxval=200.0, step=5.0)
+watchBars = input.int(5,       "Watch Window (bars)",             minval=1,    maxval=20)
+revPct    = input.float(100.0, "REV threshold (% of ref body)",  minval=10.0, maxval=200.0, step=5.0)
+nysOpen   = input.bool(true,   "Block NYSE open (09:30 ET, 30 min)")
+ldnOpen   = input.bool(true,   "Block LDN open (03:00 ET, 30 min)")
+
+//=============================
+// Per-bar body metrics
+//=============================
+body      = math.abs(close - open)
+bodyWhole = math.round(body)
+upperWick = high - math.max(open, close)
+lowerWick = math.min(open, close) - low
+wickLimit = body * (wickPct / 100.0)
+
+etMinsBody = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
+inRTH      = etMinsBody >= 570 and etMinsBody < 960
+bodyPts    = inRTH ? bodyRTH : bodyETH
+
+cleanBody  = bodyWhole >= bodyPts and upperWick <= wickLimit and lowerWick <= wickLimit
+
+//=============================
+// State
+//=============================
+var int   watchCount = 0
+var float refWidth   = na
+var bool  refBull    = false
+var float oppBodySum = 0.0
+
+//=============================
+// Session time filter
+//=============================
+etMins    = etMinsBody
+noEntry   = (nysOpen and etMins >= 570 and etMins < 600) or (ldnOpen and etMins >= 180 and etMins < 210)
+hardClose = (nysOpen and etMins == 565) or (ldnOpen and etMins == 175)
+
+//=============================
+// Hard close marker
+//=============================
+if hardClose
+    label.new(bar_index, high, text="✕ CLOSE",
+              style     = label.style_label_down,
+              color     = color.new(color.orange, 10),
+              textcolor = color.white,
+              size      = size.small)
+
+//=============================
+// Reference candle detection
+//=============================
+newRef = cleanBody and watchCount == 0
+
+if newRef
+    watchCount := watchBars
+    refWidth   := body
+    refBull    := close > open
+    oppBodySum := 0.0
+    label.new(bar_index, refBull ? high : low,
+              text      = "REF\n" + str.tostring(body, "#.#") + "pt",
+              style     = refBull ? label.style_label_up : label.style_label_down,
+              color     = color.new(color.blue, 20),
+              textcolor = color.white,
+              size      = size.small)
+
+//=============================
+// Watch window countdown
+//=============================
+var bool isCont = false
+var bool isRev  = false
+isCont := false
+isRev  := false
+
+if watchCount > 0 and not newRef
+    watchCount -= 1
+
+    candleBody  = math.abs(close - open)
+    revThresh   = refWidth * (revPct / 100.0)
+
+    // Accumulate opposite-direction candle bodies
+    isOppCandle = refBull ? close < open : close > open
+    if isOppCandle
+        oppBodySum += candleBody
+
+    // REV: cumulative opposite bodies >= revPct% of ref body
+    if oppBodySum >= revThresh
+        isRev      := true
+        watchCount := 0
+        oppBodySum := 0.0
+        label.new(bar_index, refBull ? low : high,
+                  text      = "REV",
+                  style     = refBull ? label.style_label_down : label.style_label_up,
+                  color     = color.new(color.red, 10),
+                  textcolor = color.white,
+                  size      = size.normal)
+
+    else if watchCount == 0
+        // CONT: window expired, cumulative opposite bodies never reached threshold
+        isCont := true
+        label.new(bar_index, refBull ? high : low,
+                  text      = "CONT",
+                  style     = refBull ? label.style_label_up : label.style_label_down,
+                  color     = color.new(color.teal, 10),
+                  textcolor = color.white,
+                  size      = size.normal)
+
+// Suppress signals during blocked windows
+isContFiltered = isCont and not noEntry
+isRevFiltered  = isRev  and not noEntry
+
+//=============================
+// Background tint
+//=============================
+bgcolor(watchCount > 0 ? color.new(color.yellow, 92) : na, title="Watch Window")
+bgcolor(noEntry         ? color.new(color.red,    88) : na, title="No-Entry Window")
+
+//=============================
+// Alert conditions
+//=============================
+alertcondition(newRef,         title="New Reference Candle", message="Body Impulse Watch: reference candle detected")
+alertcondition(isContFiltered, title="Continuation Signal",  message="Body Impulse Watch: CONTINUATION — same-direction body confirmed")
+alertcondition(isRevFiltered,  title="Reversal Signal",      message="Body Impulse Watch: REVERSAL — opposite-direction body confirmed")
+alertcondition(hardClose,      title="Hard Close",           message="Body Impulse Watch: hard close — session open in 5 minutes")

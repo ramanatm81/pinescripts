@@ -1,0 +1,249 @@
+//@version=6
+strategy("Body Impulse Rider", overlay=true, max_labels_count=500,
+         default_qty_type=strategy.fixed, default_qty_value=1)
+
+//=============================
+// Inputs
+//=============================
+bodyRTH   = input.float(15.0,  "Min Body Size RTH (points)",     minval=1.0,  step=0.5)
+bodyETH   = input.float(10.0,  "Min Body Size ETH (points)",     minval=1.0,  step=0.5)
+wickPct   = input.float(50.0,  "Max Wick (% of body)",           minval=5.0,  maxval=200.0, step=5.0)
+watchBars = input.int(5,       "Watch Window (bars)",             minval=1,    maxval=20)
+stopPts       = input.float(100.0, "Stop Loss (points)",                  minval=1.0,  step=0.5)
+trailTrigger  = input.float(50.0,  "Trailing stop trigger (points profit)", minval=1.0,  step=0.5)
+trailDist     = input.float(30.0,  "Trailing stop distance (points)",       minval=1.0,  step=0.5)
+revPct        = input.float(100.0, "REV threshold (% of ref body)",         minval=10.0, maxval=200.0, step=5.0)
+nysOpen   = input.bool(true,   "Block NYSE open (09:30 ET, 30 min)")
+ldnOpen   = input.bool(true,   "Block LDN open (03:00 ET, 30 min)")
+
+//=============================
+// Per-bar body metrics
+//=============================
+body      = math.abs(close - open)
+bodyWhole = math.round(body)           // round to nearest whole point
+upperWick = high - math.max(open, close)
+lowerWick = math.min(open, close) - low
+wickLimit = body * (wickPct / 100.0)
+
+// RTH = 09:30–16:00 ET; everything else is ETH
+etMinsBody = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
+inRTH      = etMinsBody >= 570 and etMinsBody < 960
+bodyPts    = inRTH ? bodyRTH : bodyETH
+
+cleanBody  = bodyWhole >= bodyPts and upperWick <= wickLimit and lowerWick <= wickLimit
+
+//=============================
+// State
+//=============================
+var int   watchCount    = 0
+var float refWidth      = na
+var bool  refBull       = false
+var int   tradeDir      = 0       // 1 = long, -1 = short, 0 = flat
+var float entryPrice    = na
+var float trailStop     = na      // active trailing stop level, na = not yet triggered
+var float bestPrice     = na      // highest high (long) or lowest low (short) seen since entry
+var bool  hitProfitTarget = false // true once trade has moved >= trailTrigger pts in profit
+var bool  isRevTrade      = false // true if current trade was entered on a REV signal
+var float oppBodySum      = 0.0   // cumulative opposite-direction body during watch window
+
+//=============================
+// Session time filter
+//=============================
+etMins    = etMinsBody
+noEntry   = (nysOpen and etMins >= 570 and etMins < 600) or (ldnOpen and etMins >= 180 and etMins < 210)
+hardClose = (nysOpen and etMins == 565) or (ldnOpen and etMins == 175)
+
+//=============================
+// Hard close before session opens
+//=============================
+if hardClose and strategy.position_size != 0
+    strategy.close_all(comment="hard close→session open")
+    tradeDir := 0
+
+//=============================
+// Trailing stop management
+//=============================
+if tradeDir == 1 and strategy.position_size != 0
+    bestPrice := na(bestPrice) ? high : math.max(bestPrice, high)
+    if bestPrice - entryPrice >= trailTrigger
+        hitProfitTarget := true
+        trailStop := math.max(na(trailStop) ? bestPrice - trailDist : trailStop, bestPrice - trailDist)
+    if not na(trailStop) and low <= trailStop
+        strategy.close("Long", comment="trail stop")
+        tradeDir        := 0
+        trailStop       := na
+        bestPrice       := na
+        hitProfitTarget := false
+
+else if tradeDir == -1 and strategy.position_size != 0
+    bestPrice := na(bestPrice) ? low : math.min(bestPrice, low)
+    if entryPrice - bestPrice >= trailTrigger
+        hitProfitTarget := true
+        trailStop := math.min(na(trailStop) ? bestPrice + trailDist : trailStop, bestPrice + trailDist)
+    if not na(trailStop) and high >= trailStop
+        strategy.close("Short", comment="trail stop")
+        tradeDir        := 0
+        trailStop       := na
+        bestPrice       := na
+        hitProfitTarget := false
+
+else
+    trailStop       := na
+    bestPrice       := na
+    hitProfitTarget := false
+
+//=============================
+// Reference candle detection
+//=============================
+newRef = cleanBody and watchCount == 0
+
+if newRef
+    inProfit = (tradeDir == 1 and close > entryPrice) or
+               (tradeDir == -1 and close < entryPrice)
+    if not inProfit and not isRevTrade
+        // CONT trades: close on new REF when in loss
+        if tradeDir == 1
+            strategy.close("Long",  comment="exit→new REF")
+        else if tradeDir == -1
+            strategy.close("Short", comment="exit→new REF")
+        tradeDir        := 0
+        hitProfitTarget := false
+        isRevTrade      := false
+    else if inProfit and hitProfitTarget
+        // trade moved 50pts+ in profit at some point — take the exit at new REF
+        if tradeDir == 1
+            strategy.close("Long",  comment="exit→REF after target")
+        else if tradeDir == -1
+            strategy.close("Short", comment="exit→REF after target")
+        tradeDir        := 0
+        trailStop       := na
+        bestPrice       := na
+        hitProfitTarget := false
+        isRevTrade      := false
+    watchCount  := watchBars
+    refWidth    := body
+    refBull     := close > open
+    oppBodySum  := 0.0
+
+    label.new(bar_index, refBull ? high : low,
+              text      = "REF\n" + str.tostring(body, "#.#") + "pt",
+              style     = refBull ? label.style_label_up : label.style_label_down,
+              color     = color.new(color.blue, 20),
+              textcolor = color.white,
+              size      = size.small)
+
+//=============================
+// Watch window
+//=============================
+var bool isCont  = false
+var bool isRev   = false
+var bool revBull = false
+isCont  := false
+isRev   := false
+revBull := false
+
+if watchCount > 0 and not newRef
+    watchCount -= 1
+
+    candleBody = math.abs(close - open)
+    revThresh  = refWidth * (revPct / 100.0)
+
+    // Accumulate opposite-direction candle bodies
+    isOppCandle = refBull ? close < open : close > open
+    if isOppCandle
+        oppBodySum += candleBody
+
+    // REV: cumulative opposite bodies >= revPct% of ref body
+    if oppBodySum >= revThresh
+        isRev      := true
+        revBull    := not refBull
+        watchCount := 0
+        oppBodySum := 0.0
+        label.new(bar_index, refBull ? low : high,
+                  text      = "REV",
+                  style     = refBull ? label.style_label_down : label.style_label_up,
+                  color     = color.new(color.red, 10),
+                  textcolor = color.white,
+                  size      = size.normal)
+
+    else if watchCount == 0
+        // CONT: window expired, cumulative opposite bodies never reached threshold
+        isCont := true
+        label.new(bar_index, refBull ? high : low,
+                  text      = "CONT",
+                  style     = refBull ? label.style_label_up : label.style_label_down,
+                  color     = color.new(color.teal, 10),
+                  textcolor = color.white,
+                  size      = size.normal)
+
+
+//=============================
+// Trade entries (blocked during session open windows)
+//=============================
+if isCont and tradeDir == 0 and not noEntry
+    if refBull
+        strategy.entry("Long",  strategy.long,  comment="CONT↑")
+        strategy.exit("SL-Long",  "Long",  stop=close - stopPts)
+        tradeDir        := 1
+        entryPrice      := close
+        trailStop       := na
+        bestPrice       := na
+        hitProfitTarget := false
+        isRevTrade      := false
+    else
+        strategy.entry("Short", strategy.short, comment="CONT↓")
+        strategy.exit("SL-Short", "Short", stop=close + stopPts)
+        tradeDir        := -1
+        entryPrice      := close
+        trailStop       := na
+        bestPrice       := na
+        hitProfitTarget := false
+        isRevTrade      := false
+
+if isRev and tradeDir == 0 and not noEntry
+    if revBull
+        strategy.entry("Long",  strategy.long,  comment="REV↑")
+        strategy.exit("SL-Long",  "Long",  stop=close - stopPts)
+        tradeDir        := 1
+        entryPrice      := close
+        trailStop       := na
+        bestPrice       := na
+        hitProfitTarget := false
+        isRevTrade      := true
+    else
+        strategy.entry("Short", strategy.short, comment="REV↓")
+        strategy.exit("SL-Short", "Short", stop=close + stopPts)
+        tradeDir        := -1
+        entryPrice      := close
+        trailStop       := na
+        bestPrice       := na
+        hitProfitTarget := false
+        isRevTrade      := true
+
+// Sync tradeDir when SL or any other exit closes the position externally
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    tradeDir   := 0
+    isRevTrade := false
+
+//=============================
+// Background tint
+//=============================
+bgcolor(watchCount > 0 ? color.new(color.yellow, 92) : na, title="Watch Window")
+
+//=============================
+// Alerts
+//=============================
+if isCont and tradeDir == 1
+    alert("BIR: LONG entry — CONT↑ at " + str.tostring(close), alert.freq_once_per_bar)
+if isCont and tradeDir == -1
+    alert("BIR: SHORT entry — CONT↓ at " + str.tostring(close), alert.freq_once_per_bar)
+if isRev and tradeDir == 1
+    alert("BIR: LONG entry — REV↑ at " + str.tostring(close), alert.freq_once_per_bar)
+if isRev and tradeDir == -1
+    alert("BIR: SHORT entry — REV↓ at " + str.tostring(close), alert.freq_once_per_bar)
+
+tradeClosed = strategy.position_size == 0 and strategy.position_size[1] != 0
+if tradeClosed
+    alert("BIR: trade CLOSED at " + str.tostring(close) + " | P&L: " + str.tostring(strategy.netprofit - strategy.netprofit[1], "#.##"), alert.freq_once_per_bar)
+if hardClose
+    alert("BIR: HARD CLOSE — session open in 5 min", alert.freq_once_per_bar)
