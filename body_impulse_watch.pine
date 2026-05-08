@@ -9,6 +9,8 @@ bodyETH   = input.float(10.0,  "Min Body Size ETH (points)",     minval=1.0,  st
 wickPct   = input.float(50.0,  "Max Wick (% of body)",           minval=5.0,  maxval=200.0, step=5.0)
 watchBars = input.int(5,       "Watch Window (bars)",             minval=1,    maxval=20)
 revPct    = input.float(100.0, "REV threshold (% of ref body)",  minval=10.0, maxval=200.0, step=5.0)
+momBars   = input.int(5,       "Momentum check window (bars)",    minval=1,    maxval=20)
+momPts    = input.float(5.0,   "Momentum min move (points)",      minval=0.5,  step=0.5)
 nysOpen   = input.bool(true,   "Block NYSE open (09:30 ET, 30 min)")
 ldnOpen   = input.bool(true,   "Block LDN open (03:00 ET, 30 min)")
 
@@ -34,13 +36,22 @@ var int   watchCount = 0
 var float refWidth   = na
 var bool  refBull    = false
 var float oppBodySum = 0.0
+var float refClose   = na
+var float refOpen    = na
+
+// Momentum tracker — activated after a CONT or REV signal fires
+var int   momCount     = 0
+var float momPriceSum  = 0.0
+var int   momDir       = 0    // 1 = long (CONT↑ / REV↑), -1 = short
+var float momEntry     = na
 
 //=============================
 // Session time filter
 //=============================
 etMins    = etMinsBody
-noEntry   = (nysOpen and etMins >= 570 and etMins < 600) or (ldnOpen and etMins >= 180 and etMins < 210)
-hardClose = (nysOpen and etMins == 565) or (ldnOpen and etMins == 175)
+inEodBlock = etMins >= 960 and etMins < 1080                 // 16:00–18:00 ET — no new entries
+noEntry    = (nysOpen and etMins >= 570 and etMins < 600) or (ldnOpen and etMins >= 180 and etMins < 210) or inEodBlock
+hardClose  = (nysOpen and etMins == 565) or (ldnOpen and etMins == 175) or etMins == 225 or etMins == 960
 
 //=============================
 // Hard close marker
@@ -61,6 +72,8 @@ if newRef
     watchCount := watchBars
     refWidth   := body
     refBull    := close > open
+    refClose   := close
+    refOpen    := open
     oppBodySum := 0.0
     label.new(bar_index, refBull ? high : low,
               text      = "REF\n" + str.tostring(body, "#.#") + "pt",
@@ -88,8 +101,9 @@ if watchCount > 0 and not newRef
     if isOppCandle
         oppBodySum += candleBody
 
-    // REV: cumulative opposite bodies >= revPct% of ref body
-    if oppBodySum >= revThresh
+    // REV: cumulative opposite bodies >= revPct% of ref body AND close has crossed below/above REF open (bottom/top of REF body)
+    priceCrossed = refBull ? close < refOpen : close > refOpen
+    if oppBodySum >= revThresh and priceCrossed
         isRev      := true
         watchCount := 0
         oppBodySum := 0.0
@@ -101,18 +115,52 @@ if watchCount > 0 and not newRef
                   size      = size.normal)
 
     else if watchCount == 0
-        // CONT: window expired, cumulative opposite bodies never reached threshold
-        isCont := true
-        label.new(bar_index, refBull ? high : low,
-                  text      = "CONT",
-                  style     = refBull ? label.style_label_up : label.style_label_down,
-                  color     = color.new(color.teal, 10),
-                  textcolor = color.white,
-                  size      = size.normal)
+        // CONT: window expired and price still above/below REF open (momentum held)
+        contPriceHeld = refBull ? close > refOpen : close < refOpen
+        if contPriceHeld
+            isCont := true
+            label.new(bar_index, refBull ? high : low,
+                      text      = "CONT",
+                      style     = refBull ? label.style_label_up : label.style_label_down,
+                      color     = color.new(color.teal, 10),
+                      textcolor = color.white,
+                      size      = size.normal)
+
+// Arm momentum tracker when a tradeable signal fires (not in a blocked window)
+if (isCont or isRev) and not noEntry
+    momDir      := isCont ? (refBull ? 1 : -1) : (not refBull ? 1 : -1)
+    momEntry    := close
+    momCount    := 0
+    momPriceSum := 0.0
 
 // Suppress signals during blocked windows
 isContFiltered = isCont and not noEntry
 isRevFiltered  = isRev  and not noEntry
+
+//=============================
+// Momentum check — N bars after signal, label CONSOL if price stalled
+//=============================
+var bool consolidating = false
+consolidating := false
+
+if momDir != 0 and momCount <= momBars
+    momCount    += 1
+    momPriceSum += close
+
+    if momCount == momBars
+        avgPrice = momPriceSum / momBars
+        momMove  = momDir == 1 ? avgPrice - momEntry : momEntry - avgPrice
+        if momMove < momPts
+            consolidating := true
+            label.new(bar_index, low,
+                      text      = "CONSOL",
+                      style     = label.style_label_up,
+                      color     = color.new(color.gray, 20),
+                      textcolor = color.white,
+                      size      = size.small)
+        momDir      := 0
+        momCount    := 0
+        momPriceSum := 0.0
 
 //=============================
 // Background tint
@@ -126,4 +174,5 @@ bgcolor(noEntry         ? color.new(color.red,    88) : na, title="No-Entry Wind
 alertcondition(newRef,         title="New Reference Candle", message="Body Impulse Watch: reference candle detected")
 alertcondition(isContFiltered, title="Continuation Signal",  message="Body Impulse Watch: CONTINUATION — same-direction body confirmed")
 alertcondition(isRevFiltered,  title="Reversal Signal",      message="Body Impulse Watch: REVERSAL — opposite-direction body confirmed")
+alertcondition(consolidating,  title="Consolidating",        message="Body Impulse Watch: CONSOLIDATING — no momentum after signal")
 alertcondition(hardClose,      title="Hard Close",           message="Body Impulse Watch: hard close — session open in 5 minutes")
