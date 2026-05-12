@@ -5,135 +5,139 @@ strategy("Body Impulse Rider", overlay=true, max_labels_count=500,
 //=============================
 // Inputs
 //=============================
-bodyRTH   = input.float(15.0,  "Min Body Size RTH (points)",     minval=1.0,  step=0.5)
-bodyETH   = input.float(10.0,  "Min Body Size ETH (points)",     minval=1.0,  step=0.5)
-wickPct   = input.float(50.0,  "Max Wick (% of body)",           minval=5.0,  maxval=200.0, step=5.0)
-watchBars = input.int(5,       "Watch Window (bars)",             minval=1,    maxval=20)
-stopPts       = input.float(100.0, "Stop Loss (points)",                    minval=1.0,  step=0.5)
-trailTrigger  = input.float(50.0,  "Trailing stop trigger (points profit)",  minval=1.0,  step=0.5)
-trailDist     = input.float(30.0,  "Trailing stop distance (points)",         minval=1.0,  step=0.5)
-pullbackPts   = input.float(10.0,  "Pullback exit (points from peak)",        minval=1.0,  step=0.5)
-revPct        = input.float(100.0, "REV threshold (% of ref body)",           minval=10.0, maxval=200.0, step=5.0)
-nysOpen   = input.bool(true,   "Block NYSE open (09:30 ET, 30 min)")
-ldnOpen   = input.bool(true,   "Block LDN open (03:00 ET, 30 min)")
+bodyRTH      = input.float(15.0,  "Min Body Size RTH (points)",            minval=1.0,  step=0.5)
+bodyETH      = input.float(10.0,  "Min Body Size ETH (points)",            minval=1.0,  step=0.5)
+wickPct      = input.float(50.0,  "Max Wick (% of body)",                  minval=5.0,  maxval=200.0, step=5.0)
+watchBars    = input.int(5,        "Watch Window (bars)",                   minval=1,    maxval=20)
+stopPts      = input.float(100.0, "Stop Loss (points)",                    minval=1.0,  step=0.5)
+trailTrigger = input.float(50.0,  "Trailing stop trigger (points profit)", minval=1.0,  step=0.5)
+trailDist    = input.float(30.0,  "Trailing stop distance (points)",       minval=1.0,  step=0.5)
+revPct       = input.float(100.0, "REV threshold (% of ref body)",         minval=10.0, maxval=200.0, step=5.0)
+atrPeriod    = input.int(14,       "ATR period",                           minval=1,    maxval=50,    group="ATR Exit")
+atrMult      = input.float(0.5,   "ATR multiplier (min move)",             minval=0.1,  step=0.1,    group="ATR Exit")
+atrBars      = input.int(5,        "ATR check window (bars)",              minval=1,    maxval=20,    group="ATR Exit")
+nysOpen      = input.bool(false,  "Block NYSE open (09:30 ET, 30 min)")
+ldnOpen      = input.bool(false,  "Block LDN open (03:00 ET, 30 min)")
 
 //=============================
 // Per-bar body metrics
 //=============================
 body      = math.abs(close - open)
-bodyWhole = math.round(body)           // round to nearest whole point
 upperWick = high - math.max(open, close)
 lowerWick = math.min(open, close) - low
 wickLimit = body * (wickPct / 100.0)
 
-// RTH = 09:30–16:00 ET; everything else is ETH
 etMinsBody = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
 inRTH      = etMinsBody >= 570 and etMinsBody < 960
 bodyPts    = inRTH ? bodyRTH : bodyETH
 
-cleanBody  = bodyWhole >= bodyPts and upperWick <= wickLimit and lowerWick <= wickLimit
+cleanBody  = body >= bodyPts and upperWick <= wickLimit and lowerWick <= wickLimit
+
+atrVal = ta.atr(atrPeriod)
 
 //=============================
 // State
 //=============================
-var int   watchCount    = 0
-var float refWidth      = na
-var bool  refBull       = false
-var int   tradeDir      = 0       // 1 = long, -1 = short, 0 = flat
-var float entryPrice    = na      // close at entry — used for trail trigger only
-var float trailStop     = na      // active trailing stop level, na = not yet triggered
-var float bestPrice     = na      // highest high (long) or lowest low (short) seen since entry
-var float peakPrice     = na      // best close seen since entry — used for pullback exit
-var float oppBodySum      = 0.0   // cumulative opposite-direction body during watch window
-var float refClose        = na    // close of the REF candle
-var float refOpen         = na    // open of the REF candle — price must cross below/above for REV
+var int   watchCount  = 0
+var float refWidth    = na
+var bool  refBull     = false
+var int   tradeDir    = 0
+var float entryPrice  = na
+var float trailStop   = na
+var float bestPrice   = na
+var float oppBodySum  = 0.0
+var float refClose    = na
+var float refOpen     = na
+var int   atrCount    = 0     // bars elapsed since entry for ATR check
 
 //=============================
 // Session time filter
 //=============================
 etMins     = etMinsBody
-inEodBlock = etMins >= 960 and etMins < 1080                 // 16:00–18:00 ET — no new entries
+inEodBlock = etMins >= 960 and etMins < 1080
 noEntry    = (nysOpen and etMins >= 570 and etMins < 600) or (ldnOpen and etMins >= 180 and etMins < 210) or inEodBlock
 hardClose  = (nysOpen and etMins == 565) or (ldnOpen and etMins == 175) or etMins == 225 or etMins == 960
 
 //=============================
-// Hard close before session opens
+// Hard close
 //=============================
 if hardClose and strategy.position_size != 0
-    strategy.close_all(comment="hard close→session open")
+    strategy.close_all(comment="hard close")
     tradeDir := 0
+    atrCount := 0
 
-// Pre-compute newRef here so pullback exit can skip REF bars
-newRef = cleanBody and watchCount == 0
+// REF and watch window only process when flat
+newRef = cleanBody and watchCount == 0 and tradeDir == 0
 
 //=============================
-// Pullback exit — only active before trail triggers, skip on REF bars
+// ATR exit — close if trade hasn't moved atrMult * ATR after atrBars
 //=============================
-if tradeDir == 1 and strategy.position_size != 0 and na(trailStop) and not newRef
-    peakPrice := na(peakPrice) ? close : math.max(peakPrice, close)
-    if peakPrice - close >= pullbackPts
-        strategy.close("Long", comment="pullback exit")
-        tradeDir   := 0
-        peakPrice  := na
-        bestPrice  := na
+var bool atrFired = false
+atrFired := false
 
-else if tradeDir == -1 and strategy.position_size != 0 and na(trailStop) and not newRef
-    peakPrice := na(peakPrice) ? close : math.min(peakPrice, close)
-    if close - peakPrice >= pullbackPts
-        strategy.close("Short", comment="pullback exit")
-        tradeDir   := 0
-        peakPrice  := na
-        bestPrice  := na
+if tradeDir != 0 and strategy.position_size != 0
+    atrCount += 1
+    if atrCount == atrBars
+        move    = tradeDir == 1 ? close - entryPrice : entryPrice - close
+        minMove = atrMult * atrVal
+        if move < minMove
+            atrFired := true
+            strategy.close_all(comment="ATR")
+            tradeDir := 0
+            atrCount := 0
+        else
+            atrCount := 0  // passed check — reset, no further ATR checks
 
 //=============================
 // Trailing stop management
 //=============================
+var bool trailFired = false
+trailFired := false
+
 if tradeDir == 1 and strategy.position_size != 0
     bestPrice := na(bestPrice) ? high : math.max(bestPrice, high)
     if bestPrice - entryPrice >= trailTrigger
         trailStop := math.max(na(trailStop) ? bestPrice - trailDist : trailStop, bestPrice - trailDist)
     if not na(trailStop) and low <= trailStop
-        strategy.close("Long", comment="trail stop")
+        trailFired := true
+        strategy.close("Long", comment="TRAIL")
         tradeDir  := 0
         trailStop := na
         bestPrice := na
-        peakPrice := na
+        atrCount  := 0
 
 else if tradeDir == -1 and strategy.position_size != 0
     bestPrice := na(bestPrice) ? low : math.min(bestPrice, low)
     if entryPrice - bestPrice >= trailTrigger
         trailStop := math.min(na(trailStop) ? bestPrice + trailDist : trailStop, bestPrice + trailDist)
     if not na(trailStop) and high >= trailStop
-        strategy.close("Short", comment="trail stop")
+        trailFired := true
+        strategy.close("Short", comment="TRAIL")
         tradeDir  := 0
         trailStop := na
         bestPrice := na
-        peakPrice := na
+        atrCount  := 0
 
 else
     trailStop := na
     bestPrice := na
-    peakPrice := na
 
 //=============================
 // Reference candle detection
 //=============================
 if newRef
-    // watch window resets on every new REF regardless of open trade
-    watchCount  := watchBars
-    refWidth    := body
-    refBull     := close > open
-    refClose    := close
-    refOpen     := open
-    oppBodySum  := 0.0
-
-    if tradeDir == 0 and not noEntry
-        label.new(bar_index, refBull ? high : low,
-                  text      = "REF\n" + str.tostring(body, "#.#") + "pt",
-                  style     = refBull ? label.style_label_up : label.style_label_down,
-                  color     = color.new(color.blue, 20),
-                  textcolor = color.white,
-                  size      = size.small)
+    watchCount := watchBars
+    refWidth   := body
+    refBull    := close > open
+    refClose   := close
+    refOpen    := open
+    oppBodySum := 0.0
+    label.new(bar_index, refBull ? high : low,
+              text      = "REF\n" + str.tostring(body, "#.#") + "pt",
+              style     = refBull ? label.style_label_up : label.style_label_down,
+              color     = color.new(color.blue, 20),
+              textcolor = color.white,
+              size      = size.small)
 
 //=============================
 // Watch window
@@ -145,25 +149,22 @@ isCont  := false
 isRev   := false
 revBull := false
 
-if watchCount > 0 and not newRef
+if watchCount > 0 and not newRef and tradeDir == 0
     watchCount -= 1
 
-    candleBody = math.abs(close - open)
-    revThresh  = refWidth * (revPct / 100.0)
-
-    // Accumulate opposite-direction candle bodies
+    candleBody  = math.abs(close - open)
+    revThresh   = refWidth * (revPct / 100.0)
     isOppCandle = refBull ? close < open : close > open
     if isOppCandle
         oppBodySum += candleBody
 
-    // REV: cumulative opposite bodies >= revPct% of ref body AND close has crossed below/above REF open (bottom/top of REF body)
     priceCrossed = refBull ? close < refOpen : close > refOpen
     if oppBodySum >= revThresh and priceCrossed
         isRev      := true
         revBull    := not refBull
         watchCount := 0
         oppBodySum := 0.0
-        if tradeDir == 0 and not noEntry
+        if not noEntry
             label.new(bar_index, refBull ? low : high,
                       text      = "REV",
                       style     = refBull ? label.style_label_down : label.style_label_up,
@@ -172,11 +173,10 @@ if watchCount > 0 and not newRef
                       size      = size.normal)
 
     else if watchCount == 0
-        // CONT: window expired and price still above/below REF open (momentum held)
         contPriceHeld = refBull ? close > refOpen : close < refOpen
         if contPriceHeld
             isCont := true
-            if tradeDir == 0 and not noEntry
+            if not noEntry
                 label.new(bar_index, refBull ? high : low,
                           text      = "CONT",
                           style     = refBull ? label.style_label_up : label.style_label_down,
@@ -184,9 +184,8 @@ if watchCount > 0 and not newRef
                           textcolor = color.white,
                           size      = size.normal)
 
-
 //=============================
-// Trade entries (blocked during session open windows)
+// Trade entries
 //=============================
 if isCont and tradeDir == 0 and not noEntry
     if refBull
@@ -196,7 +195,8 @@ if isCont and tradeDir == 0 and not noEntry
         entryPrice := close
         trailStop  := na
         bestPrice  := na
-        peakPrice  := na
+        watchCount := 0
+        atrCount   := 0
     else
         strategy.entry("Short", strategy.short, comment="CONT↓")
         strategy.exit("SL-Short", "Short", stop=close + stopPts)
@@ -204,7 +204,8 @@ if isCont and tradeDir == 0 and not noEntry
         entryPrice := close
         trailStop  := na
         bestPrice  := na
-        peakPrice  := na
+        watchCount := 0
+        atrCount   := 0
 
 if isRev and tradeDir == 0 and not noEntry
     if revBull
@@ -214,7 +215,8 @@ if isRev and tradeDir == 0 and not noEntry
         entryPrice := close
         trailStop  := na
         bestPrice  := na
-        peakPrice  := na
+        watchCount := 0
+        atrCount   := 0
     else
         strategy.entry("Short", strategy.short, comment="REV↓")
         strategy.exit("SL-Short", "Short", stop=close + stopPts)
@@ -222,12 +224,41 @@ if isRev and tradeDir == 0 and not noEntry
         entryPrice := close
         trailStop  := na
         bestPrice  := na
-        peakPrice  := na
+        watchCount := 0
+        atrCount   := 0
 
-// Sync tradeDir when SL or any other exit closes the position externally
+// Sync tradeDir on external close (SL)
 if strategy.position_size == 0 and strategy.position_size[1] != 0
-    tradeDir  := 0
-    peakPrice := na
+    tradeDir := 0
+    atrCount := 0
+
+//=============================
+// Exit labels
+//=============================
+if atrFired
+    label.new(bar_index, high,
+              text      = "ATR",
+              style     = label.style_label_down,
+              color     = color.new(color.orange, 20),
+              textcolor = color.white,
+              size      = size.small)
+
+if trailFired
+    label.new(bar_index, low,
+              text      = "TRAIL",
+              style     = label.style_label_up,
+              color     = color.new(color.green, 20),
+              textcolor = color.white,
+              size      = size.small)
+
+slFired = strategy.position_size == 0 and strategy.position_size[1] != 0 and not atrFired and not trailFired and not hardClose
+if slFired
+    label.new(bar_index, high,
+              text      = "SL",
+              style     = label.style_label_down,
+              color     = color.new(color.red, 20),
+              textcolor = color.white,
+              size      = size.small)
 
 //=============================
 // Background tint
@@ -245,6 +276,10 @@ if isRev and tradeDir == 1
     alert("BIR: LONG entry — REV↑ at " + str.tostring(close), alert.freq_once_per_bar)
 if isRev and tradeDir == -1
     alert("BIR: SHORT entry — REV↓ at " + str.tostring(close), alert.freq_once_per_bar)
+if atrFired
+    alert("BIR: ATR EXIT — insufficient move after " + str.tostring(atrBars) + " bars at " + str.tostring(close), alert.freq_once_per_bar)
+if trailFired
+    alert("BIR: TRAIL STOP at " + str.tostring(close), alert.freq_once_per_bar)
 
 tradeClosed = strategy.position_size == 0 and strategy.position_size[1] != 0
 if tradeClosed

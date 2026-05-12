@@ -1,83 +1,106 @@
 //@version=6
-strategy("Body Impulse Pullback", overlay=true, max_labels_count=500,
+strategy("Body Impulse Pullback", overlay=true, max_labels_count=500, max_bars_back=5000,
          default_qty_type=strategy.fixed, default_qty_value=1)
 
 //=============================
 // Inputs
 //=============================
-bodyRTH        = input.float(15.0,  "Min Body Size RTH (points)",         minval=1.0,  step=0.5)
-bodyETH        = input.float(10.0,  "Min Body Size ETH (points)",         minval=1.0,  step=0.5)
+bodyAsia       = input.float(7.5,   "Min Body Size Asia (points)",        minval=0.5,  step=0.5)
+bodyLDN        = input.float(10.0,  "Min Body Size London (points)",      minval=1.0,  step=0.5)
+bodyNY         = input.float(15.0,  "Min Body Size NY (points)",          minval=1.0,  step=0.5)
 wickPct        = input.float(50.0,  "Max Wick (% of body)",               minval=5.0,  maxval=200.0, step=5.0)
-watchBars      = input.int(12,      "Watch Window (bars)",                 minval=1,    maxval=50)
-minPullbackPct = input.float(30.0,  "Min Pull-back (% of body)",          minval=5.0,  maxval=100.0, step=5.0)
-stopPts        = input.float(100.0, "Stop Loss (points)",                  minval=1.0,  step=0.5)
+watchBarsHigh  = input.int(12,      "Watch Window — slow market (bars)",   minval=1,    maxval=50,   group="Dynamic Watch Window")
+watchBarsLow   = input.int(5,       "Watch Window — fast market (bars)",   minval=1,    maxval=50,   group="Dynamic Watch Window")
+volLookback    = input.int(10,      "Volatility lookback (bars)",          minval=2,    maxval=50,   group="Dynamic Watch Window")
+volThresh      = input.float(10.0,  "Avg range threshold (pts)",           minval=0.5,  step=0.5,    group="Dynamic Watch Window")
+cooldownBars   = input.int(5,       "Cooldown after re-anchor (bars)",     minval=0,    maxval=20,   group="Dynamic Watch Window")
+minPullbackPct = input.float(50.0,  "Min Pull-back (% of body)",          minval=5.0,  maxval=100.0, step=5.0)
+pullbackClose  = input.bool(false,  "Pullback uses close (off = high/low)")
+slMult         = input.float(1.5,   "SL multiplier (× ref body)",         minval=0.1,  step=0.1)
 tpMult         = input.float(2.0,   "TP multiplier (× ref body)",         minval=0.1,  step=0.1)
-flipPct        = input.float(50.0,  "Flip trigger (% drop from high)",    minval=5.0,  maxval=100.0, step=5.0)
-nysOpen        = input.bool(false,  "Block NYSE open (09:30 ET, 30 min)")
-ldnOpen        = input.bool(false,  "Block LDN open (03:00 ET, 30 min)")
+maxEntryDist   = input.float(10.0,  "Max entry distance from anchor (pts)", minval=0.5, step=0.5)
+startDate      = input.time(timestamp("2000-01-01"), "Backtest Start Date", group="Backtest Range")
 
 //=============================
 // Per-bar body metrics
 //=============================
 body      = math.abs(close - open)
-bodyWhole = math.round(body)
 upperWick = high - math.max(open, close)
 lowerWick = math.min(open, close) - low
 wickLimit = body * (wickPct / 100.0)
 
-etMinsBody = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
-inRTH      = etMinsBody >= 570 and etMinsBody < 960
-bodyPts    = inRTH ? bodyRTH : bodyETH
+etMinsBody = hour(time, "America/Chicago") * 60 + minute(time, "America/Chicago")
+// Asia: 18:00–01:00 CT (1080–1440 and 0–60), London: 02:00–08:30 CT (120–510), NY: 08:30–15:00 CT (510–900)
+inAsia     = etMinsBody >= 1080 or etMinsBody < 60
+inLDN      = etMinsBody >= 120 and etMinsBody < 510
+inNY       = etMinsBody >= 510 and etMinsBody < 900
+bodyPts    = inNY ? bodyNY : inLDN ? bodyLDN : inAsia ? bodyAsia : bodyAsia
 
-cleanBody  = bodyWhole >= bodyPts and upperWick <= wickLimit and lowerWick <= wickLimit
+cleanBody  = body >= bodyPts and upperWick <= wickLimit and lowerWick <= wickLimit
 
 //=============================
-// Session time filter
+// Dynamic watch window
 //=============================
-etMins     = etMinsBody
-inEodBlock = etMins >= 960 and etMins < 1080
-noEntry    = (nysOpen and etMins >= 570 and etMins < 600) or (ldnOpen and etMins >= 180 and etMins < 210) or inEodBlock
-hardClose  = (nysOpen and etMins == 565) or (ldnOpen and etMins == 175) or etMins == 225 or etMins == 960
+avgRange  = ta.sma(high - low, volLookback)
+watchBars = avgRange >= volThresh ? watchBarsLow : watchBarsHigh
 
 //=============================
 // State
 //=============================
 var int   watchCount    = 0
+var int   cooldownCount = 0
 var float refOpen       = na
 var float refClose      = na
 var float refBody       = na
 var bool  refBull       = false
-var bool  pullbackDone  = false   // phase 1 complete — pull-back depth reached
-var int   tradeDir      = 0       // 0=flat, 1=long, -1=short
-var bool  isFlip        = false   // current trade is a flip (phase 4)
-var float bestPrice     = na      // highest high (long) / lowest low (short) since entry
+var bool  pullbackDone  = false
+var int   tradeDir      = 0
 
 //=============================
-// Hard close
+// EOD reset — 15:00–16:00 CT hard close
 //=============================
-if hardClose and strategy.position_size != 0
-    strategy.close_all(comment="hard close")
-    tradeDir    := 0
-    isFlip      := false
-    bestPrice   := na
-    watchCount  := 0
+eodClose = etMinsBody >= 900 and etMinsBody < 960
+if eodClose and strategy.position_size != 0
+    strategy.close_all(comment="EOD")
+if eodClose
+    tradeDir      := 0
+    watchCount    := 0
+    cooldownCount := 0
+    pullbackDone  := false
+    refOpen       := na
+    refClose      := na
+    refBody       := na
+
+//=============================
+// Sync tradeDir on TP/SL close — BEFORE newRef so same bar can fire REF
+//=============================
+if strategy.position_size == 0 and tradeDir != 0
+    tradeDir      := 0
+    watchCount    := 0
+    cooldownCount := 0
+    pullbackDone  := false
+    refOpen       := na
+    refClose      := na
+    refBody       := na
 
 //=============================
 // Reference candle detection
 //=============================
-newRef = cleanBody and watchCount == 0 and tradeDir == 0
+immediateReRef = cleanBody and watchCount == watchBars and cooldownCount == 0 and tradeDir == 0 and not eodClose and time >= startDate
+newRef         = (cleanBody and watchCount == 0 and cooldownCount == 0 and tradeDir == 0 and not eodClose and time >= startDate) or immediateReRef
 
 if newRef
-    watchCount   := watchBars
-    refOpen      := open
-    refClose     := close
-    refBody      := body
-    refBull      := close > open
-    pullbackDone := false
+    watchCount    := watchBars
+    cooldownCount := immediateReRef ? cooldownBars : 0
+    refOpen       := open
+    refClose      := close
+    refBody       := body
+    refBull       := close > open
+    pullbackDone  := false
     label.new(bar_index, refBull ? high : low,
               text      = "REF\n" + str.tostring(body, "#.#") + "pt",
               style     = refBull ? label.style_label_up : label.style_label_down,
-              color     = color.new(color.blue, 20),
+              color     = refBull ? color.new(color.green, 20) : color.new(color.red, 20),
               textcolor = color.white,
               size      = size.small)
 
@@ -85,38 +108,39 @@ if newRef
 // Watch window — pull-back + recovery
 //=============================
 var bool isCont = false
-var bool isRev  = false
 isCont := false
-isRev  := false
 
-if watchCount > 0 and not newRef and tradeDir == 0
+if cooldownCount > 0 and not newRef
+    cooldownCount -= 1
+
+if watchCount > 0 and cooldownCount == 0 and not newRef and tradeDir == 0 and not eodClose
     watchCount -= 1
 
     pullbackThresh = refBody * (minPullbackPct / 100.0)
 
-    // Phase 1 — wait for minimum pull-back below refClose (bull) / above refClose (bear)
+    // Phase 1 — price must reach pullback zone
     if not pullbackDone
-        if refBull and low <= refClose - pullbackThresh
+        pullbackPrice = pullbackClose ? close : (refBull ? low : high)
+        if refBull and pullbackPrice <= refClose - pullbackThresh
             pullbackDone := true
-        else if not refBull and high >= refClose + pullbackThresh
+        else if not refBull and pullbackPrice >= refClose + pullbackThresh
             pullbackDone := true
 
-    // Phase 2 — pull-back confirmed, wait for recovery above refClose (bull) / below refClose (bear)
+    // Phase 2 — pull-back confirmed, wait for recovery past refClose within maxEntryDist
     else
-        if refBull and close > refClose
+        if refBull and close > refClose and close <= refClose + maxEntryDist
             isCont     := true
             watchCount := 0
-        else if not refBull and close < refClose
+        else if not refBull and close < refClose and close >= refClose - maxEntryDist
             isCont     := true
             watchCount := 0
-
-    // Window expired with pull-back done but no recovery → silent expiry
-    // Window expired with no pull-back → silent expiry
+        else if watchCount == 0
+            pullbackDone := false  // silent expiry after pullback
 
 //=============================
-// Signal labels
+// Signal label
 //=============================
-if isCont and not noEntry
+if isCont
     label.new(bar_index, refBull ? high : low,
               text      = "CONT",
               style     = refBull ? label.style_label_up : label.style_label_down,
@@ -125,70 +149,25 @@ if isCont and not noEntry
               size      = size.normal)
 
 //=============================
-// Trade entries — Phase 3 (initial CONT)
+// Trade entry — CONT
 //=============================
-if isCont and tradeDir == 0 and not noEntry
+if isCont and tradeDir == 0 and not eodClose
+    strategy.cancel_all()
     tpLevel = refBull ? refClose + refBody * tpMult : refClose - refBody * tpMult
-    slLevel = refBull ? close - stopPts : close + stopPts
+    slLevel = refBull ? close - refBody * slMult : close + refBody * slMult
     if refBull
         strategy.entry("Long",  strategy.long,  comment="CONT↑")
-        strategy.exit("TP/SL-Long",  "Long",  limit=tpLevel, stop=slLevel)
+        strategy.exit("Exit-Long",  "Long",  limit=tpLevel, stop=slLevel)
     else
         strategy.entry("Short", strategy.short, comment="CONT↓")
-        strategy.exit("TP/SL-Short", "Short", limit=tpLevel, stop=slLevel)
-    tradeDir  := refBull ? 1 : -1
-    isFlip    := false
-    bestPrice := close
+        strategy.exit("Exit-Short", "Short", limit=tpLevel, stop=slLevel)
+    tradeDir   := refBull ? 1 : -1
     watchCount := 0
-
-//=============================
-// Phase 4 — flip monitoring while in initial trade
-//=============================
-if tradeDir != 0 and not isFlip and strategy.position_size != 0
-    // Track best price
-    if tradeDir == 1
-        bestPrice := na(bestPrice) ? high : math.max(bestPrice, high)
-    else
-        bestPrice := na(bestPrice) ? low : math.min(bestPrice, low)
-
-    // Check flip condition
-    flipThresh = refBody * (flipPct / 100.0)
-    flipTriggered = tradeDir == 1 ? (bestPrice - low >= flipThresh) : (high - bestPrice >= flipThresh)
-
-    if flipTriggered
-        strategy.close_all(comment="FLIP")
-        flipEntry = close
-        tpFlip    = tradeDir == 1 ? flipEntry - refBody * tpMult : flipEntry + refBody * tpMult
-        slFlip    = tradeDir == 1 ? flipEntry + refBody * 0.5    : flipEntry - refBody * 0.5
-        if tradeDir == 1
-            strategy.entry("Short", strategy.short, comment="FLIP↓")
-            strategy.exit("TP/SL-Flip", "Short", limit=tpFlip, stop=slFlip)
-        else
-            strategy.entry("Long",  strategy.long,  comment="FLIP↑")
-            strategy.exit("TP/SL-Flip", "Long",  limit=tpFlip, stop=slFlip)
-        tradeDir  := tradeDir * -1
-        isFlip    := true
-        bestPrice := na
-        label.new(bar_index, tradeDir == -1 ? high : low,
-                  text      = "FLIP",
-                  style     = tradeDir == -1 ? label.style_label_down : label.style_label_up,
-                  color     = color.new(color.purple, 10),
-                  textcolor = color.white,
-                  size      = size.normal)
-
-//=============================
-// Sync tradeDir on external close (TP or SL hit)
-//=============================
-if strategy.position_size == 0 and strategy.position_size[1] != 0
-    tradeDir  := 0
-    isFlip    := false
-    bestPrice := na
 
 //=============================
 // Exit labels
 //=============================
-tradeClosed = strategy.position_size == 0 and strategy.position_size[1] != 0
-if tradeClosed
+if strategy.position_size == 0 and strategy.position_size[1] != 0
     isTP = strategy.netprofit > strategy.netprofit[1]
     if isTP
         label.new(bar_index, low,
@@ -217,5 +196,3 @@ if isCont and tradeDir == 1
     alert("BIP: LONG entry — CONT↑ at " + str.tostring(close), alert.freq_once_per_bar)
 if isCont and tradeDir == -1
     alert("BIP: SHORT entry — CONT↓ at " + str.tostring(close), alert.freq_once_per_bar)
-if hardClose
-    alert("BIP: HARD CLOSE — session open in 5 min", alert.freq_once_per_bar)

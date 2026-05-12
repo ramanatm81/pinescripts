@@ -18,7 +18,6 @@ ldnOpen   = input.bool(false,  "Block LDN open (03:00 ET, 30 min)")
 // Per-bar body metrics
 //=============================
 body      = math.abs(close - open)
-bodyWhole = math.round(body)
 upperWick = high - math.max(open, close)
 lowerWick = math.min(open, close) - low
 wickLimit = body * (wickPct / 100.0)
@@ -27,7 +26,7 @@ etMinsBody = hour(time, "America/New_York") * 60 + minute(time, "America/New_Yor
 inRTH      = etMinsBody >= 570 and etMinsBody < 960
 bodyPts    = inRTH ? bodyRTH : bodyETH
 
-cleanBody  = bodyWhole >= bodyPts and upperWick <= wickLimit and lowerWick <= wickLimit
+cleanBody  = body >= bodyPts and upperWick <= wickLimit and lowerWick <= wickLimit
 
 //=============================
 // Session time filter
@@ -47,6 +46,7 @@ var float refBody     = na
 var bool  refBull     = false
 var bool  touched     = false   // price has pulled back to refOpen within window
 var int   tradeDir    = 0
+var int   lastDir     = 0
 var float entryPrice  = na
 
 //=============================
@@ -108,9 +108,7 @@ if watchCount > 0 and not newRef and tradeDir == 0
             else if watchCount == 0
                 isRev := true
 
-    // Window expired without ever touching refOpen — silent expiry
-    if watchCount == 0 and not touched
-        // no signal, reset naturally
+    // Window expired without ever touching refOpen — silent expiry, touched resets on next newRef
 
 //=============================
 // Signal labels
@@ -140,29 +138,31 @@ if isCont and tradeDir == 0 and not noEntry
         strategy.entry("Long",  strategy.long,  comment="CONT↑")
         strategy.exit("TP/SL-Long",  "Long",  limit=refClose + tpDist, stop=close - stopPts)
         tradeDir   := 1
+        lastDir    := 1
         entryPrice := close
         watchCount := 0
     else
         strategy.entry("Short", strategy.short, comment="CONT↓")
         strategy.exit("TP/SL-Short", "Short", limit=refClose - tpDist, stop=close + stopPts)
         tradeDir   := -1
+        lastDir    := -1
         entryPrice := close
         watchCount := 0
 
 if isRev and tradeDir == 0 and not noEntry
     tpDist = refBody * tpMult
     if refBull
-        // bull REF pulled back but never resumed → short
         strategy.entry("Short", strategy.short, comment="REV↓")
         strategy.exit("TP/SL-Short", "Short", limit=refOpen - tpDist, stop=close + stopPts)
         tradeDir   := -1
+        lastDir    := -1
         entryPrice := close
         watchCount := 0
     else
-        // bear REF pulled back but never resumed → long
         strategy.entry("Long",  strategy.long,  comment="REV↑")
         strategy.exit("TP/SL-Long",  "Long",  limit=refOpen + tpDist, stop=close - stopPts)
         tradeDir   := 1
+        lastDir    := 1
         entryPrice := close
         watchCount := 0
 
@@ -171,16 +171,11 @@ if strategy.position_size == 0 and strategy.position_size[1] != 0
     tradeDir := 0
 
 //=============================
-// Exit labels
-// TP = exit price better than entry; SL = exit price worse than entry
+// Exit labels — profit delta on close bar distinguishes TP from SL
 //=============================
 tradeClosed = strategy.position_size == 0 and strategy.position_size[1] != 0
 if tradeClosed
-    idx      = strategy.closedtrades.size() - 1
-    exitPx   = strategy.closedtrades.exit_price(idx)
-    entryPx  = strategy.closedtrades.entry_price(idx)
-    prevDir  = strategy.closedtrades.size() > 0 ? (strategy.closedtrades.entry_id(idx) == "Long" ? 1 : -1) : 0
-    isTP     = prevDir == 1 ? exitPx > entryPx : exitPx < entryPx
+    isTP = strategy.netprofit > strategy.netprofit[1]
     if isTP
         label.new(bar_index, low,
                   text      = "TP",
