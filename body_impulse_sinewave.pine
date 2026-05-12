@@ -1,0 +1,216 @@
+//@version=6
+strategy("Body Impulse Sine Wave", overlay=true, max_labels_count=500,
+         default_qty_type=strategy.fixed, default_qty_value=1)
+
+//=============================
+// Inputs
+//=============================
+bodyRTH   = input.float(15.0,  "Min Body Size RTH (points)",   minval=1.0,  step=0.5)
+bodyETH   = input.float(10.0,  "Min Body Size ETH (points)",   minval=1.0,  step=0.5)
+wickPct   = input.float(50.0,  "Max Wick (% of body)",         minval=5.0,  maxval=200.0, step=5.0)
+watchBars = input.int(10,       "Watch Window (bars)",          minval=1,    maxval=50)
+stopPts   = input.float(100.0, "Stop Loss (points)",           minval=1.0,  step=0.5)
+tpMult    = input.float(1.0,   "TP multiplier (× ref body)",  minval=0.1,  step=0.1)
+nysOpen   = input.bool(false,  "Block NYSE open (09:30 ET, 30 min)")
+ldnOpen   = input.bool(false,  "Block LDN open (03:00 ET, 30 min)")
+
+//=============================
+// Per-bar body metrics
+//=============================
+body      = math.abs(close - open)
+bodyWhole = math.round(body)
+upperWick = high - math.max(open, close)
+lowerWick = math.min(open, close) - low
+wickLimit = body * (wickPct / 100.0)
+
+etMinsBody = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
+inRTH      = etMinsBody >= 570 and etMinsBody < 960
+bodyPts    = inRTH ? bodyRTH : bodyETH
+
+cleanBody  = bodyWhole >= bodyPts and upperWick <= wickLimit and lowerWick <= wickLimit
+
+//=============================
+// Session time filter
+//=============================
+etMins     = etMinsBody
+inEodBlock = etMins >= 960 and etMins < 1080
+noEntry    = (nysOpen and etMins >= 570 and etMins < 600) or (ldnOpen and etMins >= 180 and etMins < 210) or inEodBlock
+hardClose  = (nysOpen and etMins == 565) or (ldnOpen and etMins == 175) or etMins == 225 or etMins == 960
+
+//=============================
+// State
+//=============================
+var int   watchCount  = 0
+var float refOpen     = na
+var float refClose    = na
+var float refBody     = na
+var bool  refBull     = false
+var bool  touched     = false   // price has pulled back to refOpen within window
+var int   tradeDir    = 0
+var float entryPrice  = na
+
+//=============================
+// Hard close
+//=============================
+if hardClose and strategy.position_size != 0
+    strategy.close_all(comment="hard close")
+    tradeDir := 0
+
+//=============================
+// Reference candle detection — only when flat and no active window
+//=============================
+newRef = cleanBody and watchCount == 0 and tradeDir == 0
+
+if newRef
+    watchCount := watchBars
+    refOpen    := open
+    refClose   := close
+    refBody    := body
+    refBull    := close > open
+    touched    := false
+    label.new(bar_index, refBull ? high : low,
+              text      = "REF\n" + str.tostring(body, "#.#") + "pt",
+              style     = refBull ? label.style_label_up : label.style_label_down,
+              color     = color.new(color.blue, 20),
+              textcolor = color.white,
+              size      = size.small)
+
+//=============================
+// Watch window — sine wave logic
+//=============================
+var bool isCont = false
+var bool isRev  = false
+isCont := false
+isRev  := false
+
+if watchCount > 0 and not newRef and tradeDir == 0
+    watchCount -= 1
+
+    // Phase 1 — wait for pull-back to refOpen
+    if not touched
+        if refBull and low <= refOpen
+            touched := true
+        else if not refBull and high >= refOpen
+            touched := true
+
+    // Phase 2 — after touch, check for continuation or window expiry
+    else
+        if refBull
+            if close > refClose
+                isCont     := true
+                watchCount := 0
+            else if watchCount == 0
+                isRev := true
+        else
+            if close < refClose
+                isCont     := true
+                watchCount := 0
+            else if watchCount == 0
+                isRev := true
+
+    // Window expired without ever touching refOpen — silent expiry
+    if watchCount == 0 and not touched
+        // no signal, reset naturally
+
+//=============================
+// Signal labels
+//=============================
+if isCont and not noEntry
+    label.new(bar_index, refBull ? high : low,
+              text      = "CONT",
+              style     = refBull ? label.style_label_up : label.style_label_down,
+              color     = color.new(color.teal, 10),
+              textcolor = color.white,
+              size      = size.normal)
+
+if isRev and not noEntry
+    label.new(bar_index, refBull ? low : high,
+              text      = "REV",
+              style     = refBull ? label.style_label_down : label.style_label_up,
+              color     = color.new(color.red, 10),
+              textcolor = color.white,
+              size      = size.normal)
+
+//=============================
+// Trade entries
+//=============================
+if isCont and tradeDir == 0 and not noEntry
+    tpDist = refBody * tpMult
+    if refBull
+        strategy.entry("Long",  strategy.long,  comment="CONT↑")
+        strategy.exit("TP/SL-Long",  "Long",  limit=refClose + tpDist, stop=close - stopPts)
+        tradeDir   := 1
+        entryPrice := close
+        watchCount := 0
+    else
+        strategy.entry("Short", strategy.short, comment="CONT↓")
+        strategy.exit("TP/SL-Short", "Short", limit=refClose - tpDist, stop=close + stopPts)
+        tradeDir   := -1
+        entryPrice := close
+        watchCount := 0
+
+if isRev and tradeDir == 0 and not noEntry
+    tpDist = refBody * tpMult
+    if refBull
+        // bull REF pulled back but never resumed → short
+        strategy.entry("Short", strategy.short, comment="REV↓")
+        strategy.exit("TP/SL-Short", "Short", limit=refOpen - tpDist, stop=close + stopPts)
+        tradeDir   := -1
+        entryPrice := close
+        watchCount := 0
+    else
+        // bear REF pulled back but never resumed → long
+        strategy.entry("Long",  strategy.long,  comment="REV↑")
+        strategy.exit("TP/SL-Long",  "Long",  limit=refOpen + tpDist, stop=close - stopPts)
+        tradeDir   := 1
+        entryPrice := close
+        watchCount := 0
+
+// Sync tradeDir on external close (SL hit)
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    tradeDir := 0
+
+//=============================
+// Exit labels
+// TP = exit price better than entry; SL = exit price worse than entry
+//=============================
+tradeClosed = strategy.position_size == 0 and strategy.position_size[1] != 0
+if tradeClosed
+    idx      = strategy.closedtrades.size() - 1
+    exitPx   = strategy.closedtrades.exit_price(idx)
+    entryPx  = strategy.closedtrades.entry_price(idx)
+    prevDir  = strategy.closedtrades.size() > 0 ? (strategy.closedtrades.entry_id(idx) == "Long" ? 1 : -1) : 0
+    isTP     = prevDir == 1 ? exitPx > entryPx : exitPx < entryPx
+    if isTP
+        label.new(bar_index, low,
+                  text      = "TP",
+                  style     = label.style_label_up,
+                  color     = color.new(color.green, 20),
+                  textcolor = color.white,
+                  size      = size.small)
+    else
+        label.new(bar_index, high,
+                  text      = "SL",
+                  style     = label.style_label_down,
+                  color     = color.new(color.red, 20),
+                  textcolor = color.white,
+                  size      = size.small)
+
+//=============================
+// Background tint
+//=============================
+bgcolor(watchCount > 0 ? color.new(color.yellow, 92) : na, title="Watch Window")
+
+//=============================
+// Alerts
+//=============================
+if isCont and tradeDir == 1
+    alert("BSW: LONG entry — CONT↑ at " + str.tostring(close), alert.freq_once_per_bar)
+if isCont and tradeDir == -1
+    alert("BSW: SHORT entry — CONT↓ at " + str.tostring(close), alert.freq_once_per_bar)
+if isRev and tradeDir == 1
+    alert("BSW: LONG entry — REV↑ at " + str.tostring(close), alert.freq_once_per_bar)
+if isRev and tradeDir == -1
+    alert("BSW: SHORT entry — REV↓ at " + str.tostring(close), alert.freq_once_per_bar)
+if hardClose
+    alert("BSW: HARD CLOSE — session open in 5 min", alert.freq_once_per_bar)
