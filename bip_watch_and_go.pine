@@ -1,0 +1,199 @@
+//@version=6
+strategy("BIP — Watch & Go", overlay=true, max_labels_count=500, max_bars_back=5000,
+         default_qty_type=strategy.fixed, default_qty_value=1)
+
+//=============================
+// Inputs
+//=============================
+bodyAsia      = input.float(7.5,  "Min Body Size Asia (points)",       minval=0.5,  step=0.5)
+bodyLDN       = input.float(10.0, "Min Body Size London (points)",     minval=1.0,  step=0.5)
+bodyNY        = input.float(15.0, "Min Body Size NY (points)",         minval=1.0,  step=0.5)
+wickPct       = input.float(50.0, "Max Wick (% of body)",              minval=5.0,  maxval=200.0, step=5.0)
+watchBars     = input.int(5,      "Watch Window (bars)",                minval=1,    maxval=50)
+slMult        = input.float(1.0,  "SL multiplier (× ref body)",        minval=0.1,  step=0.1)
+tpMult        = input.float(3.0,  "TP multiplier (× ref body)",        minval=0.1,  step=0.1)
+trailTrigger  = input.float(20.0, "Trail trigger (points profit)",     minval=1.0,  step=0.5, group="Trailing Stop")
+trailDist     = input.float(10.0, "Trail distance (points)",           minval=1.0,  step=0.5, group="Trailing Stop")
+startDate     = input.time(timestamp("2000-01-01"), "Backtest Start Date", group="Backtest Range")
+
+//=============================
+// Per-bar body metrics
+//=============================
+body      = math.abs(close - open)
+upperWick = high - math.max(open, close)
+lowerWick = math.min(open, close) - low
+wickLimit = body * (wickPct / 100.0)
+
+ctMins = hour(time, "America/Chicago") * 60 + minute(time, "America/Chicago")
+inAsia = ctMins >= 1080 or ctMins < 60
+inLDN  = ctMins >= 120 and ctMins < 510
+inNY   = ctMins >= 510 and ctMins < 900
+bodyPts = inNY ? bodyNY : inLDN ? bodyLDN : bodyAsia
+
+cleanBody = body >= bodyPts and upperWick <= wickLimit and lowerWick <= wickLimit
+
+//=============================
+// State
+//=============================
+var int   watchCount = 0
+var float refClose   = na
+var float refBody    = na
+var bool  refBull    = false
+var int   tradeDir   = 0
+var float entryPrice = na
+var float bestPrice  = na
+var float trailStop  = na
+
+//=============================
+// EOD hard close — 15:00 CT
+//=============================
+eodClose = ctMins >= 900 and ctMins < 960
+
+if eodClose and strategy.position_size != 0
+    strategy.close_all(comment="EOD")
+
+if eodClose
+    tradeDir   := 0
+    watchCount := 0
+    refClose   := na
+    refBody    := na
+    trailStop  := na
+    bestPrice  := na
+
+//=============================
+// Sync on external close (TP/SL)
+//=============================
+if strategy.position_size == 0 and strategy.position_size[1] != 0 and tradeDir != 0
+    tradeDir  := 0
+    trailStop := na
+    bestPrice := na
+
+//=============================
+// Trailing stop management
+//=============================
+var bool trailFired = false
+trailFired := false
+
+if tradeDir == 1 and strategy.position_size != 0
+    bestPrice := na(bestPrice) ? high : math.max(bestPrice, high)
+    if bestPrice - entryPrice >= trailTrigger
+        trailStop := math.max(na(trailStop) ? bestPrice - trailDist : trailStop, bestPrice - trailDist)
+    if not na(trailStop) and low <= trailStop
+        trailFired := true
+        strategy.close("Long", comment="TRAIL")
+        tradeDir  := 0
+        trailStop := na
+        bestPrice := na
+
+else if tradeDir == -1 and strategy.position_size != 0
+    bestPrice := na(bestPrice) ? low : math.min(bestPrice, low)
+    if entryPrice - bestPrice >= trailTrigger
+        trailStop := math.min(na(trailStop) ? bestPrice + trailDist : trailStop, bestPrice + trailDist)
+    if not na(trailStop) and high >= trailStop
+        trailFired := true
+        strategy.close("Short", comment="TRAIL")
+        tradeDir  := 0
+        trailStop := na
+        bestPrice := na
+
+else
+    trailStop := na
+    bestPrice := na
+
+//=============================
+// Reference candle detection
+//=============================
+newRef = cleanBody and watchCount == 0 and tradeDir == 0 and not eodClose and time >= startDate
+
+if newRef
+    watchCount := watchBars
+    refClose   := close
+    refBody    := body
+    refBull    := close > open
+    label.new(bar_index, refBull ? high : low,
+              text      = "REF\n" + str.tostring(body, "#.#") + "pt",
+              style     = refBull ? label.style_label_up : label.style_label_down,
+              color     = refBull ? color.new(color.green, 20) : color.new(color.red, 20),
+              textcolor = color.white,
+              size      = size.small)
+
+//=============================
+// Watch window countdown + CONT check
+//=============================
+var bool isCont = false
+isCont := false
+
+if watchCount > 0 and not newRef and tradeDir == 0 and not eodClose
+    watchCount -= 1
+
+    if watchCount == 0
+        tickSize      = syminfo.mintick
+        roundedClose  = math.round(close    / tickSize) * tickSize
+        roundedRef    = math.round(refClose / tickSize) * tickSize
+        contFired     = refBull ? roundedClose >= roundedRef : roundedClose <= roundedRef
+        if contFired
+            isCont := true
+
+//=============================
+// CONT label
+//=============================
+if isCont
+    label.new(bar_index, refBull ? high : low,
+              text      = "CONT",
+              style     = refBull ? label.style_label_up : label.style_label_down,
+              color     = color.new(color.teal, 10),
+              textcolor = color.white,
+              size      = size.normal)
+
+//=============================
+// Trade entry
+//=============================
+if isCont and tradeDir == 0 and not eodClose
+    tpLevel = refBull ? close + refBody * tpMult : close - refBody * tpMult
+    slLevel = refBull ? close - refBody * slMult : close + refBody * slMult
+    if refBull
+        strategy.entry("Long",  strategy.long,  comment="CONT↑")
+        strategy.exit("Exit-Long",  "Long",  limit=tpLevel, stop=slLevel)
+    else
+        strategy.entry("Short", strategy.short, comment="CONT↓")
+        strategy.exit("Exit-Short", "Short", limit=tpLevel, stop=slLevel)
+    tradeDir   := refBull ? 1 : -1
+    entryPrice := close
+    trailStop  := na
+    bestPrice  := na
+
+//=============================
+// Exit labels
+//=============================
+if trailFired
+    label.new(bar_index, refBull ? low : high,
+              text      = "TRAIL",
+              style     = refBull ? label.style_label_up : label.style_label_down,
+              color     = color.new(color.green, 20),
+              textcolor = color.white,
+              size      = size.small)
+
+exitFired = strategy.position_size == 0 and strategy.position_size[1] != 0 and not trailFired and not eodClose
+if exitFired
+    isTP = strategy.netprofit > strategy.netprofit[1]
+    label.new(bar_index, isTP ? low : high,
+              text      = isTP ? "TP" : "SL",
+              style     = isTP ? label.style_label_up : label.style_label_down,
+              color     = isTP ? color.new(color.green, 20) : color.new(color.red, 20),
+              textcolor = color.white,
+              size      = size.small)
+
+//=============================
+// Background tint
+//=============================
+bgcolor(watchCount > 0 ? color.new(color.yellow, 92) : na, title="Watch Window")
+
+//=============================
+// Alerts
+//=============================
+if isCont and tradeDir == 1
+    alert("BIPv2: LONG entry — CONT↑ at " + str.tostring(close), alert.freq_once_per_bar)
+if isCont and tradeDir == -1
+    alert("BIPv2: SHORT entry — CONT↓ at " + str.tostring(close), alert.freq_once_per_bar)
+if trailFired
+    alert("BIPv2: TRAIL STOP at " + str.tostring(close), alert.freq_once_per_bar)
