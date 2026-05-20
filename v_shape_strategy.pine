@@ -10,7 +10,8 @@ minLegRTH    = input.float(30.0,"Min leg size RTH (pts, 08:30–15:00 CT)", minv
 minLegETH    = input.float(20.0,"Min leg size ETH (pts, outside RTH)",    minval=1.0, step=1.0)
 minR2        = input.float(0.70,"Min R² (leg linearity, 0–1)",            minval=0.0, maxval=1.0, step=0.05)
 watchBars    = input.int(5,     "Confirm watch window (bars)",            minval=1,   maxval=20,  group="Confirm")
-confirmPts   = input.float(10.0,"Confirm threshold (pts in V direction)", minval=0.5, step=0.5,  group="Confirm")
+confirmPts   = input.float(5.0, "Confirm threshold (pts in V direction)", minval=0.5, step=0.5,  group="Confirm")
+invalidPts   = input.float(5.0, "Expiry invalidation (pts against V)",    minval=0.5, step=0.5,  group="Confirm")
 showDetect   = input.bool(false,"Show detection labels (V↑? / R↓?)",     group="Confirm")
 slPts        = input.float(10.0,"Stop Loss (pts from entry)",             minval=0.5, step=0.5)
 tpPts        = input.float(30.0,"TP base (pts from entry)",               minval=0.5, step=0.5)
@@ -337,7 +338,13 @@ if inWatch and not eodClose and not nyOpenBlock
         inWatch    := false
         watchCount := 0
     else if watchCount <= 0
-        prevWindowDir := vDir
+        // Enter on expiry if price hasn't moved against the V by more than invalidPts
+        bullExpiry = vDir == 1  and close >= vClose - invalidPts
+        bearExpiry = vDir == -1 and close <= vClose + invalidPts
+        if bullExpiry or bearExpiry
+            confirmed := true
+        else
+            prevWindowDir := vDir
         inWatch    := false
         watchCount := 0
         vDir       := 0
