@@ -5,21 +5,22 @@ strategy("V-Shape Strategy", overlay=true, max_labels_count=500, max_bars_back=5
 //=============================
 // Inputs
 //=============================
-lookback     = input.int(10,    "Left leg lookback (bars)",          minval=2,   maxval=50)
-minLeg       = input.float(30.0,"Min left leg size (points)",        minval=1.0, step=1.0)
-slPts        = input.float(10.0, "Stop Loss (pts from entry)",        minval=0.5, step=0.5)
-tpPts        = input.float(30.0, "TP base (pts from entry)",          minval=0.5, step=0.5)
-tpMult       = input.float(3.0,  "TP multiplier (× TP base)",         minval=0.1, step=0.1)
-trailTrigger = input.float(20.0,"Trail trigger (points profit)",      minval=1.0, step=0.5, group="Trailing Stop")
-trailDist    = input.float(10.0,"Trail distance (points)",            minval=1.0, step=0.5, group="Trailing Stop")
-bodyAsia     = input.float(7.5, "Min Body Asia (pts)",                minval=0.5, step=0.5, group="REF Filter")
-bodyLDN      = input.float(10.0,"Min Body London (pts)",              minval=1.0, step=0.5, group="REF Filter")
-bodyNY       = input.float(15.0,"Min Body NY (pts)",                  minval=1.0, step=0.5, group="REF Filter")
-wickPct      = input.float(50.0,"Max Wick (% of body)",               minval=5.0, maxval=200.0, step=5.0, group="REF Filter")
-enableChop   = input.bool(true,  "Enable chop scalps when flat",      group="Chop Mode")
-chopSLPts    = input.float(10.0, "Chop SL (pts from entry)",          minval=0.5, step=0.5, group="Chop Mode")
-chopTPPts    = input.float(10.0, "Chop TP (pts from entry)",          minval=0.5, step=0.5, group="Chop Mode")
-blockNYOpen  = input.bool(false, "Block NY open first 30 min (08:30–09:00 CT)", group="Session Filter")
+lookback     = input.int(10,    "Left leg lookback (bars)",               minval=2,   maxval=50)
+minLegRTH    = input.float(30.0,"Min leg size RTH (pts, 08:30–15:00 CT)", minval=1.0, step=1.0)
+minLegETH    = input.float(20.0,"Min leg size ETH (pts, outside RTH)",    minval=1.0, step=1.0)
+minR2        = input.float(0.70,"Min R² (leg linearity, 0–1)",            minval=0.0, maxval=1.0, step=0.05)
+watchBars    = input.int(5,     "Confirm watch window (bars)",            minval=1,   maxval=20,  group="Confirm")
+confirmPts   = input.float(10.0,"Confirm threshold (pts in V direction)", minval=0.5, step=0.5,  group="Confirm")
+showDetect   = input.bool(false,"Show detection labels (V↑? / R↓?)",     group="Confirm")
+slPts        = input.float(10.0,"Stop Loss (pts from entry)",             minval=0.5, step=0.5)
+tpPts        = input.float(30.0,"TP base (pts from entry)",               minval=0.5, step=0.5)
+tpMult       = input.float(3.0, "TP multiplier (× TP base)",              minval=0.1, step=0.1)
+trailTrigger = input.float(20.0,"Trail trigger (points profit)",          minval=1.0, step=0.5,  group="Trailing Stop")
+trailDist    = input.float(10.0,"Trail distance (points)",                minval=1.0, step=0.5,  group="Trailing Stop")
+enableChop   = input.bool(true, "Enable chop scalps when flat",           group="Chop Mode")
+chopSLPts    = input.float(10.0,"Chop SL (pts from entry)",               minval=0.5, step=0.5,  group="Chop Mode")
+chopTPPts    = input.float(10.0,"Chop TP (pts from entry)",               minval=0.5, step=0.5,  group="Chop Mode")
+blockNYOpen  = input.bool(false,"Block NY open first 30 min (08:30–09:00 CT)", group="Session Filter")
 startDate    = input.time(timestamp("2000-01-01T00:00:00-06:00"), "Backtest Start", group="Backtest")
 endDate      = input.time(timestamp("2099-12-31T23:59:00-06:00"), "Backtest End",   group="Backtest")
 
@@ -27,11 +28,10 @@ endDate      = input.time(timestamp("2099-12-31T23:59:00-06:00"), "Backtest End"
 // Per-bar metrics
 //=============================
 ctMins      = hour(time, "America/Chicago") * 60 + minute(time, "America/Chicago")
-inNY        = ctMins >= 510 and ctMins < 900
-inLDN       = ctMins >= 120 and ctMins < 510
-bodyPts     = inNY ? bodyNY : inLDN ? bodyLDN : bodyAsia
+inRTH       = ctMins >= 510 and ctMins < 900
 eodClose    = ctMins >= 900 and ctMins < 960
 nyOpenBlock = blockNYOpen and ctMins >= 510 and ctMins < 540
+minLeg      = inRTH ? minLegRTH : minLegETH
 
 //=============================
 // State
@@ -44,14 +44,34 @@ var float bestPrice     = na
 var float trailStop     = na
 
 var int   barCount      = 0
+var int   cooldown      = 0
 var float winHigh       = na
 var float winLow        = na
 var float firstHigh     = na
 var float firstLow      = na
 var float halfHigh      = na
 var float halfLow       = na
-var bool  winHasRef     = false
 var int   prevWindowDir = 0
+var bool  hadVTrade     = false
+var bool  slideReset    = false
+
+// Watch window state
+var bool  inWatch       = false
+var int   watchCount    = 0
+var int   vDir          = 0
+var float vClose        = na
+
+// Rolling close buffer for R²
+var float[] closeBuf = array.new_float(0)
+
+//=============================
+// Per-bar flag resets — MUST be first
+//=============================
+slideReset := false
+var bool pendingReset = false
+if pendingReset
+    pendingReset := false
+    barCount     := 0
 
 //=============================
 // EOD reset
@@ -64,34 +84,49 @@ if eodClose
     bestPrice     := na
     inTrade       := false
     inChop        := false
+    inWatch       := false
+    watchCount    := 0
+    vDir          := 0
+    vClose        := na
     barCount      := 0
+    cooldown      := 0
     winHigh       := na
     winLow        := na
     firstHigh     := na
     firstLow      := na
     halfHigh      := na
     halfLow       := na
-    winHasRef     := false
     prevWindowDir := 0
+    hadVTrade     := false
+    array.clear(closeBuf)
 
 //=============================
 // Sync on TP/SL close
 //=============================
 if strategy.position_size == 0 and (inTrade or inChop or tradeDir != 0)
+    if inTrade
+        hadVTrade := true
+    else if inChop
+        hadVTrade := false
     prevWindowDir := tradeDir != 0 ? tradeDir : prevWindowDir
     tradeDir   := 0
     trailStop  := na
     bestPrice  := na
     inTrade    := false
     inChop     := false
-    barCount   := 0
+    inWatch    := false
+    watchCount := 0
+    vDir          := 0
+    vClose        := na
+    pendingReset  := true
+    cooldown      := lookback
     winHigh    := na
     winLow     := na
     firstHigh  := na
     firstLow   := na
     halfHigh   := na
     halfLow    := na
-    winHasRef  := false
+    array.clear(closeBuf)
 
 //=============================
 // Trailing stop (V-shape trades only)
@@ -105,20 +140,26 @@ if tradeDir == 1 and strategy.position_size != 0 and not inChop
         trailStop := math.max(na(trailStop) ? bestPrice - trailDist : trailStop, bestPrice - trailDist)
     if not na(trailStop) and low <= trailStop
         trailFired    := true
+        hadVTrade     := true
         strategy.close("Long", comment="TRAIL")
         prevWindowDir := tradeDir
         tradeDir   := 0
         trailStop  := na
         bestPrice  := na
         inTrade    := false
-        barCount   := 0
-        winHigh    := na
-        winLow     := na
-        firstHigh  := na
-        firstLow   := na
-        halfHigh   := na
-        halfLow    := na
-        winHasRef  := false
+        inWatch    := false
+        watchCount := 0
+        vDir         := 0
+        vClose       := na
+        pendingReset := true
+        cooldown     := lookback
+        winHigh      := na
+        winLow       := na
+        firstHigh    := na
+        firstLow     := na
+        halfHigh     := na
+        halfLow      := na
+        array.clear(closeBuf)
 
 else if tradeDir == -1 and strategy.position_size != 0 and not inChop
     bestPrice := na(bestPrice) ? low : math.min(bestPrice, low)
@@ -126,86 +167,235 @@ else if tradeDir == -1 and strategy.position_size != 0 and not inChop
         trailStop := math.min(na(trailStop) ? bestPrice + trailDist : trailStop, bestPrice + trailDist)
     if not na(trailStop) and high >= trailStop
         trailFired    := true
+        hadVTrade     := true
         strategy.close("Short", comment="TRAIL")
         prevWindowDir := tradeDir
         tradeDir   := 0
         trailStop  := na
         bestPrice  := na
         inTrade    := false
-        barCount   := 0
-        winHigh    := na
-        winLow     := na
-        firstHigh  := na
-        firstLow   := na
-        halfHigh   := na
+        inWatch    := false
+        watchCount := 0
+        vDir         := 0
+        vClose       := na
+        pendingReset := true
+        cooldown     := lookback
+        winHigh      := na
+        winLow       := na
+        firstHigh    := na
+        firstLow     := na
+        halfHigh     := na
         halfLow    := na
-        winHasRef  := false
+        array.clear(closeBuf)
 
 else
     trailStop := na
     bestPrice := na
 
 //=============================
-// Accumulate lookback window — only when flat
+// Accumulate lookback window — only when flat and not in watch
 //=============================
-b_body  = math.abs(close - open)
-b_upper = high - math.max(open, close)
-b_lower = math.min(open, close) - low
-b_lim   = b_body * (wickPct / 100.0)
-isRef   = b_body >= bodyPts and b_upper <= b_lim and b_lower <= b_lim
+if cooldown > 0 and not inTrade and not inChop and not inWatch
+    cooldown -= 1
 
-if not inTrade and not inChop and not eodClose
-    barCount  := barCount + 1
-    winHigh   := na(winHigh) ? high : math.max(winHigh, high)
-    winLow    := na(winLow)  ? low  : math.min(winLow,  low)
+if not inTrade and not inChop and not inWatch and not eodClose
+    barCount := barCount + 1
+    array.push(closeBuf, close)
+    if array.size(closeBuf) > lookback
+        array.shift(closeBuf)
+    winHigh  := na(winHigh) ? high : math.max(winHigh, high)
+    winLow   := na(winLow)  ? low  : math.min(winLow,  low)
     if barCount <= lookback / 2
         firstHigh := na(firstHigh) ? high : math.max(firstHigh, high)
         firstLow  := na(firstLow)  ? low  : math.min(firstLow,  low)
     else
         halfHigh := na(halfHigh) ? high : math.max(halfHigh, high)
         halfLow  := na(halfLow)  ? low  : math.min(halfLow,  low)
-    if isRef
-        winHasRef := true
+
+var int barCountDisplay = 0
+if not inTrade and not inChop and not inWatch
+    barCountDisplay := barCount
 
 //=============================
-// V-shape entry conditions
+// R² of closes over the lookback window
+//=============================
+var float legR2 = na
+legR2 := na
+
+if barCount >= lookback and array.size(closeBuf) == lookback
+    n = lookback
+    sumX  = 0.0
+    sumY  = 0.0
+    sumXY = 0.0
+    sumX2 = 0.0
+    for i = 0 to n - 1
+        x = float(i)
+        y = array.get(closeBuf, i)
+        sumX  += x
+        sumY  += y
+        sumXY += x * y
+        sumX2 += x * x
+    meanY     = sumY / n
+    ssTot     = 0.0
+    ssRes     = 0.0
+    denom     = n * sumX2 - sumX * sumX
+    slope     = denom != 0.0 ? (n * sumXY - sumX * sumY) / denom : 0.0
+    intercept = (sumY - slope * sumX) / n
+    for i = 0 to n - 1
+        y     = array.get(closeBuf, i)
+        yHat  = slope * float(i) + intercept
+        ssTot += math.pow(y - meanY, 2)
+        ssRes += math.pow(y - yHat, 2)
+    legR2 := ssTot > 0 ? math.round(1.0 - ssRes / ssTot, 2) : 1.0
+
+//=============================
+// V-shape detection
 //=============================
 bullDrop = barCount >= lookback and not na(firstHigh) and not na(halfLow)  ? firstHigh - halfLow  : 0.0
 bearRise = barCount >= lookback and not na(halfHigh)  and not na(firstLow) ? halfHigh  - firstLow : 0.0
 
-_baseOk   = barCount >= lookback and winHasRef and not eodClose and not nyOpenBlock and time >= startDate and time <= endDate and not inTrade and not inChop
+_baseOk   = barCount >= lookback and cooldown == 0 and not na(legR2) and legR2 >= minR2 and not eodClose and not nyOpenBlock and time >= startDate and time <= endDate and not inTrade and not inChop and not inWatch
 bullSetup = _baseOk and bullDrop >= minLeg and bullDrop > bearRise
 bearSetup = _baseOk and bearRise >= minLeg and bearRise > bullDrop
 
-// Slide window: reset every lookback bars when flat and no V-setup fired
-if not inTrade and not inChop and barCount >= lookback and not bullSetup and not bearSetup and not eodClose
-    barCount  := 0
-    winHigh   := na
-    winLow    := na
-    firstHigh := na
-    firstLow  := na
-    halfHigh  := na
-    halfLow   := na
-    winHasRef := false
-
 //=============================
-// Chop mode — enter at bar 1 of fresh window based on prior window direction
-// Bull V context (bullDrop dominated) → long; Bear V context → short
+// Slide window: reset when lookback filled with no V
+// prevWindowDir captured here before barCount resets
 //=============================
-// Capture direction of window that just expired without a V-setup — only update when meaningful
-if not inTrade and not inChop and barCount >= lookback and not bullSetup and not bearSetup and not eodClose
+if not inTrade and not inChop and not inWatch and barCount >= lookback and not bullSetup and not bearSetup and not eodClose
     if bullDrop > bearRise and bullDrop > 0
         prevWindowDir := 1
     else if bearRise > bullDrop and bearRise > 0
         prevWindowDir := -1
+    slideReset := true
+    barCount   := 0
+    winHigh    := na
+    winLow     := na
+    firstHigh  := na
+    firstLow   := na
+    halfHigh   := na
+    halfLow    := na
+    array.clear(closeBuf)
 
-// Fire chop entry at bar 1 of the new window (barCount==1 after reset)
-chopActive = enableChop and barCount == 1 and prevWindowDir != 0 and not inTrade and not inChop and not eodClose and not nyOpenBlock and time >= startDate and time <= endDate
+//=============================
+// V detected — start watch window
+//=============================
+if bullSetup
+    inWatch    := true
+    watchCount := watchBars
+    vDir       := 1
+    vClose     := close
+    barCount   := 0
+    winHigh    := na
+    winLow     := na
+    firstHigh  := na
+    firstLow   := na
+    halfHigh   := na
+    halfLow    := na
+    array.clear(closeBuf)
+    if showDetect
+        label.new(bar_index, low,
+                  text      = "V↑?\n" + str.tostring(close, "#.##"),
+                  style     = label.style_label_up,
+                  color     = color.new(color.green, 50),
+                  textcolor = color.white,
+                  size      = size.small)
+
+else if bearSetup
+    inWatch    := true
+    watchCount := watchBars
+    vDir       := -1
+    vClose     := close
+    barCount   := 0
+    winHigh    := na
+    winLow     := na
+    firstHigh  := na
+    firstLow   := na
+    halfHigh   := na
+    halfLow    := na
+    array.clear(closeBuf)
+    if showDetect
+        label.new(bar_index, high,
+                  text      = "R↓?\n" + str.tostring(close, "#.##"),
+                  style     = label.style_label_down,
+                  color     = color.new(color.red, 50),
+                  textcolor = color.white,
+                  size      = size.small)
+
+//=============================
+// Watch window — wait for confirm move
+//=============================
+var bool confirmed = false
+confirmed := false
+
+if inWatch and not eodClose and not nyOpenBlock
+    watchCount -= 1
+    bullConfirm = vDir == 1  and close >= vClose + confirmPts
+    bearConfirm = vDir == -1 and close <= vClose - confirmPts
+    if bullConfirm or bearConfirm
+        confirmed := true
+        inWatch    := false
+        watchCount := 0
+    else if watchCount <= 0
+        prevWindowDir := vDir
+        inWatch    := false
+        watchCount := 0
+        vDir       := 0
+        vClose     := na
+
+//=============================
+// Entry on confirm
+//=============================
+if confirmed and vDir == 1 and not inTrade and not inChop
+    strategy.cancel_all()
+    sl = close - slPts
+    tp = close + tpPts * tpMult
+    strategy.entry("Long", strategy.long, comment="V↑")
+    strategy.exit("Exit-Long", "Long", limit=tp, stop=sl)
+    tradeDir   := 1
+    entryPrice := close
+    trailStop  := na
+    bestPrice  := na
+    inTrade    := true
+    vDir       := 0
+    vClose     := na
+    label.new(bar_index, low,
+              text      = "V↑\n" + str.tostring(close, "#.##"),
+              style     = label.style_label_up,
+              color     = color.new(color.green, 10),
+              textcolor = color.white,
+              size      = size.normal)
+
+else if confirmed and vDir == -1 and not inTrade and not inChop
+    strategy.cancel_all()
+    sl = close + slPts
+    tp = close - tpPts * tpMult
+    strategy.entry("Short", strategy.short, comment="R↓")
+    strategy.exit("Exit-Short", "Short", limit=tp, stop=sl)
+    tradeDir   := -1
+    entryPrice := close
+    trailStop  := na
+    bestPrice  := na
+    inTrade    := true
+    vDir       := 0
+    vClose     := na
+    label.new(bar_index, high,
+              text      = "R↓\n" + str.tostring(close, "#.##"),
+              style     = label.style_label_down,
+              color     = color.new(color.red, 10),
+              textcolor = color.white,
+              size      = size.normal)
+
+//=============================
+// Chop — fires on slide reset bar, only after a prior V trade
+//=============================
+chopActive = enableChop and hadVTrade and slideReset and prevWindowDir != 0 and not inTrade and not inChop and not eodClose and not nyOpenBlock and time >= startDate and time <= endDate
 
 if chopActive and prevWindowDir == 1
     strategy.entry("Chop-Long", strategy.long, comment="C↑")
     strategy.exit("CX-Long", "Chop-Long", limit=close + chopTPPts, stop=close - chopSLPts)
     inChop     := true
+    hadVTrade  := false
     tradeDir   := 1
     entryPrice := close
     label.new(bar_index, low,
@@ -219,6 +409,7 @@ else if chopActive and prevWindowDir == -1
     strategy.entry("Chop-Short", strategy.short, comment="C↓")
     strategy.exit("CX-Short", "Chop-Short", limit=close - chopTPPts, stop=close + chopSLPts)
     inChop     := true
+    hadVTrade  := false
     tradeDir   := -1
     entryPrice := close
     label.new(bar_index, high,
@@ -227,63 +418,6 @@ else if chopActive and prevWindowDir == -1
               color     = color.new(color.orange, 20),
               textcolor = color.white,
               size      = size.small)
-
-//=============================
-// V-shape entries — cancel pending chop orders first
-//=============================
-if bullSetup
-    strategy.cancel_all()
-    sl = close - slPts
-    tp = close + tpPts * tpMult
-    strategy.entry("Long", strategy.long, comment="V↑")
-    strategy.exit("Exit-Long", "Long", limit=tp, stop=sl)
-    tradeDir   := 1
-    entryPrice := close
-    trailStop  := na
-    bestPrice  := na
-    inTrade    := true
-    inChop     := false
-    barCount   := 0
-    winHigh    := na
-    winLow     := na
-    firstHigh  := na
-    firstLow   := na
-    halfHigh   := na
-    halfLow    := na
-    winHasRef  := false
-    label.new(bar_index, low,
-              text      = "V↑\n" + str.tostring(close, "#.##"),
-              style     = label.style_label_up,
-              color     = color.new(color.green, 10),
-              textcolor = color.white,
-              size      = size.normal)
-
-else if bearSetup
-    strategy.cancel_all()
-    sl = close + slPts
-    tp = close - tpPts * tpMult
-    strategy.entry("Short", strategy.short, comment="R↓")
-    strategy.exit("Exit-Short", "Short", limit=tp, stop=sl)
-    tradeDir   := -1
-    entryPrice := close
-    trailStop  := na
-    bestPrice  := na
-    inTrade    := true
-    inChop     := false
-    barCount   := 0
-    winHigh    := na
-    winLow     := na
-    firstHigh  := na
-    firstLow   := na
-    halfHigh   := na
-    halfLow    := na
-    winHasRef  := false
-    label.new(bar_index, high,
-              text      = "R↓\n" + str.tostring(close, "#.##"),
-              style     = label.style_label_down,
-              color     = color.new(color.red, 10),
-              textcolor = color.white,
-              size      = size.normal)
 
 //=============================
 // Exit labels
@@ -307,19 +441,26 @@ if trailFired
               size      = size.small)
 
 //=============================
+// Background tint — watch window active
+//=============================
+bgcolor(inWatch ? color.new(color.yellow, 88) : na, title="Watch Window")
+
+//=============================
 // Debug plots — remove later
 //=============================
-plot(barCount,          "barCount",   color=color.blue,   display=display.data_window)
-plot(prevWindowDir,     "prevWinDir", color=color.purple, display=display.data_window)
-plot(bullDrop,          "bullDrop",   color=color.green,  display=display.data_window)
-plot(bearRise,          "bearRise",   color=color.red,    display=display.data_window)
-plot(firstHigh,         "firstHigh",  color=color.green,  display=display.data_window)
-plot(firstLow,          "firstLow",   color=color.lime,   display=display.data_window)
-plot(halfHigh,          "halfHigh",   color=color.teal,   display=display.data_window)
-plot(halfLow,           "halfLow",    color=color.orange, display=display.data_window)
-plot(inTrade  ? 1 : 0, "inTrade",    color=color.purple, display=display.data_window)
-plot(inChop   ? 1 : 0, "inChop",     color=color.yellow, display=display.data_window)
-plot(tradeDir,          "tradeDir",   color=color.white,  display=display.data_window)
+plot(barCountDisplay,                  "barCount",   color=color.blue,   display=display.data_window)
+plot(cooldown > 0 ? cooldown : na,     "cooldown",   color=color.aqua,   display=display.data_window)
+plot(legR2,                            "legR2",      color=color.yellow, display=display.data_window)
+plot(inWatch ? watchCount : na,        "watchCount", color=color.orange, display=display.data_window)
+plot(vDir,                             "vDir",       color=color.silver, display=display.data_window)
+plot(prevWindowDir,                    "prevWinDir", color=color.purple, display=display.data_window)
+plot(bullDrop,                         "bullDrop",   color=color.green,  display=display.data_window)
+plot(bearRise,                         "bearRise",   color=color.red,    display=display.data_window)
+plot(hadVTrade ? 1 : 0,               "hadVTrade",  color=color.teal,   display=display.data_window)
+plot(slideReset ? 1 : 0,              "slideReset", color=color.fuchsia,display=display.data_window)
+plot(inTrade  ? 1 : 0,                "inTrade",    color=color.purple, display=display.data_window)
+plot(inWatch  ? 1 : 0,                "inWatch",    color=color.yellow, display=display.data_window)
+plot(tradeDir,                         "tradeDir",   color=color.white,  display=display.data_window)
 
 //=============================
 // Alerts
