@@ -328,7 +328,7 @@ else if bearSetup
 var bool confirmed = false
 confirmed := false
 
-if inWatch and not eodClose and not nyOpenBlock
+if inWatch and not eodClose and not nyOpenBlock and not bullSetup and not bearSetup
     watchCount -= 1
     if watchCount <= 0
         // Enter at expiry if price hasn't invalidated (moved against V by more than invalidPts)
@@ -338,10 +338,10 @@ if inWatch and not eodClose and not nyOpenBlock
             confirmed := true
         else
             prevWindowDir := vDir
+            vDir       := 0
+            vClose     := na
         inWatch    := false
         watchCount := 0
-        vDir       := 0
-        vClose     := na
 
 //=============================
 // Entry on confirm
@@ -450,7 +450,7 @@ bgcolor(inWatch ? color.new(color.yellow, 88) : na, title="Watch Window")
 //=============================
 plot(barCountDisplay,                  "barCount",   color=color.blue,   display=display.data_window)
 plot(cooldown > 0 ? cooldown : na,     "cooldown",   color=color.aqua,   display=display.data_window)
-plot(legR2,                            "legR2",      color=color.yellow, display=display.data_window)
+plot(legR2,                            "legR2",      color=color.lime,   display=display.data_window)
 plot(inWatch ? watchCount : na,        "watchCount", color=color.orange, display=display.data_window)
 plot(vDir,                             "vDir",       color=color.silver, display=display.data_window)
 plot(prevWindowDir,                    "prevWinDir", color=color.purple, display=display.data_window)
