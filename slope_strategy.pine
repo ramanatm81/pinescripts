@@ -1,6 +1,6 @@
 //@version=6
 strategy("Slope Strategy", overlay=true, max_labels_count=500, max_bars_back=5000,
-         default_qty_type=strategy.fixed, default_qty_value=1)
+         default_qty_type=strategy.fixed, default_qty_value=1, calc_on_every_tick=true)
 
 //=============================
 // Inputs
@@ -23,8 +23,8 @@ tExpHardBars     = input.int(20,    "Hard max bars (exit if slope against trade)
 tExpHardSlope    = input.float(1.0, "Slope 'against' threshold for hard exit",                   minval=0.1, step=0.1,  group="Time Expiry")
 dojiPct      = input.float(10.0,"Doji body % of range (excluded from R²)", minval=1.0, maxval=49.0, step=1.0, group="R² Filter")
 cooldownBars = input.int(10,    "Cooldown bars after exit (0 = none)",    minval=0,  maxval=50,              group="R² Filter")
-deepSlope    = input.float(3.0, "Deep slope threshold (use slope exit)",   minval=0.5, step=0.1,              group="R² Filter")
-deepExitSlope= input.float(0.5, "Deep slope exit (hold until slope reaches)", minval=0.0, step=0.1,            group="R² Filter")
+deepSlope    = input.float(3.0,  "Deep slope threshold (use slope exit)",          minval=0.5, step=0.1,  group="R² Filter")
+exitRatio    = input.float(0.1,  "SLP exit ratio (legSlope <= entrySlope x -ratio)", minval=0.0, step=0.05, group="R² Filter")
 blockNYOpen  = input.bool(false,"Block NY open first 30 min (08:30–09:00 CT)",          group="Session Filter")
 blockLNOpen  = input.bool(false,"Block LN open first 30 min (02:00–02:30 CT)",          group="Session Filter")
 blockPreNY   = input.bool(false,"Block CME pre-open + NY open (07:30–09:00 CT)",        group="Session Filter")
@@ -177,10 +177,13 @@ if inTrade and not na(legSlope) and strategy.position_size != 0
     isDeepEntry = math.abs(entrySlope) >= deepSlope
     // Hard SL — always active as safety net (uses activeSL locked in at entry)
     hardSLHit = (tradeDir == 1 and low <= entryPrice - activeSL) or (tradeDir == -1 and high >= entryPrice + activeSL)
-    // Slope exit — only used when entry slope was deep; hold until slope recovers to deepExitSlope
-    // Long: entered on deep negative slope, exit when slope rises above -deepExitSlope (e.g. > -0.5)
-    // Short: entered on deep positive slope, exit when slope falls below +deepExitSlope (e.g. < +0.5)
-    slopeReversed = not na(tradeLegSlope) and ((tradeDir == 1 and tradeLegSlope >= -deepExitSlope) or (tradeDir == -1 and tradeLegSlope <= deepExitSlope))
+    // Slope exit — only for deep entries; uses legSlope (same as entry trigger), proportional threshold
+    // Long:  entered on legSlope < -deepSlope, exit when legSlope >= entrySlope * -exitRatio
+    //        e.g. entry -3.61, ratio 0.1 → exit when legSlope >= +0.361
+    // Short: entered on legSlope > +deepSlope, exit when legSlope <= entrySlope * -exitRatio
+    //        e.g. entry +3.61, ratio 0.1 → exit when legSlope <= -0.361
+    slopeTarget   = entrySlope * -exitRatio
+    slopeReversed = (tradeDir == 1 and legSlope >= slopeTarget) or (tradeDir == -1 and legSlope <= slopeTarget)
 
     if isDeepEntry and slopeReversed
         // Deep entry: hold until slope exhausts
