@@ -302,7 +302,7 @@ else if tradeDir == -1 and strategy.position_size != 0
         trailStop := na
         bestPrice := na
         inTrade   := false
-            cooldown  := cooldownBars
+        cooldown  := cooldownBars
 
 else
     trailStop := na
