@@ -165,12 +165,12 @@ if strategy.position_size == 0 and (inTrade or tradeDir != 0)
 if cooldown > 0 and not inTrade
     cooldown -= 1
 
-// Clear trailExitDir only when legSlope has weakened below entry threshold in that direction
-// prevents re-entering against a still-trending market after a trail exit
-if trailExitDir == 1 and legSlope < slopeEntry
-    trailExitDir := 0
-if trailExitDir == -1 and legSlope > -slopeEntry
-    trailExitDir := 0
+// Clear trailExitDir only after cooldown has expired AND slope has weakened
+if cooldown == 0 and not inTrade
+    if trailExitDir == 1 and legSlope < slopeEntry
+        trailExitDir := 0
+    if trailExitDir == -1 and legSlope > -slopeEntry
+        trailExitDir := 0
 
 //=============================
 // Slope exit — close when slope reverses back past threshold
