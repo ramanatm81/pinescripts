@@ -6,6 +6,23 @@ The strategy enters **Long** when `legSlope < -slopeEntry` (downtrend -- mean re
 and **Short** when `legSlope > +slopeEntry` (uptrend -- mean reversion expected down).
 All slope inputs are **absolute values** applied symmetrically by direction.
 
+Entry labels: **S↑/S↓** (shallow, green/red) or **D↑/D↓** (deep, orange).
+Deep entry = `abs(entrySlope) >= deepSlope` (default 3.0).
+
+---
+
+## Entry Filter -- Trail Direction Block
+
+After a TRAIL exit, the **opposite direction is blocked** until a new trade fires.
+
+- TRAIL exited Short (trend was falling) → Long entries blocked while `legSlope` is still
+  below `-slopeEntry` at the next entry bar
+- TRAIL exited Long (trend was rising) → Short entries blocked while `legSlope` is still
+  above `+slopeEntry` at the next entry bar
+- Block clears only when a trade actually enters (in either direction)
+
+Purpose: prevents immediately fading a still-trending market after a trail exit.
+
 ---
 
 ## Exit Types (priority order)
@@ -36,28 +53,7 @@ All slope inputs are **absolute values** applied symmetrically by direction.
 
 ---
 
-### 3. SLP -- Slope Recovery Exit *(deep entries only)*
-
-**Trigger:** Entry slope was deep AND current slope has recovered past the exit threshold.
-
-Conditions:
-- Entry is deep when `abs(entrySlope) >= deepSlope` (default 3.0)
-- Long: exit when `legSlope >= -deepExitSlope` (e.g. slope rises above -0.5)
-- Short: exit when `legSlope <= +deepExitSlope` (e.g. slope falls below +0.5)
-
-Key behaviour:
-- Deep entries **skip trailing stop** -- SLP is the primary exit
-- Hard SL remains active as a safety net
-- `deepExitSlope` (default 0.5) controls how far slope must recover
-
-**Example:** Long entered at slope -8.03. Holds until `legSlope >= -0.5`.
-If price crashes hard before slope recovers, the hard SL fires instead.
-
-- Label: orange **SLP**
-
----
-
-### 4. SL -- Hard Stop Loss
+### 3. SL -- Hard Stop Loss
 
 **Trigger:** Price moves against entry by `activeSL` points.
 
@@ -66,19 +62,18 @@ If price crashes hard before slope recovers, the hard SL fires instead.
 
 `activeSL` is **locked in at entry bar** based on SMA condition:
 
-| Mode           | Condition                   | SL used                   |
-|----------------|-----------------------------|---------------------------|
-| Fixed (default) | `enableSmaSL = false`      | `slPts` (default 50 pts)  |
-| SMA dynamic    | `close > SMA(180)` at entry | `slAboveSma` (default 50 pts) |
-| SMA dynamic    | `close < SMA(180)` at entry | `slBelowSma` (default 30 pts) |
+| Mode            | Condition                    | SL used                       |
+|-----------------|------------------------------|-------------------------------|
+| Fixed (default) | `enableSmaSL = false`        | `slPts` (default 50 pts)      |
+| SMA dynamic     | `close > SMA(180)` at entry  | `slAboveSma` (default 50 pts) |
+| SMA dynamic     | `close < SMA(180)` at entry  | `slBelowSma` (default 30 pts) |
 
-- Active for both shallow and deep entries
-- For deep entries: safety net if price crashes before slope recovers
+- Active for all entries (shallow and deep)
 - Label: red **SL**
 
 ---
 
-### 5. THRD -- Hard Time Expiry *(slope against)*
+### 4. THRD -- Hard Time Expiry *(slope against)*
 
 **Trigger:** Trade open >= N bars AND slope still against the trade.
 
@@ -92,15 +87,16 @@ Key behaviour:
 - Fires **regardless of P&L** -- will exit a losing trade
 - Does NOT fire if slope is flat or recovering -- only when still deeply against
 - `tExpHardSlope` (default 1.0) sets the against threshold
+- Counted in the no-traction stats table
 
-**Example:** Long open 20 bars, slope still -1.5, `tExpHardSlope=1.0` --> THRD fires.
+**Example:** Long open 20 bars, slope still -1.5, `tExpHardSlope=1.0` -- THRD fires.
 If slope recovered to -0.4, THRD does not fire.
 
 - Label: maroon **THRD**
 
 ---
 
-### 6. TEXP -- Profitable Time Expiry
+### 5. TEXP -- Profitable Time Expiry
 
 **Trigger:** Trade open >= N bars AND currently in profit.
 
@@ -118,7 +114,7 @@ Key behaviour:
 
 ---
 
-### 7. TRAIL -- Trailing Stop *(shallow entries only)*
+### 6. TRAIL -- Trailing Stop
 
 **Trigger:** Price moved `trailTrigger` pts in profit, then retraced `trailDist` pts from best price.
 
@@ -127,62 +123,77 @@ Conditions:
 - Short: trail activates when `entryPrice - bestPrice >= trailTrigger`; fires when `high >= bestPrice + trailDist`
 
 Key behaviour:
-- **Suppressed for deep entries** -- SLP manages those
+- Active for **all entries** (shallow and deep)
 - Trail ratchets with best price and never moves against the trade
-- Defaults: trigger = 17 pts, distance = 9 pts
+- Defaults: trigger = 40 pts, distance = 20 pts
+- After a trail exit, opposite direction entry is blocked until trend weakens (see Entry Filter above)
 
 - Label: green **TRAIL**
 
 ---
 
-### 8. TP -- Take Profit
+### 7. TP -- Take Profit
 
 **Trigger:** Price reaches `entryPrice +/- (tpPts x tpMult)`.
 
 - Long: limit order at `entryPrice + tpPts x tpMult`
 - Short: limit order at `entryPrice - tpPts x tpMult`
 - Managed by TradingView `strategy.exit()` engine
-- Defaults: `tpPts=40`, `tpMult=3.0` --> TP at 120 pts from entry
+- Defaults: `tpPts=40`, `tpMult=3.0` -- TP at 120 pts from entry
 
 - Label: green **TP**
 
 ---
 
-## Deep vs Shallow Entry Summary
+## Entry Type Summary
 
-| Exit    | Shallow entry      | Deep entry          |
-|---------|--------------------|---------------------|
-| Hard SL | Active             | Active (safety net) |
-| Trail   | Active             | Suppressed          |
-| SLP     | Never fires        | Primary exit        |
-| TP      | Active             | Active              |
-| TEXP    | Active if enabled  | Active if enabled   |
-| THRD    | Active if enabled  | Active if enabled   |
-| BLK     | Always             | Always              |
-| EOD     | Always             | Always              |
+| Exit    | Shallow entry (S↑/S↓) | Deep entry (D↑/D↓)  |
+|---------|-----------------------|---------------------|
+| Hard SL | Active                | Active              |
+| Trail   | Active                | Active              |
+| TP      | Active                | Active              |
+| TEXP    | Active if enabled     | Active if enabled   |
+| THRD    | Active if enabled     | Active if enabled   |
+| BLK     | Always                | Always              |
+| EOD     | Always                | Always              |
 
-> **Deep entry** = `abs(entrySlope) >= deepSlope` (default 3.0)
+> **Deep entry** = `abs(entrySlope) >= deepSlope` (default 3.0) -- shown with orange D↑/D↓ label.
+> Deep entries are tracked separately in the stats table (total, wins, losses, win rate, avg P&L).
+
+---
+
+## Stats Table (bottom-right)
+
+| Row                | Description                                      |
+|--------------------|--------------------------------------------------|
+| No-traction (THRD) | Count of THRD exits (entered but never moved)    |
+| Avg bars held      | Average bars held for THRD exits                 |
+| Live bars in trade | Current bars in open trade                       |
+| -- Deep entries -- | Separator (shows deepSlope threshold)            |
+| Total              | Total deep entry trades closed                   |
+| Wins / Losses      | Count of profitable / losing deep trades         |
+| Win rate           | Deep entry win rate %                            |
+| Avg P&L (pts)      | Average P&L in points for deep entry trades      |
 
 ---
 
 ## Parameters Reference
 
-| Parameter        | Default  | Group         | Description                          |
-|------------------|----------|---------------|--------------------------------------|
-| `slopeEntry`     | 1.7      | General       | Entry threshold (abs value)          |
-| `slPts`          | 50 pts   | General       | Fixed SL fallback                    |
-| `tpPts`          | 40 pts   | General       | TP base points                       |
-| `tpMult`         | 3.0      | General       | TP multiplier (TP = tpPts x tpMult)  |
-| `trailTrigger`   | 17 pts   | Trailing Stop | Profit pts before trail activates    |
-| `trailDist`      | 9 pts    | Trailing Stop | Distance trail follows best price    |
-| `deepSlope`      | 3.0      | R2 Filter     | Min abs(entrySlope) for deep mode    |
-| `deepExitSlope`  | 0.5      | R2 Filter     | Slope recovery target for SLP exit   |
-| `enableTExp`     | false    | Time Expiry   | Enable profitable time exit          |
-| `tExpBars`       | 30 bars  | Time Expiry   | Bar limit for TEXP                   |
-| `enableTExpHard` | false    | Time Expiry   | Enable hard time exit                |
-| `tExpHardBars`   | 20 bars  | Time Expiry   | Bar limit for THRD                   |
-| `tExpHardSlope`  | 1.0      | Time Expiry   | Slope-against threshold for THRD     |
-| `enableSmaSL`    | false    | SMA Stop Loss | Enable SMA-based dynamic SL          |
-| `smaPeriod`      | 180      | SMA Stop Loss | SMA period                           |
-| `slAboveSma`     | 50 pts   | SMA Stop Loss | SL when close > SMA at entry         |
-| `slBelowSma`     | 30 pts   | SMA Stop Loss | SL when close < SMA at entry         |
+| Parameter        | Default  | Group         | Description                              |
+|------------------|----------|---------------|------------------------------------------|
+| `slopeEntry`     | 1.7      | General       | Entry threshold (abs value)              |
+| `slPts`          | 50 pts   | General       | Fixed SL fallback                        |
+| `tpPts`          | 40 pts   | General       | TP base points                           |
+| `tpMult`         | 3.0      | General       | TP multiplier (TP = tpPts x tpMult)      |
+| `trailTrigger`   | 40 pts   | Trailing Stop | Profit pts before trail activates        |
+| `trailDist`      | 20 pts   | Trailing Stop | Distance trail follows best price        |
+| `deepSlope`      | 3.0      | R2 Filter     | Min abs(entrySlope) for deep label/stats |
+| `enableTExp`     | false    | Time Expiry   | Enable profitable time exit              |
+| `tExpBars`       | 30 bars  | Time Expiry   | Bar limit for TEXP                       |
+| `enableTExpHard` | false    | Time Expiry   | Enable hard time exit                    |
+| `tExpHardBars`   | 20 bars  | Time Expiry   | Bar limit for THRD                       |
+| `tExpHardSlope`  | 1.0      | Time Expiry   | Slope-against threshold for THRD         |
+| `enableSmaSL`    | false    | SMA Stop Loss | Enable SMA-based dynamic SL              |
+| `smaPeriod`      | 180      | SMA Stop Loss | SMA period                               |
+| `slAboveSma`     | 50 pts   | SMA Stop Loss | SL when close > SMA at entry             |
+| `slBelowSma`     | 30 pts   | SMA Stop Loss | SL when close < SMA at entry             |
