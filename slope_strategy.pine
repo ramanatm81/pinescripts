@@ -165,12 +165,7 @@ if strategy.position_size == 0 and (inTrade or tradeDir != 0)
 if cooldown > 0 and not inTrade
     cooldown -= 1
 
-// Clear trailExitDir only after cooldown has expired AND slope has weakened
-if cooldown == 0 and not inTrade
-    if trailExitDir == 1 and legSlope < slopeEntry
-        trailExitDir := 0
-    if trailExitDir == -1 and legSlope > -slopeEntry
-        trailExitDir := 0
+// trailExitDir persists until a new trade is entered — cleared at entry
 
 //=============================
 // Slope exit — close when slope reverses back past threshold
@@ -257,8 +252,9 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
 //=============================
 canTrade = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and time >= startDate and time <= endDate and not na(legSlope)
 
-// After a trail exit, block the opposite direction — trail means trend ran in our favour,
-// so fading it immediately in the other direction is likely to be against the trend.
+// After a trail exit, block opposite entry if slope still trends in the trail direction at entry bar
+// trail exited Short (trailExitDir=-1) + legSlope still < -slopeEntry = downtrend intact, block Long
+// trail exited Long  (trailExitDir= 1) + legSlope still >  slopeEntry = uptrend intact, block Short
 bullEntry = canTrade and legSlope < -slopeEntry and trailExitDir != -1
 bearEntry = canTrade and legSlope >  slopeEntry and trailExitDir !=  1
 
@@ -266,13 +262,14 @@ if bullEntry
     tp = close + tpPts * tpMult
     strategy.entry("Long",  strategy.long,  comment="S↑")
     strategy.exit("Exit-Long",  "Long",  limit=tp)   // TP only — SL handled manually
-    tradeDir   := 1
-    entryPrice := close
-    entrySlope := legSlope
-    trailStop  := na
-    bestPrice  := na
-    inTrade    := true
-    activeSL   := enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
+    tradeDir     := 1
+    entryPrice   := close
+    entrySlope   := legSlope
+    trailStop    := na
+    bestPrice    := na
+    inTrade      := true
+    trailExitDir := 0
+    activeSL     := enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
     label.new(bar_index, low,
               text      = "S↑\n" + str.tostring(close, "#.##") + "\nSL:" + str.tostring(activeSL, "#") + "\nsl:" + str.tostring(legSlope, "#.##"),
               style     = label.style_label_up,
@@ -284,13 +281,14 @@ else if bearEntry
     tp = close - tpPts * tpMult
     strategy.entry("Short", strategy.short, comment="S↓")
     strategy.exit("Exit-Short", "Short", limit=tp)   // TP only — SL handled manually
-    tradeDir   := -1
-    entryPrice := close
-    entrySlope := legSlope
-    trailStop  := na
-    bestPrice  := na
-    inTrade    := true
-    activeSL   := enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
+    tradeDir     := -1
+    entryPrice   := close
+    entrySlope   := legSlope
+    trailStop    := na
+    bestPrice    := na
+    inTrade      := true
+    trailExitDir := 0
+    activeSL     := enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
     label.new(bar_index, high,
               text      = "S↓\n" + str.tostring(close, "#.##") + "\nSL:" + str.tostring(activeSL, "#") + "\nsl:" + str.tostring(legSlope, "#.##"),
               style     = label.style_label_down,
