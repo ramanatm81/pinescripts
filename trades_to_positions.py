@@ -40,6 +40,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.formula import ArrayFormula
 
 
+# TV xlsx column names
 REQUIRED_COLS = [
     "Trade #",
     "Type",
@@ -53,6 +54,15 @@ REQUIRED_COLS = [
     "Adverse excursion USD",
 ]
 
+# TV CSV export uses slightly different column names — map to internal names
+CSV_COL_MAP = {
+    "Trade number":            "Trade #",
+    "Net PnL USD":             "Net P&L USD",
+    "Net PnL %":               "Net P&L %",
+    "Favorable excursion USD": "Favorable excursion USD",
+    "Adverse excursion USD":   "Adverse excursion USD",
+}
+
 MONEY_FMT = '$#,##0.00;($#,##0.00);-'
 PCT_FMT = '0.0%;(0.0%);-'
 PCT_TV_FMT = '0.00"%";(0.00"%");-'  # TV stores % as "percentage points" already
@@ -64,13 +74,22 @@ DT_FMT = 'yyyy-mm-dd hh:mm'
 # ---------------------------------------------------------------------------
 
 def load_trades(input_path: Path) -> pd.DataFrame:
-    """Load the 'List of trades' sheet and validate required columns."""
-    df = pd.read_excel(input_path, sheet_name="List of trades")
+    """Load trades from a TradingView xlsx or CSV export and normalise column names."""
+    suffix = input_path.suffix.lower()
+    if suffix == ".csv":
+        df = pd.read_csv(input_path, parse_dates=["Date and time"])
+        # Rename CSV-specific column names to internal standard names
+        df = df.rename(columns=CSV_COL_MAP)
+        # TV CSV stores Net P&L % as a fraction already (e.g. 0.18 means 0.18%)
+        # nothing to convert — keep as-is to match xlsx behaviour
+    else:
+        df = pd.read_excel(input_path, sheet_name="List of trades")
+
     missing = [c for c in REQUIRED_COLS if c not in df.columns]
     if missing:
         raise ValueError(
             f"Input file is missing required columns: {missing}. "
-            f"Expected a TradingView strategy 'List of trades' export."
+            f"Expected a TradingView strategy export (.xlsx or .csv)."
         )
     return df
 
@@ -631,7 +650,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Convert TradingView trade list to position-aggregated xlsx."
     )
-    parser.add_argument("input", type=Path, help="Path to TV trade-list .xlsx")
+    parser.add_argument("input", type=Path, nargs="?", default=Path("input.csv"),
+                        help="Path to TV trade-list .xlsx or .csv (default: input.csv in Downloads)")
     parser.add_argument(
         "output",
         type=Path,
@@ -645,6 +665,9 @@ def main(argv: list[str] | None = None) -> int:
         help="Print a text summary of positions to stdout",
     )
     args = parser.parse_args(argv)
+
+    if not args.input.is_absolute():
+        args.input = Path.home() / "Downloads" / args.input
 
     if not args.input.exists():
         print(f"Input file not found: {args.input}", file=sys.stderr)

@@ -23,6 +23,7 @@ from watchdog.observers import Observer
 
 DOWNLOADS = Path.home() / "Downloads"
 DATA_CSV  = DOWNLOADS / "data.csv"
+INPUT_CSV = DOWNLOADS / "input.csv"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,18 +41,36 @@ def handle_cme_file(src: Path) -> None:
     log.info("Renamed %s -> data.csv", src.name)
 
 
+def handle_slope_file(src: Path) -> None:
+    if INPUT_CSV.exists():
+        INPUT_CSV.unlink()
+        log.info("Deleted existing input.csv")
+    src.rename(INPUT_CSV)
+    log.info("Renamed %s -> input.csv", src.name)
+
+
 class DownloadsHandler(FileSystemEventHandler):
     def _check(self, path_str: str) -> None:
         p = Path(path_str)
         # skip macOS partial-download temp files (.crdownload, .part, .download)
         if p.suffix in {".crdownload", ".part", ".download"}:
             return
-        if p.parent == DOWNLOADS and p.name.startswith("CME") and p.name != "data.csv":
+        if p.parent != DOWNLOADS:
+            return
+        if p.name.startswith("CME") and p.name != "data.csv":
             if not p.exists():
-                return  # already handled by a sibling event
+                return
             log.info("Detected CME file: %s", p.name)
             try:
                 handle_cme_file(p)
+            except Exception as exc:
+                log.error("Failed to rename %s: %s", p.name, exc)
+        elif p.name.startswith("Slope_Strategy") and p.suffix == ".csv" and p.name != "input.csv":
+            if not p.exists():
+                return
+            log.info("Detected Slope Strategy file: %s", p.name)
+            try:
+                handle_slope_file(p)
             except Exception as exc:
                 log.error("Failed to rename %s: %s", p.name, exc)
 
