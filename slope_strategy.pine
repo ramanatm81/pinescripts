@@ -14,7 +14,7 @@ slAboveSma   = input.float(50.0, "SL when close > SMA (upward, pts)",  minval=0.
 slBelowSma   = input.float(30.0, "SL when close < SMA (downward, pts)",minval=0.5, step=0.5,  group="SMA Stop Loss")
 tpPts        = input.float(40.0,"TP base (pts from entry)",               minval=0.5, step=1.0)
 tpMult       = input.float(3.0, "TP multiplier (× TP base)",              minval=0.1, step=0.1)
-trailTrigger = input.float(17.0,"Trail trigger (points profit)",          minval=1.0, step=0.5,  group="Trailing Stop")
+trailTrigger = input.float(40.0,"Trail trigger (points profit)",          minval=1.0, step=0.5,  group="Trailing Stop")
 trailDist    = input.float(9.0, "Trail distance (points)",                minval=1.0, step=0.5,  group="Trailing Stop")
 enableTExp   = input.bool(false,"Enable time expiry exit",                                       group="Time Expiry")
 tExpBars     = input.int(30,    "Max bars in trade (exit if profitable)",  minval=1,  maxval=500, group="Time Expiry")
