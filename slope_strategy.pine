@@ -15,7 +15,7 @@ slBelowSma   = input.float(30.0, "SL when close < SMA (downward, pts)",minval=0.
 tpPts        = input.float(40.0,"TP base (pts from entry)",               minval=0.5, step=1.0)
 tpMult       = input.float(3.0, "TP multiplier (× TP base)",              minval=0.1, step=0.1)
 trailTrigger = input.float(40.0,"Trail trigger (points profit)",          minval=1.0, step=0.5,  group="Trailing Stop")
-trailDist    = input.float(9.0, "Trail distance (points)",                minval=1.0, step=0.5,  group="Trailing Stop")
+trailDist    = input.float(20.0,"Trail distance (points)",                minval=1.0, step=0.5,  group="Trailing Stop")
 enableTExp   = input.bool(false,"Enable time expiry exit",                                       group="Time Expiry")
 tExpBars     = input.int(30,    "Max bars in trade (exit if profitable)",  minval=1,  maxval=500, group="Time Expiry")
 enableTExpHard   = input.bool(false,"Enable hard time expiry (exit even if loss, slope against)", group="Time Expiry")
@@ -61,6 +61,7 @@ var float trailStop    = na
 var int   cooldown     = 0
 var int   barsInTrade  = 0
 var float activeSL     = na   // SL locked in at entry (SMA-based or fixed)
+var int   trailExitDir = 0    // direction of last trail exit (1=long, -1=short); blocks opposite re-entry
 
 //=============================
 // Trade leg slope buffer — accumulates close prices from entry bar onward
@@ -163,6 +164,8 @@ if strategy.position_size == 0 and (inTrade or tradeDir != 0)
 //=============================
 if cooldown > 0 and not inTrade
     cooldown -= 1
+if cooldown == 0
+    trailExitDir := 0   // cooldown expired — opposite direction now allowed
 
 //=============================
 // Slope exit — close when slope reverses back past threshold
@@ -249,8 +252,10 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
 //=============================
 canTrade = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and time >= startDate and time <= endDate and not na(legSlope)
 
-bullEntry = canTrade and legSlope < -slopeEntry
-bearEntry = canTrade and legSlope >  slopeEntry
+// After a trail exit, block the opposite direction — trail means trend ran in our favour,
+// so fading it immediately in the other direction is likely to be against the trend.
+bullEntry = canTrade and legSlope < -slopeEntry and trailExitDir != -1
+bearEntry = canTrade and legSlope >  slopeEntry and trailExitDir !=  1
 
 if bullEntry
     tp = close + tpPts * tpMult
@@ -303,7 +308,8 @@ if tradeDir == 1 and strategy.position_size != 0
         if bestPrice - entryPrice >= trailTrigger
             trailStop := math.max(na(trailStop) ? bestPrice - trailDist : trailStop, bestPrice - trailDist)
         if not na(trailStop) and low <= trailStop
-            trailFired := true
+            trailFired    := true
+            trailExitDir  := 1
             strategy.close("Long", comment="TRAIL")
             tradeDir  := 0
             trailStop := na
@@ -317,7 +323,8 @@ else if tradeDir == -1 and strategy.position_size != 0
         if entryPrice - bestPrice >= trailTrigger
             trailStop := math.min(na(trailStop) ? bestPrice + trailDist : trailStop, bestPrice + trailDist)
         if not na(trailStop) and high >= trailStop
-            trailFired := true
+            trailFired    := true
+            trailExitDir  := -1
             strategy.close("Short", comment="TRAIL")
             tradeDir  := 0
             trailStop := na
