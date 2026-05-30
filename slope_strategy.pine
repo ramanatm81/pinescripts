@@ -270,10 +270,11 @@ if bullEntry
     inTrade      := true
     trailExitDir := 0
     activeSL     := enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
+    _isDeep  = math.abs(legSlope) >= deepSlope
     label.new(bar_index, low,
-              text      = "S↑\n" + str.tostring(close, "#.##") + "\nSL:" + str.tostring(activeSL, "#") + "\nsl:" + str.tostring(legSlope, "#.##"),
+              text      = (_isDeep ? "D↑" : "S↑") + "\n" + str.tostring(close, "#.##") + "\nSL:" + str.tostring(activeSL, "#") + "\nsl:" + str.tostring(legSlope, "#.##"),
               style     = label.style_label_up,
-              color     = color.new(color.green, 10),
+              color     = _isDeep ? color.new(color.orange, 10) : color.new(color.green, 10),
               textcolor = color.white,
               size      = size.normal)
 
@@ -289,10 +290,11 @@ else if bearEntry
     inTrade      := true
     trailExitDir := 0
     activeSL     := enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
+    _isDeep2 = math.abs(legSlope) >= deepSlope
     label.new(bar_index, high,
-              text      = "S↓\n" + str.tostring(close, "#.##") + "\nSL:" + str.tostring(activeSL, "#") + "\nsl:" + str.tostring(legSlope, "#.##"),
+              text      = (_isDeep2 ? "D↓" : "S↓") + "\n" + str.tostring(close, "#.##") + "\nSL:" + str.tostring(activeSL, "#") + "\nsl:" + str.tostring(legSlope, "#.##"),
               style     = label.style_label_down,
-              color     = color.new(color.red, 10),
+              color     = _isDeep2 ? color.new(color.orange, 10) : color.new(color.red, 10),
               textcolor = color.white,
               size      = size.normal)
 
