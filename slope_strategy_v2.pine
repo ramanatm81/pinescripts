@@ -67,12 +67,13 @@ anyFractal  = bearFractal or bullFractal
 //=============================
 // State
 //=============================
-var bool  inTrade  = false
-var int   tradeDir = 0
+var bool  inTrade    = false
+var int   tradeDir   = 0
 var float entryPrice = na
 var float entrySlope = na
 var int   cooldown   = 0
 var int   barsInTrade = 0
+var int   entryBar   = na   // bar_index at entry — only exit on fractals after this
 
 //=============================
 // Session block exits
@@ -115,7 +116,7 @@ if cooldown > 0 and not inTrade
 //=============================
 // Fractal exit — close on next fractal after entry
 //=============================
-if inTrade and strategy.position_size != 0 and anyFractal
+if inTrade and strategy.position_size != 0 and anyFractal and bar_index > entryBar
     strategy.close("Long",  comment="FXT")
     strategy.close("Short", comment="FXT")
     tradeDir    := 0
@@ -144,6 +145,7 @@ if bullEntry
     tradeDir     := 1
     entryPrice   := close
     entrySlope   := legSlope
+    entryBar     := bar_index
     inTrade      := true
     label.new(bar_index, low,
               text      = "S↑\n" + str.tostring(close, "#.##") + "\nsl:" + str.tostring(legSlope, "#.##"),
@@ -157,6 +159,7 @@ else if bearEntry
     tradeDir     := -1
     entryPrice   := close
     entrySlope   := legSlope
+    entryBar     := bar_index
     inTrade      := true
     label.new(bar_index, high,
               text      = "S↓\n" + str.tostring(close, "#.##") + "\nsl:" + str.tostring(legSlope, "#.##"),
