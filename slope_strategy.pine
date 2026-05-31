@@ -138,10 +138,10 @@ if bearFractal
 if bullFractal
     lastBullFractalBar := bar_index
 
-// For Long entry: need a bullish fractal (local bottom) within lookback bars — price troughed and is rising
-// For Short entry: need a bearish fractal (local top) within lookback bars — price peaked and is falling
-fractalOkLong  = not requireFractal or (not na(lastBullFractalBar) and (fractalLookback == 0 or bar_index - lastBullFractalBar <= fractalLookback))
-fractalOkShort = not requireFractal or (not na(lastBearFractalBar) and (fractalLookback == 0 or bar_index - lastBearFractalBar <= fractalLookback))
+// For Long entry: need a bearish fractal (local top confirmed) within lookback bars
+// For Short entry: need a bullish fractal (local bottom confirmed) within lookback bars
+fractalOkLong  = not requireFractal or (not na(lastBearFractalBar) and (fractalLookback == 0 or bar_index - lastBearFractalBar <= fractalLookback))
+fractalOkShort = not requireFractal or (not na(lastBullFractalBar) and (fractalLookback == 0 or bar_index - lastBullFractalBar <= fractalLookback))
 
 //=============================
 // Session block exits — close any open trade on entering a blocked window
