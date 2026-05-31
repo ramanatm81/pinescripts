@@ -226,12 +226,18 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
 // legSlope < -slopeEntry → downtrend → enter LONG (mean reversion / reversal)
 // legSlope >  slopeEntry → uptrend   → enter SHORT
 //=============================
-canTrade = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and time >= startDate and time <= endDate and not na(legSlope)
+canTrade    = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and time >= startDate and time <= endDate and not na(legSlope)
 
-// Block 1 — after trail exit, block opposite direction if trend still intact
-// Block 2 — after SL exit, block same direction if trend still against us
-bullEntry = canTrade and legSlope < -slopeEntry and trailExitDir != -1 and slExitDir != 1
-bearEntry = canTrade and legSlope >  slopeEntry and trailExitDir !=  1 and slExitDir != -1
+// SL flip — after Long SL, allow Short in trend direction (bypass cooldown); vice versa
+// slExitDir=1 means Long was SL'd → flip to Short if slope still positive (trend continuing down)
+// slExitDir=-1 means Short was SL'd → flip to Long if slope still negative (trend continuing up)
+canFlipSL   = not inTrade and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and time >= startDate and time <= endDate and not na(legSlope)
+slFlipBull  = canFlipSL and slExitDir == -1 and legSlope < -slopeEntry   // Short SL'd, trend still down → Long
+slFlipBear  = canFlipSL and slExitDir ==  1 and legSlope >  slopeEntry   // Long SL'd, trend still up → Short
+
+// Normal mean-reversion entries — trail block still applies, no SL same-direction block needed
+bullEntry = canTrade and legSlope < -slopeEntry and trailExitDir != -1 and not slFlipBull and not slFlipBear
+bearEntry = canTrade and legSlope >  slopeEntry and trailExitDir !=  1 and not slFlipBull and not slFlipBear
 
 if bullEntry
     tp = close + tpPts * tpMult
@@ -272,6 +278,49 @@ else if bearEntry
               text      = (_isDeep2 ? "D↓" : "S↓") + "\n" + str.tostring(close, "#.##") + "\nSL:" + str.tostring(activeSL, "#") + "\nsl:" + str.tostring(legSlope, "#.##"),
               style     = label.style_label_down,
               color     = _isDeep2 ? color.new(color.orange, 10) : color.new(color.red, 10),
+              textcolor = color.white,
+              size      = size.normal)
+
+// SL flip entries — trend-following after SL exit
+if slFlipBull
+    tp = close + tpPts * tpMult
+    strategy.entry("Long",  strategy.long,  comment="T↑")
+    strategy.exit("Exit-Long",  "Long",  limit=tp)
+    tradeDir     := 1
+    entryPrice   := close
+    entrySlope   := legSlope
+    trailStop    := na
+    bestPrice    := na
+    inTrade      := true
+    slExitDir    := 0
+    trailExitDir := 0
+    cooldown     := 0
+    activeSL     := enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
+    label.new(bar_index, low,
+              text      = "T↑\n" + str.tostring(close, "#.##") + "\nSL:" + str.tostring(activeSL, "#") + "\nsl:" + str.tostring(legSlope, "#.##"),
+              style     = label.style_label_up,
+              color     = color.new(color.teal, 10),
+              textcolor = color.white,
+              size      = size.normal)
+
+else if slFlipBear
+    tp = close - tpPts * tpMult
+    strategy.entry("Short", strategy.short, comment="T↓")
+    strategy.exit("Exit-Short", "Short", limit=tp)
+    tradeDir     := -1
+    entryPrice   := close
+    entrySlope   := legSlope
+    trailStop    := na
+    bestPrice    := na
+    inTrade      := true
+    slExitDir    := 0
+    trailExitDir := 0
+    cooldown     := 0
+    activeSL     := enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
+    label.new(bar_index, high,
+              text      = "T↓\n" + str.tostring(close, "#.##") + "\nSL:" + str.tostring(activeSL, "#") + "\nsl:" + str.tostring(legSlope, "#.##"),
+              style     = label.style_label_down,
+              color     = color.new(color.teal, 10),
               textcolor = color.white,
               size      = size.normal)
 
