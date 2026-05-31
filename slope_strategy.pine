@@ -228,12 +228,12 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
 //=============================
 canTrade    = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and time >= startDate and time <= endDate and not na(legSlope)
 
-// SL flip — after Long SL, allow Short in trend direction (bypass cooldown); vice versa
-// slExitDir=1 means Long was SL'd → flip to Short if slope still positive (trend continuing down)
-// slExitDir=-1 means Short was SL'd → flip to Long if slope still negative (trend continuing up)
+// SL flip — after SL exit, enter in the direction the trend is actually going
+// slExitDir=1  means Long was SL'd → price fell → slope negative → enter Short (go with downtrend)
+// slExitDir=-1 means Short was SL'd → price rose → slope positive → enter Long (go with uptrend)
 canFlipSL   = not inTrade and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and time >= startDate and time <= endDate and not na(legSlope)
-slFlipBull  = canFlipSL and slExitDir == -1 and legSlope < -slopeEntry   // Short SL'd, trend still down → Long
-slFlipBear  = canFlipSL and slExitDir ==  1 and legSlope >  slopeEntry   // Long SL'd, trend still up → Short
+slFlipBear  = canFlipSL and slExitDir ==  1 and legSlope < -slopeEntry   // Long SL'd, trend still down → Short
+slFlipBull  = canFlipSL and slExitDir == -1 and legSlope >  slopeEntry   // Short SL'd, trend still up → Long
 
 // Normal mean-reversion entries — trail block still applies, no SL same-direction block needed
 bullEntry = canTrade and legSlope < -slopeEntry and trailExitDir != -1 and not slFlipBull and not slFlipBear
