@@ -673,9 +673,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Input file not found: {args.input}", file=sys.stderr)
         return 1
 
-    output = args.output or args.input.with_name(
-        args.input.stem + "_positions.xlsx"
-    )
+    if args.output:
+        output = args.output
+    else:
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output = args.input.with_name(f"positions_{ts}.xlsx")
 
     print(f"Reading: {args.input}")
     trades_df = load_trades(args.input)
