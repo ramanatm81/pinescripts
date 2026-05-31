@@ -24,6 +24,8 @@ tExpHardSlope    = input.float(1.0, "Slope 'against' threshold for hard exit",  
 dojiPct      = input.float(10.0,"Doji body % of range (excluded from R²)", minval=1.0, maxval=49.0, step=1.0, group="R² Filter")
 cooldownBars = input.int(10,    "Cooldown bars after exit (0 = none)",    minval=0,  maxval=50,              group="R² Filter")
 deepSlope    = input.float(3.0,  "Deep slope threshold",                            minval=0.5, step=0.1,  group="R² Filter")
+requireFractal   = input.bool(false, "Require fractal before entry",                               group="Fractal Filter")
+fractalLookback  = input.int(10,     "Max bars since fractal (0 = any)",  minval=0,  maxval=100,   group="Fractal Filter")
 blockNYOpen  = input.bool(false,"Block NY open first 30 min (08:30–09:00 CT)",          group="Session Filter")
 blockLNOpen  = input.bool(false,"Block LN open first 30 min (02:00–02:30 CT)",          group="Session Filter")
 blockPreNY   = input.bool(true, "Block CME pre-open + NY open (07:30–09:00 CT)",        group="Session Filter")
@@ -120,6 +122,26 @@ else
             sumX22 += x2 * x2
         denom2        = n2 * sumX22 - sumX2 * sumX2
         tradeLegSlope := denom2 != 0.0 ? math.round((n2 * sumXY2 - sumX2 * sumY2) / denom2, 2) : 0.0
+
+//=============================
+// Fractal detection (Williams 5-bar fractal, confirmed 2 bars back)
+// Bearish fractal: bar[-2] high is highest of 5 bars → local top formed
+// Bullish fractal: bar[-2] low  is lowest  of 5 bars → local bottom formed
+//=============================
+bearFractal = high[2] > high[4] and high[2] > high[3] and high[2] > high[1] and high[2] > high[0]
+bullFractal = low[2]  < low[4]  and low[2]  < low[3]  and low[2]  < low[1]  and low[2]  < low[0]
+
+var int lastBearFractalBar = na
+var int lastBullFractalBar = na
+if bearFractal
+    lastBearFractalBar := bar_index
+if bullFractal
+    lastBullFractalBar := bar_index
+
+// For Long entry: need a bearish fractal (local top confirmed) within lookback bars
+// For Short entry: need a bullish fractal (local bottom confirmed) within lookback bars
+fractalOkLong  = not requireFractal or (not na(lastBearFractalBar) and (fractalLookback == 0 or bar_index - lastBearFractalBar <= fractalLookback))
+fractalOkShort = not requireFractal or (not na(lastBullFractalBar) and (fractalLookback == 0 or bar_index - lastBullFractalBar <= fractalLookback))
 
 //=============================
 // Session block exits — close any open trade on entering a blocked window
@@ -230,8 +252,9 @@ canTrade = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock an
 
 // Block 1 — after trail exit, block opposite direction if trend still intact
 // Block 2 — after SL exit, block same direction if trend still against us
-bullEntry = canTrade and legSlope < -slopeEntry and trailExitDir != -1 and slExitDir != 1
-bearEntry = canTrade and legSlope >  slopeEntry and trailExitDir !=  1 and slExitDir != -1
+// Block 3 — fractal filter: require recent fractal in correct direction (optional)
+bullEntry = canTrade and legSlope < -slopeEntry and trailExitDir != -1 and slExitDir != 1 and fractalOkLong
+bearEntry = canTrade and legSlope >  slopeEntry and trailExitDir !=  1 and slExitDir != -1 and fractalOkShort
 
 if bullEntry
     tp = close + tpPts * tpMult
@@ -409,6 +432,12 @@ if posClosed
             deepWins += 1
         else if closedPnl < 0
             deepLosses += 1
+
+//=============================
+// Fractal plots — visible on chart when fractal filter is enabled
+//=============================
+plotshape(bearFractal, title="Bear Fractal", style=shape.triangledown, location=location.abovebar, color=color.red,   size=size.tiny, offset=-2)
+plotshape(bullFractal, title="Bull Fractal", style=shape.triangleup,   location=location.belowbar, color=color.green, size=size.tiny, offset=-2)
 
 //=============================
 // Debug plots
