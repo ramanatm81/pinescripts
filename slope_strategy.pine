@@ -61,6 +61,7 @@ var float trailStop    = na
 var int   cooldown     = 0
 var int   barsInTrade  = 0
 var float activeSL     = na   // SL locked in at entry (SMA-based or fixed)
+var int   slExitDir    = 0    // blocks same-direction re-entry after SL/SLP: 1=Long blocked, -1=Short blocked
 
 //=============================
 // Trade leg slope buffer — accumulates close prices from entry bar onward
@@ -165,6 +166,14 @@ if cooldown > 0 and not inTrade
     cooldown -= 1
 
 //=============================
+// slExitDir — clear when slope no longer trending against blocked direction
+//=============================
+if slExitDir == 1 and not inTrade and not na(legSlope) and legSlope >= -slopeEntry
+    slExitDir := 0
+if slExitDir == -1 and not inTrade and not na(legSlope) and legSlope <= slopeEntry
+    slExitDir := 0
+
+//=============================
 // SLP exit (deep entries) + Hard SL
 //=============================
 if inTrade and not na(legSlope) and strategy.position_size != 0
@@ -175,6 +184,7 @@ if inTrade and not na(legSlope) and strategy.position_size != 0
     if isDeepEntry and slopeReversed
         strategy.close("Long",  comment="SLP")
         strategy.close("Short", comment="SLP")
+        slExitDir := tradeDir   // block same direction re-entry
         tradeDir  := 0
         trailStop := na
         bestPrice := na
@@ -183,6 +193,7 @@ if inTrade and not na(legSlope) and strategy.position_size != 0
     else if hardSLHit
         strategy.close("Long",  comment="SL")
         strategy.close("Short", comment="SL")
+        slExitDir := tradeDir   // block same direction re-entry
         tradeDir  := 0
         trailStop := na
         bestPrice := na
@@ -233,13 +244,14 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
 //=============================
 canTrade = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and time >= startDate and time <= endDate and not na(legSlope)
 
-bullEntry = canTrade and legSlope < -slopeEntry
-bearEntry = canTrade and legSlope >  slopeEntry
+bullEntry = canTrade and legSlope < -slopeEntry and slExitDir != 1   // blocked if last SL/SLP was a Long
+bearEntry = canTrade and legSlope >  slopeEntry and slExitDir != -1  // blocked if last SL/SLP was a Short
 
 if bullEntry
     tp = close + tpPts * tpMult
     strategy.entry("Long",  strategy.long,  comment="S↑")
     strategy.exit("Exit-Long",  "Long",  limit=tp)   // TP only — SL handled manually
+    slExitDir  := 0
     tradeDir   := 1
     entryPrice := close
     entrySlope := legSlope
@@ -259,6 +271,7 @@ else if bearEntry
     tp = close - tpPts * tpMult
     strategy.entry("Short", strategy.short, comment="S↓")
     strategy.exit("Exit-Short", "Short", limit=tp)   // TP only — SL handled manually
+    slExitDir  := 0
     tradeDir   := -1
     entryPrice := close
     entrySlope := legSlope
@@ -407,6 +420,7 @@ plot(tradeDir,                          "tradeDir",      color=color.white,     
 plot(barsInTrade > 0 ? barsInTrade : na,"barsInTrade",  color=color.rgb(180,120,255), display=display.data_window)
 plot(cooldown > 0 ? cooldown : na,      "cooldown",      color=color.aqua,             display=display.data_window)
 plot(isDoji   ? 1 : 0,                 "isDoji",         color=color.yellow,           display=display.data_window)
+plot(slExitDir,                        "slExitDir",      color=color.rgb(255,100,100), display=display.data_window)
 
 // No-traction stats table — bottom-right corner of chart
 var table statsTable = table.new(position.bottom_right, 2, 4,
