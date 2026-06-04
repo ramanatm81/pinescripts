@@ -214,6 +214,7 @@ if enableTExp and inTrade and strategy.position_size != 0 and barsInTrade >= tEx
     if isProfit
         strategy.close("Long",  comment="TEXP")
         strategy.close("Short", comment="TEXP")
+        slExitDir   := tradeDir
         tradeDir    := 0
         trailStop   := na
         bestPrice   := na
@@ -230,6 +231,7 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
     if slopeAgainst
         strategy.close("Long",  comment="THRD")
         strategy.close("Short", comment="THRD")
+        slExitDir   := tradeDir
         tradeDir    := 0
         trailStop   := na
         bestPrice   := na
