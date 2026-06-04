@@ -1,6 +1,6 @@
 //@version=6
 strategy("Slope Strategy", overlay=true, max_labels_count=500, max_bars_back=5000,
-         default_qty_type=strategy.fixed, default_qty_value=1, calc_on_every_tick=true)
+         default_qty_type=strategy.fixed, default_qty_value=1)
 
 //=============================
 // Inputs
@@ -9,7 +9,7 @@ lookback     = 10  // fixed rolling window for slope calculation
 slopeEntry   = input.float(1.7, "Slope threshold (entry trigger)",        minval=0.1, step=0.1)
 slPts        = input.float(50.0,"Stop Loss (pts from entry) — fallback when SMA SL disabled", minval=0.5, step=0.5)
 enableSmaSL  = input.bool(true,  "Dynamic SL based on SMA",                                   group="SMA Stop Loss")
-smaPeriod    = input.int(180,    "SMA period",              minval=2,   maxval=500,            group="SMA Stop Loss")
+smaPeriod    = input.int(30,     "SMA period",              minval=2,   maxval=500,            group="SMA Stop Loss")
 slAboveSma   = input.float(50.0, "SL when close > SMA (upward, pts)",  minval=0.5, step=0.5,  group="SMA Stop Loss")
 slBelowSma   = input.float(30.0, "SL when close < SMA (downward, pts)",minval=0.5, step=0.5,  group="SMA Stop Loss")
 tpPts        = input.float(40.0,"TP base (pts from entry)",               minval=0.5, step=1.0)
@@ -23,11 +23,8 @@ tExpHardBars     = input.int(20,    "Hard max bars (exit if slope against trade)
 tExpHardSlope    = input.float(1.0, "Slope 'against' threshold for hard exit",                   minval=0.1, step=0.1,  group="Time Expiry")
 dojiPct      = input.float(10.0,"Doji body % of range (excluded from R²)", minval=1.0, maxval=49.0, step=1.0, group="R² Filter")
 cooldownBars = input.int(10,    "Cooldown bars after exit (0 = none)",    minval=0,  maxval=50,              group="R² Filter")
-deepSlope    = input.float(3.0,  "Deep slope threshold",                            minval=0.5, step=0.1,  group="R² Filter")
-requireFractal   = input.bool(false, "Require fractal before entry",                               group="Fractal Filter")
-fractalLookback  = input.int(10,     "Max bars since fractal (0 = any)",  minval=0,  maxval=100,   group="Fractal Filter")
 blockNYOpen  = input.bool(false,"Block NY open first 30 min (08:30–09:00 CT)",          group="Session Filter")
-blockLNOpen  = input.bool(false,"Block LN open first 30 min (02:00–02:30 CT)",          group="Session Filter")
+blockLNOpen  = input.bool(true, "Block LN open first 30 min (02:00–02:30 CT)",          group="Session Filter")
 blockPreNY   = input.bool(true, "Block CME pre-open + NY open (07:30–09:00 CT)",        group="Session Filter")
 startDate    = input.time(timestamp("2000-01-01T00:00:00-06:00"), "Backtest Start", group="Backtest")
 endDate      = input.time(timestamp("2099-12-31T23:59:00-06:00"), "Backtest End",   group="Backtest")
@@ -62,8 +59,6 @@ var float trailStop    = na
 var int   cooldown     = 0
 var int   barsInTrade  = 0
 var float activeSL     = na   // SL locked in at entry (SMA-based or fixed)
-var int   trailExitDir = 0    // direction of last trail exit (1=long, -1=short); blocks opposite re-entry
-var int   slExitDir    = 0    // direction of last SL exit (1=long, -1=short); blocks same direction re-entry
 
 //=============================
 // Trade leg slope buffer — accumulates close prices from entry bar onward
@@ -124,26 +119,6 @@ else
         tradeLegSlope := denom2 != 0.0 ? math.round((n2 * sumXY2 - sumX2 * sumY2) / denom2, 2) : 0.0
 
 //=============================
-// Fractal detection (Williams 5-bar fractal, confirmed 2 bars back)
-// Bearish fractal: bar[-2] high is highest of 5 bars → local top formed
-// Bullish fractal: bar[-2] low  is lowest  of 5 bars → local bottom formed
-//=============================
-bearFractal = high[2] > high[4] and high[2] > high[3] and high[2] > high[1] and high[2] > high[0]
-bullFractal = low[2]  < low[4]  and low[2]  < low[3]  and low[2]  < low[1]  and low[2]  < low[0]
-
-var int lastBearFractalBar = na
-var int lastBullFractalBar = na
-if bearFractal
-    lastBearFractalBar := bar_index
-if bullFractal
-    lastBullFractalBar := bar_index
-
-// For Long entry: need a bearish fractal (local top confirmed) within lookback bars
-// For Short entry: need a bullish fractal (local bottom confirmed) within lookback bars
-fractalOkLong  = not requireFractal or (not na(lastBearFractalBar) and (fractalLookback == 0 or bar_index - lastBearFractalBar <= fractalLookback))
-fractalOkShort = not requireFractal or (not na(lastBullFractalBar) and (fractalLookback == 0 or bar_index - lastBullFractalBar <= fractalLookback))
-
-//=============================
 // Session block exits — close any open trade on entering a blocked window
 //=============================
 inAnyBlock = nyOpenBlock or lnOpenBlock or preNYBlock
@@ -155,8 +130,7 @@ if inAnyBlock and inTrade
     bestPrice   := na
     inTrade     := false
     barsInTrade := 0
-    cooldown    := 0
-    slExitDir   := 0
+    cooldown    := 0   // no cooldown — block window itself prevents re-entry
 
 //=============================
 // EOD reset
@@ -170,7 +144,6 @@ if eodClose
     inTrade     := false
     cooldown    := 0
     barsInTrade := 0
-    slExitDir   := 0
 
 //=============================
 // Sync on TP/SL close
@@ -189,17 +162,14 @@ if strategy.position_size == 0 and (inTrade or tradeDir != 0)
 if cooldown > 0 and not inTrade
     cooldown -= 1
 
-// trailExitDir persists until a new trade is entered — cleared at entry
-
 //=============================
-// Hard SL
+// Hard stop loss
 //=============================
 if inTrade and strategy.position_size != 0
     hardSLHit = (tradeDir == 1 and low <= entryPrice - activeSL) or (tradeDir == -1 and high >= entryPrice + activeSL)
     if hardSLHit
         strategy.close("Long",  comment="SL")
         strategy.close("Short", comment="SL")
-        slExitDir := tradeDir   // remember which direction was SL'd
         tradeDir  := 0
         trailStop := na
         bestPrice := na
@@ -250,30 +220,24 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
 //=============================
 canTrade = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and time >= startDate and time <= endDate and not na(legSlope)
 
-// Block 1 — after trail exit, block opposite direction if trend still intact
-// Block 2 — after SL exit, block same direction if trend still against us
-// Block 3 — fractal filter: require recent fractal in correct direction (optional)
-bullEntry = canTrade and legSlope < -slopeEntry and trailExitDir != -1 and slExitDir != 1 and fractalOkLong
-bearEntry = canTrade and legSlope >  slopeEntry and trailExitDir !=  1 and slExitDir != -1 and fractalOkShort
+bullEntry = canTrade and legSlope < -slopeEntry
+bearEntry = canTrade and legSlope >  slopeEntry
 
 if bullEntry
     tp = close + tpPts * tpMult
     strategy.entry("Long",  strategy.long,  comment="S↑")
     strategy.exit("Exit-Long",  "Long",  limit=tp)   // TP only — SL handled manually
-    tradeDir     := 1
-    entryPrice   := close
-    entrySlope   := legSlope
-    trailStop    := na
-    bestPrice    := na
-    inTrade      := true
-    trailExitDir := 0
-    slExitDir    := 0
-    activeSL     := enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
-    _isDeep  = math.abs(legSlope) >= deepSlope
+    tradeDir   := 1
+    entryPrice := close
+    entrySlope := legSlope
+    trailStop  := na
+    bestPrice  := na
+    inTrade    := true
+    activeSL   := enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
     label.new(bar_index, low,
-              text      = (_isDeep ? "D↑" : "S↑") + "\n" + str.tostring(close, "#.##") + "\nSL:" + str.tostring(activeSL, "#") + "\nsl:" + str.tostring(legSlope, "#.##"),
+              text      = "S↑\n" + str.tostring(close, "#.##") + "\nSL:" + str.tostring(activeSL, "#"),
               style     = label.style_label_up,
-              color     = _isDeep ? color.new(color.orange, 10) : color.new(color.green, 10),
+              color     = color.new(color.green, 10),
               textcolor = color.white,
               size      = size.normal)
 
@@ -281,20 +245,17 @@ else if bearEntry
     tp = close - tpPts * tpMult
     strategy.entry("Short", strategy.short, comment="S↓")
     strategy.exit("Exit-Short", "Short", limit=tp)   // TP only — SL handled manually
-    tradeDir     := -1
-    entryPrice   := close
-    entrySlope   := legSlope
-    trailStop    := na
-    bestPrice    := na
-    inTrade      := true
-    trailExitDir := 0
-    slExitDir    := 0
-    activeSL     := enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
-    _isDeep2 = math.abs(legSlope) >= deepSlope
+    tradeDir   := -1
+    entryPrice := close
+    entrySlope := legSlope
+    trailStop  := na
+    bestPrice  := na
+    inTrade    := true
+    activeSL   := enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
     label.new(bar_index, high,
-              text      = (_isDeep2 ? "D↓" : "S↓") + "\n" + str.tostring(close, "#.##") + "\nSL:" + str.tostring(activeSL, "#") + "\nsl:" + str.tostring(legSlope, "#.##"),
+              text      = "S↓\n" + str.tostring(close, "#.##"),
               style     = label.style_label_down,
-              color     = _isDeep2 ? color.new(color.orange, 10) : color.new(color.red, 10),
+              color     = color.new(color.red, 10),
               textcolor = color.white,
               size      = size.normal)
 
@@ -309,8 +270,7 @@ if tradeDir == 1 and strategy.position_size != 0
     if bestPrice - entryPrice >= trailTrigger
         trailStop := math.max(na(trailStop) ? bestPrice - trailDist : trailStop, bestPrice - trailDist)
     if not na(trailStop) and low <= trailStop
-        trailFired    := true
-        trailExitDir  := 1
+        trailFired := true
         strategy.close("Long", comment="TRAIL")
         tradeDir  := 0
         trailStop := na
@@ -323,8 +283,7 @@ else if tradeDir == -1 and strategy.position_size != 0
     if entryPrice - bestPrice >= trailTrigger
         trailStop := math.min(na(trailStop) ? bestPrice + trailDist : trailStop, bestPrice + trailDist)
     if not na(trailStop) and high >= trailStop
-        trailFired    := true
-        trailExitDir  := -1
+        trailFired := true
         strategy.close("Short", comment="TRAIL")
         tradeDir  := 0
         trailStop := na
@@ -350,94 +309,64 @@ if posClosed
     isSL    = not isTrail and not isTExp and not isTHrd and not isBlk and not isTP
     wasLong = tradeDir[1] == 1
 
-    slopeTag = "\nes:" + str.tostring(entrySlope, "#.##") + " xs:" + str.tostring(legSlope, "#.##")
-
     if isBlk
         label.new(bar_index, wasLong ? low : high,
-                  text      = "BLK" + slopeTag,
+                  text      = "BLK",
                   style     = wasLong ? label.style_label_up : label.style_label_down,
                   color     = color.new(color.gray, 20),
                   textcolor = color.white,
                   size      = size.small)
     else if isTHrd
         label.new(bar_index, wasLong ? low : high,
-                  text      = "THRD" + slopeTag,
+                  text      = "THRD",
                   style     = wasLong ? label.style_label_up : label.style_label_down,
                   color     = color.new(color.maroon, 20),
                   textcolor = color.white,
                   size      = size.small)
     else if isTExp
         label.new(bar_index, wasLong ? low : high,
-                  text      = "TEXP" + slopeTag,
+                  text      = "TEXP",
                   style     = wasLong ? label.style_label_up : label.style_label_down,
                   color     = color.new(color.blue, 20),
                   textcolor = color.white,
                   size      = size.small)
     else if isTrail
         label.new(bar_index, wasLong ? low : high,
-                  text      = "TRAIL" + slopeTag,
+                  text      = "TRAIL",
                   style     = wasLong ? label.style_label_up : label.style_label_down,
                   color     = color.new(color.green, 20),
                   textcolor = color.white,
                   size      = size.small)
     else if isTP
         label.new(bar_index, wasLong ? low : high,
-                  text      = "TP" + slopeTag,
+                  text      = "TP",
                   style     = wasLong ? label.style_label_up : label.style_label_down,
                   color     = color.new(color.green, 20),
                   textcolor = color.white,
                   size      = size.small)
     else if isSL
         label.new(bar_index, wasLong ? high : low,
-                  text      = "SL" + slopeTag,
+                  text      = "SL",
                   style     = wasLong ? label.style_label_down : label.style_label_up,
                   color     = color.new(color.red, 20),
                   textcolor = color.white,
                   size      = size.small)
 
 //=============================
-// No-traction trade tracker — avg bars held for THRD exits
+// No-traction trade tracker — avg bars held for SL/THRD/TEXP/BLK exits
 //=============================
-var int   noTractCount    = 0
-var float noTractBarsSum  = 0.0
-var float avgNoTractBars  = na
-
-//=============================
-// Deep entry stats — trades where abs(entrySlope) >= deepSlope
-//=============================
-var int   deepTotal       = 0
-var int   deepWins        = 0
-var int   deepLosses      = 0
-var float deepPnlSum      = 0.0
-var float deepAvgPnl      = na
+var int   noTractCount    = 0    // number of no-traction closes so far
+var float noTractBarsSum  = 0.0  // running sum of bars held
+var float avgNoTractBars  = na   // rolling average — updates on each no-traction exit
 
 if posClosed
     exitComment2  = strategy.closedtrades.exit_comment(strategy.closedtrades - 1)
     closedBars    = strategy.closedtrades.exit_bar_index(strategy.closedtrades - 1) - strategy.closedtrades.entry_bar_index(strategy.closedtrades - 1)
-    closedPnl     = strategy.closedtrades.profit(strategy.closedtrades - 1)
-    closedEntry   = strategy.closedtrades.entry_bar_index(strategy.closedtrades - 1)
-
-    isNoTraction  = exitComment2 == "THRD"
+    isNoTraction  = exitComment2 == "SL" or exitComment2 == "THRD" or exitComment2 == "TEXP" or exitComment2 == "BLK"
     if isNoTraction
         noTractCount   += 1
         noTractBarsSum += closedBars
         avgNoTractBars := math.round(noTractBarsSum / noTractCount, 1)
-
-    // entrySlope is still set to the value at entry for the just-closed trade
-    if math.abs(entrySlope) >= deepSlope
-        deepTotal   += 1
-        deepPnlSum  += closedPnl
-        deepAvgPnl  := math.round(deepPnlSum / deepTotal, 1)
-        if closedPnl > 0
-            deepWins += 1
-        else if closedPnl < 0
-            deepLosses += 1
-
-//=============================
-// Fractal plots — visible on chart when fractal filter is enabled
-//=============================
-plotshape(bearFractal, title="Bear Fractal", style=shape.triangledown, location=location.abovebar, color=color.red,   size=size.tiny, offset=-2)
-plotshape(bullFractal, title="Bull Fractal", style=shape.triangleup,   location=location.belowbar, color=color.green, size=size.tiny, offset=-2)
 
 //=============================
 // Debug plots
@@ -453,42 +382,23 @@ plot(cooldown > 0 ? cooldown : na,      "cooldown",      color=color.aqua,      
 plot(isDoji   ? 1 : 0,                 "isDoji",         color=color.yellow,           display=display.data_window)
 
 // No-traction stats table — bottom-right corner of chart
-var table statsTable = table.new(position.bottom_right, 2, 9,
+var table statsTable = table.new(position.bottom_right, 2, 4,
      bgcolor      = color.new(color.black, 20),
      border_width = 1,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    // header
-    table.cell(statsTable, 0, 0, "Metric",              text_color=color.gray,  text_size=size.small, bgcolor=color.new(color.black, 30))
-    table.cell(statsTable, 1, 0, "Value",               text_color=color.gray,  text_size=size.small, bgcolor=color.new(color.black, 30))
-    // no-traction
-    table.cell(statsTable, 0, 1, "No-traction (THRD)",  text_color=color.white, text_size=size.small)
+    table.cell(statsTable, 0, 0, "Metric",           text_color=color.gray,  text_size=size.small, bgcolor=color.new(color.black, 30))
+    table.cell(statsTable, 1, 0, "Value",            text_color=color.gray,  text_size=size.small, bgcolor=color.new(color.black, 30))
+    table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
          text_color=color.rgb(255,150,150), text_size=size.small)
-    table.cell(statsTable, 0, 2, "Avg bars held",       text_color=color.white, text_size=size.small)
+    table.cell(statsTable, 0, 2, "Avg bars held",    text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 2, na(avgNoTractBars) ? "—" : str.tostring(avgNoTractBars, "#.#") + " bars",
          text_color=color.rgb(255,100,100), text_size=size.small)
-    // live
-    table.cell(statsTable, 0, 3, "Live bars in trade",  text_color=color.white, text_size=size.small)
+    table.cell(statsTable, 0, 3, "Live bars in trade", text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 3, barsInTrade > 0 ? str.tostring(barsInTrade) : "—",
          text_color=color.rgb(180,180,255), text_size=size.small)
-    // deep entry separator
-    table.cell(statsTable, 0, 4, "-- Deep entries --",  text_color=color.gray,  text_size=size.small, bgcolor=color.new(color.black, 30))
-    table.cell(statsTable, 1, 4, "abs(sl)>=" + str.tostring(deepSlope, "#.#"), text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 30))
-    // deep stats
-    table.cell(statsTable, 0, 5, "Total",               text_color=color.white, text_size=size.small)
-    table.cell(statsTable, 1, 5, str.tostring(deepTotal),
-         text_color=color.rgb(200,200,255), text_size=size.small)
-    table.cell(statsTable, 0, 6, "Wins / Losses",       text_color=color.white, text_size=size.small)
-    table.cell(statsTable, 1, 6, str.tostring(deepWins) + " / " + str.tostring(deepLosses),
-         text_color=deepWins >= deepLosses ? color.rgb(100,255,150) : color.rgb(255,100,100), text_size=size.small)
-    table.cell(statsTable, 0, 7, "Win rate",            text_color=color.white, text_size=size.small)
-    table.cell(statsTable, 1, 7, deepTotal > 0 ? str.tostring(math.round(deepWins / deepTotal * 100, 1)) + "%" : "—",
-         text_color=color.rgb(200,200,255), text_size=size.small)
-    table.cell(statsTable, 0, 8, "Avg P&L (pts)",       text_color=color.white, text_size=size.small)
-    table.cell(statsTable, 1, 8, na(deepAvgPnl) ? "—" : str.tostring(deepAvgPnl, "#.#"),
-         text_color=deepAvgPnl >= 0 ? color.rgb(100,255,150) : color.rgb(255,100,100), text_size=size.small)
 
 //=============================
 // Alerts
