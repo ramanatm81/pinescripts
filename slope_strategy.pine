@@ -201,10 +201,12 @@ if inTrade and not na(legSlope) and strategy.position_size != 0
     slopeReversed = (tradeDir == 1 and legSlope >= -deepExitSlope) or (tradeDir == -1 and legSlope <= deepExitSlope)
 
     if isDeepEntry and slopeReversed
+        slpIsLoss = (tradeDir == 1 and close < entryPrice) or (tradeDir == -1 and close > entryPrice)
         strategy.close("Long",  comment="SLP")
         strategy.close("Short", comment="SLP")
-        slExitDir := tradeDir
-        slBarrier := na
+        if slpIsLoss
+            slExitDir := tradeDir
+            slBarrier := na
         tradeDir  := 0
         trailStop := na
         bestPrice := na
@@ -235,8 +237,6 @@ if enableTExp and inTrade and strategy.position_size != 0 and barsInTrade >= tEx
     if isProfit
         strategy.close("Long",  comment="TEXP")
         strategy.close("Short", comment="TEXP")
-        slExitDir   := tradeDir
-        slBarrier   := na
         tradeDir    := 0
         trailStop   := na
         bestPrice   := na
