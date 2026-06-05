@@ -25,6 +25,7 @@ dojiPct      = input.float(10.0,"Doji body % of range (excluded from R²)", minv
 cooldownBars = input.int(10,    "Cooldown bars after exit (0 = none)",    minval=0,  maxval=50,              group="R² Filter")
 deepSlope    = input.float(3.0, "Deep slope threshold (D↑/D↓ label + slope exit)", minval=0.5, step=0.1,    group="R² Filter")
 deepExitSlope= input.float(0.5, "Deep slope exit (hold until slope reaches)",       minval=0.0, step=0.1,    group="R² Filter")
+barrierBuffer= input.float(10.0,"Barrier buffer (pts beyond ghost entry to allow re-entry)", minval=0.0, step=0.5, group="R² Filter")
 blockNYOpen  = input.bool(false,"Block NY open first 30 min (08:30–09:00 CT)",          group="Session Filter")
 blockLNOpen  = input.bool(true, "Block LN open first 30 min (02:00–02:30 CT)",          group="Session Filter")
 blockPreNY   = input.bool(true, "Block CME pre-open + NY open (07:30–09:00 CT)",        group="Session Filter")
@@ -167,30 +168,33 @@ if cooldown > 0 and not inTrade
     cooldown -= 1
 
 //=============================
-// slExitDir — ghost entry barrier: trail barrier to each new slope signal while blocked,
-// clear block only when price crosses back through the most recent barrier
+// slExitDir — ghost entry barrier
+// After bad exit, ghost entries trail in the direction price keeps moving.
+// Both directions blocked until price reverses barrierBuffer pts past the last ghost entry.
+//   slExitDir=1  (Long bad exit, price fell) → ghost Longs trail DOWN (math.min), clear when price > barrier + buf
+//   slExitDir=-1 (Short bad exit, price rose) → ghost Shorts trail UP (math.max), clear when price < barrier - buf
 //=============================
-if slExitDir == 1 and not inTrade and not na(legSlope)
-    // Long blocked — update barrier each time slope would have fired a Long entry
-    if legSlope < -slopeEntry
-        slBarrier := close   // trail barrier down with each new ghost long signal
-    // Allow re-entry when price trades above the barrier (market retraced through ghost entry)
-    if not na(slBarrier) and close > slBarrier
-        slExitDir := 0
-        slBarrier := na
-    else if na(slBarrier)
-        slExitDir := 0       // no ghost entry ever fired — clear immediately
-
-if slExitDir == -1 and not inTrade and not na(legSlope)
-    // Short blocked — update barrier each time slope would have fired a Short entry
-    if legSlope > slopeEntry
-        slBarrier := close   // trail barrier up with each new ghost short signal
-    // Allow re-entry when price trades below the barrier (market retraced through ghost entry)
-    if not na(slBarrier) and close < slBarrier
-        slExitDir := 0
-        slBarrier := na
-    else if na(slBarrier)
-        slExitDir := 0       // no ghost entry ever fired — clear immediately
+if slExitDir != 0 and not inTrade and not na(legSlope)
+    if slExitDir == 1
+        // Long bad exit — price fell against us; ghost long signals trail barrier down
+        if legSlope < -slopeEntry
+            slBarrier := na(slBarrier) ? close : math.min(slBarrier, close)
+        // Clear when price rallies barrierBuffer pts above barrier (confirmed reversal up)
+        if not na(slBarrier) and close > slBarrier + barrierBuffer
+            slExitDir := 0
+            slBarrier := na
+        else if na(slBarrier)
+            slExitDir := 0
+    else  // slExitDir == -1
+        // Short bad exit — price rose against us; ghost short signals trail barrier up
+        if legSlope > slopeEntry
+            slBarrier := na(slBarrier) ? close : math.max(slBarrier, close)
+        // Clear when price falls barrierBuffer pts below barrier (confirmed reversal down)
+        if not na(slBarrier) and close < slBarrier - barrierBuffer
+            slExitDir := 0
+            slBarrier := na
+        else if na(slBarrier)
+            slExitDir := 0
 
 //=============================
 // SLP exit (deep entries) + Hard SL
@@ -269,8 +273,8 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
 //=============================
 canTrade = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and time >= startDate and time <= endDate and not na(legSlope)
 
-bullEntry = canTrade and legSlope < -slopeEntry and slExitDir != 1   // blocked if last SL/SLP was a Long
-bearEntry = canTrade and legSlope >  slopeEntry and slExitDir != -1  // blocked if last SL/SLP was a Short
+bullEntry = canTrade and legSlope < -slopeEntry and slExitDir == 0
+bearEntry = canTrade and legSlope >  slopeEntry and slExitDir == 0
 
 if bullEntry
     tp = close + tpPts * tpMult
