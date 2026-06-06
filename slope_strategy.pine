@@ -23,8 +23,7 @@ tExpHardBars     = input.int(20,    "Hard max bars (exit if slope against trade)
 tExpHardSlope    = input.float(1.0, "Slope 'against' threshold for hard exit",                   minval=0.1, step=0.1,  group="Time Expiry")
 dojiPct      = input.float(10.0,"Doji body % of range (excluded from R²)", minval=1.0, maxval=49.0, step=1.0, group="R² Filter")
 cooldownBars = input.int(10,    "Cooldown bars after exit (0 = none)",    minval=0,  maxval=50,              group="R² Filter")
-deepSlope    = input.float(3.0, "Deep slope threshold (D↑/D↓ label + slope exit)", minval=0.5, step=0.1,    group="R² Filter")
-deepExitSlope= input.float(0.5, "Deep slope exit (hold until slope reaches)",       minval=0.0, step=0.1,    group="R² Filter")
+deepSlope    = input.float(3.0, "Deep slope threshold (D↑/D↓ label)",              minval=0.5, step=0.1,    group="R² Filter")
 blockNYOpen  = input.bool(false,"Block NY open first 30 min (08:30–09:00 CT)",          group="Session Filter")
 blockLNOpen  = input.bool(true, "Block LN open first 30 min (02:00–02:30 CT)",          group="Session Filter")
 blockPreNY   = input.bool(true, "Block CME pre-open + NY open (07:30–09:00 CT)",        group="Session Filter")
@@ -214,22 +213,11 @@ if slExitDir != 0 and not inTrade
             barrierCool  := 0
 
 //=============================
-// SLP exit (deep entries) + Hard SL
+// Hard SL
 //=============================
-if inTrade and not na(legSlope) and strategy.position_size != 0
-    isDeepEntry   = math.abs(entrySlope) >= deepSlope
-    hardSLHit     = (tradeDir == 1 and low <= entryPrice - activeSL) or (tradeDir == -1 and high >= entryPrice + activeSL)
-    slopeReversed = (tradeDir == 1 and legSlope >= -deepExitSlope) or (tradeDir == -1 and legSlope <= deepExitSlope)
-
-    if isDeepEntry and slopeReversed
-        strategy.close("Long",  comment="SLP")
-        strategy.close("Short", comment="SLP")
-        tradeDir  := 0
-        trailStop := na
-        bestPrice := na
-        inTrade   := false
-        cooldown  := cooldownBars
-    else if hardSLHit
+if inTrade and strategy.position_size != 0
+    hardSLHit = (tradeDir == 1 and low <= entryPrice - activeSL) or (tradeDir == -1 and high >= entryPrice + activeSL)
+    if hardSLHit
         strategy.close("Long",  comment="SL")
         strategy.close("Short", comment="SL")
         slExitDir    := tradeDir
@@ -351,35 +339,31 @@ else if bearEntry
 var bool trailFired = false
 trailFired := false
 
-isDeepTrade = math.abs(entrySlope) >= deepSlope
-
 if tradeDir == 1 and strategy.position_size != 0
     bestPrice := na(bestPrice) ? high : math.max(bestPrice, high)
-    if not isDeepTrade
-        if bestPrice - entryPrice >= trailTrigger
-            trailStop := math.max(na(trailStop) ? bestPrice - trailDist : trailStop, bestPrice - trailDist)
-        if not na(trailStop) and low <= trailStop
-            trailFired := true
-            strategy.close("Long", comment="TRAIL")
-            tradeDir  := 0
-            trailStop := na
-            bestPrice := na
-            inTrade   := false
-            cooldown  := cooldownBars
+    if bestPrice - entryPrice >= trailTrigger
+        trailStop := math.max(na(trailStop) ? bestPrice - trailDist : trailStop, bestPrice - trailDist)
+    if not na(trailStop) and low <= trailStop
+        trailFired := true
+        strategy.close("Long", comment="TRAIL")
+        tradeDir  := 0
+        trailStop := na
+        bestPrice := na
+        inTrade   := false
+        cooldown  := cooldownBars
 
 else if tradeDir == -1 and strategy.position_size != 0
     bestPrice := na(bestPrice) ? low : math.min(bestPrice, low)
-    if not isDeepTrade
-        if entryPrice - bestPrice >= trailTrigger
-            trailStop := math.min(na(trailStop) ? bestPrice + trailDist : trailStop, bestPrice + trailDist)
-        if not na(trailStop) and high >= trailStop
-            trailFired := true
-            strategy.close("Short", comment="TRAIL")
-            tradeDir  := 0
-            trailStop := na
-            bestPrice := na
-            inTrade   := false
-            cooldown  := cooldownBars
+    if entryPrice - bestPrice >= trailTrigger
+        trailStop := math.min(na(trailStop) ? bestPrice + trailDist : trailStop, bestPrice + trailDist)
+    if not na(trailStop) and high >= trailStop
+        trailFired := true
+        strategy.close("Short", comment="TRAIL")
+        tradeDir  := 0
+        trailStop := na
+        bestPrice := na
+        inTrade   := false
+        cooldown  := cooldownBars
 
 else
     trailStop := na
@@ -391,13 +375,12 @@ else
 posClosed = strategy.position_size == 0 and strategy.position_size[1] != 0 and not eodClose
 if posClosed
     exitComment = strategy.closedtrades.exit_comment(strategy.closedtrades - 1)
-    isSLP   = exitComment == "SLP"
     isTrail = exitComment == "TRAIL"
     isTExp  = exitComment == "TEXP"
     isTHrd  = exitComment == "THRD"
     isBlk   = exitComment == "BLK"
-    isTP    = not isSLP and not isTrail and not isTExp and not isTHrd and not isBlk and strategy.netprofit > strategy.netprofit[1]
-    isSL    = not isSLP and not isTrail and not isTExp and not isTHrd and not isBlk and not isTP
+    isTP    = not isTrail and not isTExp and not isTHrd and not isBlk and strategy.netprofit > strategy.netprofit[1]
+    isSL    = not isTrail and not isTExp and not isTHrd and not isBlk and not isTP
     wasLong = tradeDir[1] == 1
 
     if isBlk
@@ -419,13 +402,6 @@ if posClosed
                   text      = "TEXP",
                   style     = wasLong ? label.style_label_up : label.style_label_down,
                   color     = color.new(color.blue, 20),
-                  textcolor = color.white,
-                  size      = size.small)
-    else if isSLP
-        label.new(bar_index, wasLong ? low : high,
-                  text      = "SLP",
-                  style     = wasLong ? label.style_label_up : label.style_label_down,
-                  color     = color.new(color.orange, 20),
                   textcolor = color.white,
                   size      = size.small)
     else if isTrail
