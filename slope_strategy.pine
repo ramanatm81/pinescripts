@@ -170,43 +170,32 @@ if cooldown > 0 and not inTrade
 
 //=============================
 // slExitDir — ghost entry barrier
-// After bad exit + cooldown, sample a ghost entry every cooldownBars bars.
-// Barrier updates at each sample point if slope qualifies — otherwise holds.
-// Block clears only when price crosses barrier by barrierBuffer pts in reversal direction.
-//   slExitDir=1  (Long bad exit) → sample ghost Longs, clear when price > barrier + buf
-//   slExitDir=-1 (Short bad exit) → sample ghost Shorts, clear when price < barrier - buf
+// After bad exit + cooldown, sample close every cooldownBars bars as reference.
+// No slope condition — just checkpoint the close and wait for price to prove reversal.
+//   slExitDir=1  (Long bad exit) → clear when price > barrier + barrierBuf
+//   slExitDir=-1 (Short bad exit) → clear when price < barrier - barrierBuf
 //=============================
 if slExitDir != 0 and not inTrade and cooldown == 0
     // countdown between barrier sample points
     if barrierCool > 0
         barrierCool -= 1
-    // sample point: check for ghost entry and update barrier
-    if barrierCool == 0 and not na(legSlope)
-        if slExitDir == 1
-            if legSlope < -slopeEntry
-                slBarrier := na(slBarrier) ? close : math.min(slBarrier, close)
-                barrierCool := cooldownBars   // wait before next sample
-        else
-            if legSlope > slopeEntry
-                slBarrier := na(slBarrier) ? close : math.max(slBarrier, close)
-                barrierCool := cooldownBars   // wait before next sample
-    // check clear condition every bar regardless of barrierCool
+    // sample point: set barrier to current close unconditionally
+    if barrierCool == 0
+        slBarrier   := close
+        barrierCool := cooldownBars
+    // check clear condition every bar
     if slExitDir == 1
-        if not na(slBarrier) and close > slBarrier + barrierBuf
+        if close > slBarrier + barrierBuf
             slExitDir   := 0
             slBarrier   := na
             barrierBuf  := na
             barrierCool := 0
-        else if na(slBarrier)
-            slExitDir := 0
     else
-        if not na(slBarrier) and close < slBarrier - barrierBuf
+        if close < slBarrier - barrierBuf
             slExitDir   := 0
             slBarrier   := na
             barrierBuf  := na
             barrierCool := 0
-        else if na(slBarrier)
-            slExitDir := 0
 
 //=============================
 // SLP exit (deep entries) + Hard SL
