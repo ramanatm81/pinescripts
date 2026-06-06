@@ -174,7 +174,7 @@ if cooldown > 0 and not inTrade
 //   slExitDir=1  (Long bad exit, price fell) → ghost Longs trail DOWN (math.min), clear when price > barrier + buf
 //   slExitDir=-1 (Short bad exit, price rose) → ghost Shorts trail UP (math.max), clear when price < barrier - buf
 //=============================
-if slExitDir != 0 and not inTrade and not na(legSlope)
+if slExitDir != 0 and not inTrade and cooldown == 0 and not na(legSlope)
     if slExitDir == 1
         // Long bad exit — price fell against us; ghost long signals trail barrier down
         if legSlope < -slopeEntry
