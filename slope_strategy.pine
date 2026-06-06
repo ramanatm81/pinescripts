@@ -497,7 +497,10 @@ if barstate.islast
     table.cell(statsTable, 1, 3, barsInTrade > 0 ? str.tostring(barsInTrade) : "—",
          text_color=color.rgb(180,180,255), text_size=size.small)
     table.cell(statsTable, 0, 4, "Barrier",          text_color=color.white, text_size=size.small)
-    table.cell(statsTable, 1, 4, slExitDir != 0 and not na(slBarrier) ? str.tostring(slBarrier, "#.##") + " ±" + str.tostring(barrierBuf, "#") : "—",
+    _barrierTxt = slExitDir == 0 ? "—" :
+         na(slBarrier) ? (slExitDir == 1 ? "LONG blocked" : "SHORT blocked") :
+         str.tostring(slBarrier, "#.##") + " ±" + str.tostring(barrierBuf, "#")
+    table.cell(statsTable, 1, 4, _barrierTxt,
          text_color=color.rgb(255,180,50), text_size=size.small)
 
 //=============================
