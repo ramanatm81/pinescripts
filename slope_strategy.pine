@@ -25,7 +25,6 @@ dojiPct      = input.float(10.0,"Doji body % of range (excluded from R²)", minv
 cooldownBars = input.int(10,    "Cooldown bars after exit (0 = none)",    minval=0,  maxval=50,              group="R² Filter")
 deepSlope    = input.float(3.0, "Deep slope threshold (D↑/D↓ label + slope exit)", minval=0.5, step=0.1,    group="R² Filter")
 deepExitSlope= input.float(0.5, "Deep slope exit (hold until slope reaches)",       minval=0.0, step=0.1,    group="R² Filter")
-barrierBuffer= input.float(10.0,"Barrier buffer (pts beyond ghost entry to allow re-entry)", minval=0.0, step=0.5, group="R² Filter")
 blockNYOpen  = input.bool(false,"Block NY open first 30 min (08:30–09:00 CT)",          group="Session Filter")
 blockLNOpen  = input.bool(true, "Block LN open first 30 min (02:00–02:30 CT)",          group="Session Filter")
 blockPreNY   = input.bool(true, "Block CME pre-open + NY open (07:30–09:00 CT)",        group="Session Filter")
@@ -65,6 +64,7 @@ var float activeSL     = na   // SL locked in at entry (SMA-based or fixed)
 var int   slExitDir    = 0    // blocks same-direction re-entry after bad exit: 1=Long blocked, -1=Short blocked
 var float slBarrier    = na   // ghost entry price — updated every cooldownBars interval while blocked
 var int   barrierCool  = 0    // countdown between barrier updates (uses same cooldownBars period)
+var float barrierBuf   = na   // dynamic buffer = activeSL locked at time of bad exit
 
 //=============================
 // Trade leg slope buffer — accumulates close prices from entry bar onward
@@ -192,16 +192,18 @@ if slExitDir != 0 and not inTrade and cooldown == 0
                 barrierCool := cooldownBars   // wait before next sample
     // check clear condition every bar regardless of barrierCool
     if slExitDir == 1
-        if not na(slBarrier) and close > slBarrier + barrierBuffer
-            slExitDir  := 0
-            slBarrier  := na
+        if not na(slBarrier) and close > slBarrier + barrierBuf
+            slExitDir   := 0
+            slBarrier   := na
+            barrierBuf  := na
             barrierCool := 0
         else if na(slBarrier)
             slExitDir := 0
     else
-        if not na(slBarrier) and close < slBarrier - barrierBuffer
-            slExitDir  := 0
-            slBarrier  := na
+        if not na(slBarrier) and close < slBarrier - barrierBuf
+            slExitDir   := 0
+            slBarrier   := na
+            barrierBuf  := na
             barrierCool := 0
         else if na(slBarrier)
             slExitDir := 0
@@ -221,6 +223,7 @@ if inTrade and not na(legSlope) and strategy.position_size != 0
         if slpIsLoss
             slExitDir   := tradeDir
             slBarrier   := na
+            barrierBuf  := activeSL
             barrierCool := 0
         tradeDir  := 0
         trailStop := na
@@ -232,6 +235,7 @@ if inTrade and not na(legSlope) and strategy.position_size != 0
         strategy.close("Short", comment="SL")
         slExitDir   := tradeDir
         slBarrier   := na
+        barrierBuf  := activeSL
         barrierCool := 0
         tradeDir    := 0
         trailStop := na
@@ -271,6 +275,7 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
         strategy.close("Short", comment="THRD")
         slExitDir   := tradeDir
         slBarrier   := na
+        barrierBuf  := activeSL
         barrierCool := 0
         tradeDir    := 0
         trailStop   := na
@@ -295,6 +300,7 @@ if bullEntry
     strategy.exit("Exit-Long",  "Long",  limit=tp)   // TP only — SL handled manually
     slExitDir   := 0
     slBarrier   := na
+    barrierBuf  := na
     barrierCool := 0
     tradeDir    := 1
     entryPrice  := close
@@ -317,6 +323,7 @@ else if bearEntry
     strategy.exit("Exit-Short", "Short", limit=tp)   // TP only — SL handled manually
     slExitDir   := 0
     slBarrier   := na
+    barrierBuf  := na
     barrierCool := 0
     tradeDir    := -1
     entryPrice  := close
@@ -467,7 +474,8 @@ plot(barsInTrade > 0 ? barsInTrade : na,"barsInTrade",  color=color.rgb(180,120,
 plot(cooldown > 0 ? cooldown : na,      "cooldown",      color=color.aqua,             display=display.data_window)
 plot(isDoji   ? 1 : 0,                 "isDoji",         color=color.yellow,           display=display.data_window)
 plot(slExitDir,                        "slExitDir",      color=color.rgb(255,100,100), display=display.data_window)
-plot(slBarrier,                        "slBarrier",      color=color.rgb(255,180,50),  display=display.data_window)
+plot(slBarrier,                          "slBarrier",    color=color.rgb(255,180,50),  display=display.data_window)
+plot(barrierBuf,                         "barrierBuf",  color=color.rgb(255,140,0),   display=display.data_window)
 plot(barrierCool > 0 ? barrierCool : na, "barrierCool", color=color.rgb(200,100,255), display=display.data_window)
 
 // No-traction stats table — bottom-right corner of chart
