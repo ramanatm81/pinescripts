@@ -61,10 +61,9 @@ var float trailStop    = na
 var int   cooldown     = 0
 var int   barsInTrade  = 0
 var float activeSL     = na   // SL locked in at entry (SMA-based or fixed)
-var int   slExitDir    = 0    // blocks re-entry after bad exit: 1=Long blocked, -1=Short blocked
-var float slBarrier    = na   // checkpoint close — updated every cooldownBars for reference display
-var float slExitClose  = na   // close at time of bad exit — fixed anchor for clear condition
-var int   barrierCool  = 0    // countdown between barrier checkpoint updates
+var int   slExitDir    = 0    // blocks same-direction re-entry after bad exit: 1=Long blocked, -1=Short blocked
+var float slBarrier    = na   // ghost entry price — updated every cooldownBars interval while blocked
+var int   barrierCool  = 0    // countdown between barrier updates (uses same cooldownBars period)
 var float barrierBuf   = na   // dynamic buffer = activeSL locked at time of bad exit
 
 //=============================
@@ -171,33 +170,30 @@ if cooldown > 0 and not inTrade
 
 //=============================
 // slExitDir — ghost entry barrier
-// slExitClose: fixed anchor = close at time of bad exit
-// slBarrier:   checkpoint updated every cooldownBars (for display only)
-// Clear condition anchored to slExitClose — never moves:
-//   slExitDir=1  (Long bad exit) → clear when close > slExitClose + barrierBuf
-//   slExitDir=-1 (Short bad exit) → clear when close < slExitClose - barrierBuf
+// After bad exit + cooldown, sample close every cooldownBars bars as reference.
+// No slope condition — just checkpoint the close and wait for price to prove reversal.
+//   slExitDir=1  (Long bad exit) → clear when price > barrier + barrierBuf
+//   slExitDir=-1 (Short bad exit) → clear when price < barrier - barrierBuf
 //=============================
 if slExitDir != 0 and not inTrade and cooldown == 0
-    // countdown between checkpoint updates
+    // countdown between barrier sample points
     if barrierCool > 0
         barrierCool -= 1
-    // checkpoint: update slBarrier for reference display
+    // sample point: set barrier to current close unconditionally
     if barrierCool == 0
         slBarrier   := close
         barrierCool := cooldownBars
-    // clear condition always anchored to original exit close
+    // check clear condition every bar
     if slExitDir == 1
-        if close > slExitClose + barrierBuf
+        if close > slBarrier + barrierBuf
             slExitDir   := 0
             slBarrier   := na
-            slExitClose := na
             barrierBuf  := na
             barrierCool := 0
     else
-        if close < slExitClose - barrierBuf
+        if close < slBarrier - barrierBuf
             slExitDir   := 0
             slBarrier   := na
-            slExitClose := na
             barrierBuf  := na
             barrierCool := 0
 
@@ -216,7 +212,6 @@ if inTrade and not na(legSlope) and strategy.position_size != 0
         if slpIsLoss
             slExitDir   := tradeDir
             slBarrier   := na
-            slExitClose := close
             barrierBuf  := activeSL
             barrierCool := 0
         tradeDir  := 0
@@ -229,7 +224,6 @@ if inTrade and not na(legSlope) and strategy.position_size != 0
         strategy.close("Short", comment="SL")
         slExitDir   := tradeDir
         slBarrier   := na
-        slExitClose := close
         barrierBuf  := activeSL
         barrierCool := 0
         tradeDir    := 0
@@ -270,7 +264,6 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
         strategy.close("Short", comment="THRD")
         slExitDir   := tradeDir
         slBarrier   := na
-        slExitClose := close
         barrierBuf  := activeSL
         barrierCool := 0
         tradeDir    := 0
@@ -296,7 +289,6 @@ if bullEntry
     strategy.exit("Exit-Long",  "Long",  limit=tp)   // TP only — SL handled manually
     slExitDir   := 0
     slBarrier   := na
-    slExitClose := na
     barrierBuf  := na
     barrierCool := 0
     tradeDir    := 1
@@ -320,7 +312,6 @@ else if bearEntry
     strategy.exit("Exit-Short", "Short", limit=tp)   // TP only — SL handled manually
     slExitDir   := 0
     slBarrier   := na
-    slExitClose := na
     barrierBuf  := na
     barrierCool := 0
     tradeDir    := -1
@@ -473,7 +464,6 @@ plot(cooldown > 0 ? cooldown : na,      "cooldown",      color=color.aqua,      
 plot(isDoji   ? 1 : 0,                 "isDoji",         color=color.yellow,           display=display.data_window)
 plot(slExitDir,                        "slExitDir",      color=color.rgb(255,100,100), display=display.data_window)
 plot(slBarrier,                          "slBarrier",    color=color.rgb(255,180,50),  display=display.data_window)
-plot(slExitClose,                        "slExitClose",  color=color.rgb(255,80,80),   display=display.data_window)
 plot(barrierBuf,                         "barrierBuf",  color=color.rgb(255,140,0),   display=display.data_window)
 plot(barrierCool > 0 ? barrierCool : na, "barrierCool", color=color.rgb(200,100,255), display=display.data_window)
 
@@ -484,7 +474,7 @@ var table statsTable = table.new(position.bottom_right, 2, 5,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Zurich",           text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Chennai",          text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
@@ -497,8 +487,8 @@ if barstate.islast
          text_color=color.rgb(180,180,255), text_size=size.small)
     table.cell(statsTable, 0, 4, "Barrier",          text_color=color.white, text_size=size.small)
     _barrierTxt = slExitDir == 0 ? "—" :
-         na(slExitClose) ? (slExitDir == 1 ? "LONG blocked" : "SHORT blocked") :
-         (slExitDir == 1 ? "↑" : "↓") + str.tostring(slExitClose, "#.##") + " ±" + str.tostring(barrierBuf, "#") + " ref:" + (na(slBarrier) ? "—" : str.tostring(slBarrier, "#.##"))
+         na(slBarrier) ? (slExitDir == 1 ? "LONG blocked" : "SHORT blocked") :
+         str.tostring(slBarrier, "#.##") + " ±" + str.tostring(barrierBuf, "#")
     table.cell(statsTable, 1, 4, _barrierTxt,
          text_color=color.rgb(255,180,50), text_size=size.small)
 
