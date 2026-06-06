@@ -177,14 +177,16 @@ if cooldown > 0 and not inTrade
 //   slExitDir=-1 (Short bad exit) → clear when close < slEntryPrice - barrierBuf
 // slBarrier checkpoints every cooldownBars for display only.
 //=============================
-if slExitDir != 0 and not inTrade and cooldown == 0
-    // checkpoint for display
-    if barrierCool > 0
-        barrierCool -= 1
-    if barrierCool == 0
-        slBarrier   := close
-        barrierCool := cooldownBars
-    // clear condition anchored to entry price of bad trade
+if slExitDir != 0 and not inTrade
+    // checkpoint for display — only after cooldown expires
+    if cooldown == 0
+        if barrierCool > 0
+            barrierCool -= 1
+        if barrierCool == 0
+            slBarrier   := close
+            barrierCool := cooldownBars
+    // clear condition checked every bar (including during cooldown)
+    // so price crossing barrier during cooldown still unblocks
     if na(slEntryPrice) or na(barrierBuf)
         slExitDir    := 0
         slBarrier    := na
