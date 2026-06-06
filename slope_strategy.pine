@@ -61,10 +61,11 @@ var float trailStop    = na
 var int   cooldown     = 0
 var int   barsInTrade  = 0
 var float activeSL     = na   // SL locked in at entry (SMA-based or fixed)
-var int   slExitDir    = 0    // blocks same-direction re-entry after bad exit: 1=Long blocked, -1=Short blocked
-var float slBarrier    = na   // ghost entry price — updated every cooldownBars interval while blocked
-var int   barrierCool  = 0    // countdown between barrier updates (uses same cooldownBars period)
-var float barrierBuf   = na   // dynamic buffer = activeSL locked at time of bad exit
+var int   slExitDir    = 0    // blocks re-entry after bad exit: 1=Long blocked, -1=Short blocked
+var float slBarrier    = na   // checkpoint close — updated every cooldownBars for display
+var int   barrierCool  = 0    // countdown between checkpoint updates
+var float slEntryPrice = na   // entry price of bad trade — anchor for clear condition
+var float barrierBuf   = na   // activeSL at time of bad exit
 
 //=============================
 // Trade leg slope buffer — accumulates close prices from entry bar onward
@@ -169,33 +170,35 @@ if cooldown > 0 and not inTrade
     cooldown -= 1
 
 //=============================
-// slExitDir — ghost entry barrier
-// After bad exit + cooldown, sample close every cooldownBars bars as reference.
-// No slope condition — just checkpoint the close and wait for price to prove reversal.
-//   slExitDir=1  (Long bad exit) → clear when price > barrier + barrierBuf
-//   slExitDir=-1 (Short bad exit) → clear when price < barrier - barrierBuf
+// slExitDir — entry price barrier
+// Anchor = entry price of bad trade. Buffer = activeSL.
+// Clear when price proves it moved SL distance in correct direction from entry:
+//   slExitDir=1  (Long bad exit) → clear when close > slEntryPrice + barrierBuf
+//   slExitDir=-1 (Short bad exit) → clear when close < slEntryPrice - barrierBuf
+// slBarrier checkpoints every cooldownBars for display only.
 //=============================
 if slExitDir != 0 and not inTrade and cooldown == 0
-    // countdown between barrier sample points
+    // checkpoint for display
     if barrierCool > 0
         barrierCool -= 1
-    // sample point: set barrier to current close unconditionally
     if barrierCool == 0
         slBarrier   := close
         barrierCool := cooldownBars
-    // check clear condition every bar
+    // clear condition anchored to entry price of bad trade
     if slExitDir == 1
-        if close > slBarrier + barrierBuf
+        if close > slEntryPrice + barrierBuf
             slExitDir   := 0
             slBarrier   := na
+            slEntryPrice := na
             barrierBuf  := na
             barrierCool := 0
     else
-        if close < slBarrier - barrierBuf
-            slExitDir   := 0
-            slBarrier   := na
-            barrierBuf  := na
-            barrierCool := 0
+        if close < slEntryPrice - barrierBuf
+            slExitDir    := 0
+            slBarrier    := na
+            slEntryPrice := na
+            barrierBuf   := na
+            barrierCool  := 0
 
 //=============================
 // SLP exit (deep entries) + Hard SL
@@ -210,10 +213,11 @@ if inTrade and not na(legSlope) and strategy.position_size != 0
         strategy.close("Long",  comment="SLP")
         strategy.close("Short", comment="SLP")
         if slpIsLoss
-            slExitDir   := tradeDir
-            slBarrier   := na
-            barrierBuf  := activeSL
-            barrierCool := 0
+            slExitDir    := tradeDir
+            slBarrier    := na
+            slEntryPrice := entryPrice
+            barrierBuf   := activeSL
+            barrierCool  := 0
         tradeDir  := 0
         trailStop := na
         bestPrice := na
@@ -222,15 +226,16 @@ if inTrade and not na(legSlope) and strategy.position_size != 0
     else if hardSLHit
         strategy.close("Long",  comment="SL")
         strategy.close("Short", comment="SL")
-        slExitDir   := tradeDir
-        slBarrier   := na
-        barrierBuf  := activeSL
-        barrierCool := 0
-        tradeDir    := 0
-        trailStop := na
-        bestPrice := na
-        inTrade   := false
-        cooldown  := cooldownBars
+        slExitDir    := tradeDir
+        slBarrier    := na
+        slEntryPrice := entryPrice
+        barrierBuf   := activeSL
+        barrierCool  := 0
+        tradeDir     := 0
+        trailStop    := na
+        bestPrice    := na
+        inTrade      := false
+        cooldown     := cooldownBars
 
 //=============================
 // Bar counter + time expiry exit
@@ -262,10 +267,11 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
     if slopeAgainst
         strategy.close("Long",  comment="THRD")
         strategy.close("Short", comment="THRD")
-        slExitDir   := tradeDir
-        slBarrier   := na
-        barrierBuf  := activeSL
-        barrierCool := 0
+        slExitDir    := tradeDir
+        slBarrier    := na
+        slEntryPrice := entryPrice
+        barrierBuf   := activeSL
+        barrierCool  := 0
         tradeDir    := 0
         trailStop   := na
         bestPrice   := na
@@ -287,11 +293,12 @@ if bullEntry
     tp = close + tpPts * tpMult
     strategy.entry("Long",  strategy.long,  comment="S↑")
     strategy.exit("Exit-Long",  "Long",  limit=tp)   // TP only — SL handled manually
-    slExitDir   := 0
-    slBarrier   := na
-    barrierBuf  := na
-    barrierCool := 0
-    tradeDir    := 1
+    slExitDir    := 0
+    slBarrier    := na
+    slEntryPrice := na
+    barrierBuf   := na
+    barrierCool  := 0
+    tradeDir     := 1
     entryPrice  := close
     entrySlope  := legSlope
     trailStop   := na
@@ -310,11 +317,12 @@ else if bearEntry
     tp = close - tpPts * tpMult
     strategy.entry("Short", strategy.short, comment="S↓")
     strategy.exit("Exit-Short", "Short", limit=tp)   // TP only — SL handled manually
-    slExitDir   := 0
-    slBarrier   := na
-    barrierBuf  := na
-    barrierCool := 0
-    tradeDir    := -1
+    slExitDir    := 0
+    slBarrier    := na
+    slEntryPrice := na
+    barrierBuf   := na
+    barrierCool  := 0
+    tradeDir     := -1
     entryPrice  := close
     entrySlope  := legSlope
     trailStop  := na
@@ -464,6 +472,7 @@ plot(cooldown > 0 ? cooldown : na,      "cooldown",      color=color.aqua,      
 plot(isDoji   ? 1 : 0,                 "isDoji",         color=color.yellow,           display=display.data_window)
 plot(slExitDir,                        "slExitDir",      color=color.rgb(255,100,100), display=display.data_window)
 plot(slBarrier,                          "slBarrier",    color=color.rgb(255,180,50),  display=display.data_window)
+plot(slEntryPrice,                       "slEntryPrice", color=color.rgb(255,80,80),   display=display.data_window)
 plot(barrierBuf,                         "barrierBuf",  color=color.rgb(255,140,0),   display=display.data_window)
 plot(barrierCool > 0 ? barrierCool : na, "barrierCool", color=color.rgb(200,100,255), display=display.data_window)
 
@@ -487,8 +496,8 @@ if barstate.islast
          text_color=color.rgb(180,180,255), text_size=size.small)
     table.cell(statsTable, 0, 4, "Barrier",          text_color=color.white, text_size=size.small)
     _barrierTxt = slExitDir == 0 ? "—" :
-         na(slBarrier) ? (slExitDir == 1 ? "LONG blocked" : "SHORT blocked") :
-         str.tostring(slBarrier, "#.##") + " ±" + str.tostring(barrierBuf, "#")
+         na(slEntryPrice) ? (slExitDir == 1 ? "LONG blocked" : "SHORT blocked") :
+         (slExitDir == 1 ? "↑" : "↓") + str.tostring(slEntryPrice, "#.##") + " ±" + str.tostring(barrierBuf, "#")
     table.cell(statsTable, 1, 4, _barrierTxt,
          text_color=color.rgb(255,180,50), text_size=size.small)
 
