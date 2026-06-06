@@ -145,12 +145,17 @@ if inAnyBlock and inTrade
 if eodClose and strategy.position_size != 0
     strategy.close_all(comment="EOD")
 if eodClose
-    tradeDir    := 0
-    trailStop   := na
-    bestPrice   := na
-    inTrade     := false
-    cooldown    := 0
-    barsInTrade := 0
+    tradeDir     := 0
+    trailStop    := na
+    bestPrice    := na
+    inTrade      := false
+    cooldown     := 0
+    barsInTrade  := 0
+    slExitDir    := 0
+    slBarrier    := na
+    slEntryPrice := na
+    barrierBuf   := na
+    barrierCool  := 0
 
 //=============================
 // Sync on TP/SL close
@@ -217,15 +222,8 @@ if inTrade and not na(legSlope) and strategy.position_size != 0
     slopeReversed = (tradeDir == 1 and legSlope >= -deepExitSlope) or (tradeDir == -1 and legSlope <= deepExitSlope)
 
     if isDeepEntry and slopeReversed
-        slpIsLoss = (tradeDir == 1 and close < entryPrice) or (tradeDir == -1 and close > entryPrice)
         strategy.close("Long",  comment="SLP")
         strategy.close("Short", comment="SLP")
-        if slpIsLoss
-            slExitDir    := tradeDir
-            slBarrier    := na
-            slEntryPrice := entryPrice
-            barrierBuf   := activeSL
-            barrierCool  := 0
         tradeDir  := 0
         trailStop := na
         bestPrice := na
@@ -273,13 +271,15 @@ if enableTExp and inTrade and strategy.position_size != 0 and barsInTrade >= tEx
 if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >= tExpHardBars and not na(legSlope)
     slopeAgainst = (tradeDir == 1 and legSlope <= -tExpHardSlope) or (tradeDir == -1 and legSlope >= tExpHardSlope)
     if slopeAgainst
+        thrdIsLoss = (tradeDir == 1 and close < entryPrice) or (tradeDir == -1 and close > entryPrice)
         strategy.close("Long",  comment="THRD")
         strategy.close("Short", comment="THRD")
-        slExitDir    := tradeDir
-        slBarrier    := na
-        slEntryPrice := entryPrice
-        barrierBuf   := activeSL
-        barrierCool  := 0
+        if thrdIsLoss
+            slExitDir    := tradeDir
+            slBarrier    := na
+            slEntryPrice := entryPrice
+            barrierBuf   := activeSL
+            barrierCool  := 0
         tradeDir    := 0
         trailStop   := na
         bestPrice   := na
@@ -294,8 +294,8 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
 //=============================
 canTrade = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and time >= startDate and time <= endDate and not na(legSlope)
 
-bullEntry = canTrade and legSlope < -slopeEntry and slExitDir == 0
-bearEntry = canTrade and legSlope >  slopeEntry and slExitDir == 0
+bullEntry = canTrade and legSlope < -slopeEntry and slExitDir != 1   // blocked only if Long was bad exit
+bearEntry = canTrade and legSlope >  slopeEntry and slExitDir != -1  // blocked only if Short was bad exit
 
 if bullEntry
     tp = close + tpPts * tpMult
@@ -491,7 +491,7 @@ var table statsTable = table.new(position.bottom_right, 2, 5,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Vienna",            text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Amsterdam",          text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
