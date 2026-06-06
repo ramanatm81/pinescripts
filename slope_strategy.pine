@@ -479,14 +479,14 @@ plot(barrierBuf,                         "barrierBuf",  color=color.rgb(255,140,
 plot(barrierCool > 0 ? barrierCool : na, "barrierCool", color=color.rgb(200,100,255), display=display.data_window)
 
 // No-traction stats table — bottom-right corner of chart
-var table statsTable = table.new(position.bottom_right, 2, 4,
+var table statsTable = table.new(position.bottom_right, 2, 5,
      bgcolor      = color.new(color.black, 20),
      border_width = 1,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Metric",           text_color=color.gray,  text_size=size.small, bgcolor=color.new(color.black, 30))
-    table.cell(statsTable, 1, 0, "Value",            text_color=color.gray,  text_size=size.small, bgcolor=color.new(color.black, 30))
+    table.cell(statsTable, 0, 0, "Chennai",          text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
          text_color=color.rgb(255,150,150), text_size=size.small)
@@ -496,6 +496,9 @@ if barstate.islast
     table.cell(statsTable, 0, 3, "Live bars in trade", text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 3, barsInTrade > 0 ? str.tostring(barsInTrade) : "—",
          text_color=color.rgb(180,180,255), text_size=size.small)
+    table.cell(statsTable, 0, 4, "Barrier",          text_color=color.white, text_size=size.small)
+    table.cell(statsTable, 1, 4, slExitDir != 0 and not na(slBarrier) ? str.tostring(slBarrier, "#.##") + " ±" + str.tostring(barrierBuf, "#") : "—",
+         text_color=color.rgb(255,180,50), text_size=size.small)
 
 //=============================
 // Alerts
