@@ -185,13 +185,19 @@ if slExitDir != 0 and not inTrade and cooldown == 0
         slBarrier   := close
         barrierCool := cooldownBars
     // clear condition anchored to entry price of bad trade
-    if slExitDir == 1
+    if na(slEntryPrice) or na(barrierBuf)
+        slExitDir    := 0
+        slBarrier    := na
+        slEntryPrice := na
+        barrierBuf   := na
+        barrierCool  := 0
+    else if slExitDir == 1
         if close > slEntryPrice + barrierBuf
-            slExitDir   := 0
-            slBarrier   := na
+            slExitDir    := 0
+            slBarrier    := na
             slEntryPrice := na
-            barrierBuf  := na
-            barrierCool := 0
+            barrierBuf   := na
+            barrierCool  := 0
     else
         if close < slEntryPrice - barrierBuf
             slExitDir    := 0
