@@ -90,12 +90,12 @@ _highAge   = na(lastFractalHighBar) ? na : bar_index - lastFractalHighBar
 _lowAge    = na(lastFractalLowBar)  ? na : bar_index - lastFractalLowBar
 _highValid    = not na(lastFractalHigh) and (srLookback == 0 or (not na(_highAge) and _highAge <= srLookback))
 _lowValid     = not na(lastFractalLow)  and (srLookback == 0 or (not na(_lowAge)  and _lowAge  <= srLookback))
-// Long blocked when close is approaching fractal high from below (resistance overhead)
-_nearHigh     = _highValid and close < lastFractalHigh and (lastFractalHigh - close) <= srZoneWidth
-// Short blocked when close is approaching fractal low from above (support below)
+// Long blocked when fractal low is within srZoneWidth pts below — support below may push price back up against short
 _nearLow      = _lowValid  and close > lastFractalLow  and (close - lastFractalLow)  <= srZoneWidth
-srBlockLong   = enableSRFilter and _nearHigh
-srBlockShort  = enableSRFilter and _nearLow
+// Short blocked when fractal high is within srZoneWidth pts above — resistance overhead may pull price up before drop
+_nearHigh     = _highValid and close < lastFractalHigh and (lastFractalHigh - close) <= srZoneWidth
+srBlockLong   = enableSRFilter and _nearLow    // Long blocked near fractal LOW (support may bounce)
+srBlockShort  = enableSRFilter and _nearHigh   // Short blocked near fractal HIGH (resistance may pull up)
 inSRZone      = srBlockLong or srBlockShort
 
 //=============================
