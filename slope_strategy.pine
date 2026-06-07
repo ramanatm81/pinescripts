@@ -88,11 +88,15 @@ if fractalLow
 // S/R zone check — true if price is within srZoneWidth of a recent pivot
 _highAge   = na(lastFractalHighBar) ? na : bar_index - lastFractalHighBar
 _lowAge    = na(lastFractalLowBar)  ? na : bar_index - lastFractalLowBar
-_highValid = not na(lastFractalHigh) and (srLookback == 0 or (not na(_highAge) and _highAge <= srLookback))
-_lowValid  = not na(lastFractalLow)  and (srLookback == 0 or (not na(_lowAge)  and _lowAge  <= srLookback))
-_nearHigh  = _highValid and math.abs(close - lastFractalHigh) <= srZoneWidth
-_nearLow   = _lowValid  and math.abs(close - lastFractalLow)  <= srZoneWidth
-inSRZone   = enableSRFilter and (_nearHigh or _nearLow)
+_highValid    = not na(lastFractalHigh) and (srLookback == 0 or (not na(_highAge) and _highAge <= srLookback))
+_lowValid     = not na(lastFractalLow)  and (srLookback == 0 or (not na(_lowAge)  and _lowAge  <= srLookback))
+// Long blocked when close is approaching fractal high from below (resistance overhead)
+_nearHigh     = _highValid and close < lastFractalHigh and (lastFractalHigh - close) <= srZoneWidth
+// Short blocked when close is approaching fractal low from above (support below)
+_nearLow      = _lowValid  and close > lastFractalLow  and (close - lastFractalLow)  <= srZoneWidth
+srBlockLong   = enableSRFilter and _nearHigh
+srBlockShort  = enableSRFilter and _nearLow
+inSRZone      = srBlockLong or srBlockShort
 
 //=============================
 // State
@@ -328,8 +332,8 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
 //=============================
 canTrade = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and time >= startDate and time <= endDate and not na(legSlope)
 
-bullEntry = canTrade and legSlope < -slopeEntry and slExitDir != 1  and not inSRZone
-bearEntry = canTrade and legSlope >  slopeEntry and slExitDir != -1 and not inSRZone
+bullEntry = canTrade and legSlope < -slopeEntry and slExitDir != 1  and not srBlockLong
+bearEntry = canTrade and legSlope >  slopeEntry and slExitDir != -1 and not srBlockShort
 
 if bullEntry
     tp = close + tpPts * tpMult
