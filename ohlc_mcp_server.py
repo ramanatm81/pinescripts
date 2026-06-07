@@ -28,12 +28,11 @@ from mcp.types import Tool, TextContent
 
 CSV_PATH = Path.home() / "Downloads" / "data.csv"
 
-# All columns we want to return (in order). If a column is missing from the CSV it is skipped.
-ALL_COLUMNS = [
-    "time", "open", "high", "low", "close",
-    "legSlope", "tradeLegSlope", "activeSL", "SMA",
-    "inTrade", "tradeDir", "barsInTrade", "cooldown", "isDoji", "Volume",
-]
+# Integer columns — coerced to int instead of float
+INT_COLS = {"inTrade", "tradeDir", "barsInTrade", "cooldown", "isDoji", "Volume",
+            "slExitDir", "barrierCool", "srHighBarsAgo", "srLowBarsAgo",
+            "srBlockLong", "srBlockShort", "inSRZone",
+            "cfg_srEnabled", "cfg_atrSL", "cfg_smaSL"}
 
 server = Server("ohlc-data-server")
 
@@ -59,8 +58,7 @@ def _coerce(key: str, val: str):
     """Return val coerced to the right type; empty string becomes None."""
     if val == "" or val is None:
         return None
-    int_cols = {"inTrade", "tradeDir", "barsInTrade", "cooldown", "isDoji", "Volume"}
-    if key in int_cols:
+    if key in INT_COLS:
         try:
             return int(float(val))
         except ValueError:
@@ -91,9 +89,8 @@ def _load_range(start: datetime, end: datetime) -> list[dict]:
                 bar_utc = bar_dt.astimezone(timezone.utc)
                 if start_utc <= bar_utc <= end_utc:
                     bar = {}
-                    for col in ALL_COLUMNS:
-                        if col in csv_cols:
-                            bar[col] = _coerce(col, row.get(col, ""))
+                    for col in csv_cols:   # return every column in the CSV dynamically
+                        bar[col] = _coerce(col, row.get(col, ""))
                     bars.append(bar)
             except (ValueError, KeyError):
                 continue
@@ -112,9 +109,8 @@ async def list_tools() -> list[Tool]:
             name="get_ohlc_data",
             description=(
                 "Fetch all strategy columns from the trading data CSV (~/Downloads/data.csv) "
-                "for a given time range. Returns every available column: "
-                "time, open, high, low, close, legSlope, tradeLegSlope, activeSL, SMA, "
-                "inTrade, tradeDir, barsInTrade, cooldown, isDoji, Volume. "
+                "for a given time range. Returns every column present in the CSV dynamically — "
+                "OHLC, legSlope, activeSL, ATR, SR filter values, barrier state, config params etc. "
                 "Missing/empty values are returned as null. "
                 "Also returns a summary: bar count, range high/low, price range."
             ),
