@@ -8,6 +8,9 @@ strategy("Slope Strategy", overlay=true, max_labels_count=500, max_bars_back=500
 lookback     = 10  // fixed rolling window for slope calculation
 slopeEntry   = input.float(1.7, "Slope threshold (entry trigger)",        minval=0.1, step=0.1)
 slPts        = input.float(50.0,"Stop Loss (pts from entry) — fallback when SMA SL disabled", minval=0.5, step=0.5)
+enableAtrSL  = input.bool(false, "Dynamic SL based on ATR (overrides SMA SL)",               group="ATR Stop Loss")
+atrPeriod    = input.int(14,     "ATR period",              minval=1,   maxval=500,            group="ATR Stop Loss")
+atrMult      = input.float(1.5,  "ATR multiplier (SL = ATR × mult)",    minval=0.1, step=0.1, group="ATR Stop Loss")
 enableSmaSL  = input.bool(true,  "Dynamic SL based on SMA",                                   group="SMA Stop Loss")
 smaPeriod    = input.int(30,     "SMA period",              minval=2,   maxval=500,            group="SMA Stop Loss")
 slAboveSma   = input.float(50.0, "SL when close > SMA (upward, pts)",  minval=0.5, step=0.5,  group="SMA Stop Loss")
@@ -40,8 +43,9 @@ nyOpenBlock = blockNYOpen and ctMins >= 510 and ctMins < 540
 lnOpenBlock = blockLNOpen and ctMins >= 120 and ctMins < 150
 preNYBlock  = blockPreNY  and ctMins >= 450 and ctMins < 540   // 07:30–09:00 CT
 
-// SMA for dynamic SL
+// SMA and ATR for dynamic SL
 smaVal = ta.sma(close, smaPeriod)
+atrVal = ta.atr(atrPeriod)
 
 // Doji detection — exclude from slope buffer
 _range   = high - low
@@ -300,7 +304,7 @@ if bullEntry
     trailStop   := na
     bestPrice   := na
     inTrade     := true
-    activeSL    := enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
+    activeSL    := enableAtrSL ? math.round(atrVal * atrMult, 2) : enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
     _isDeep     = math.abs(legSlope) >= deepSlope
     label.new(bar_index, low,
               text      = (_isDeep ? "D↑" : "S↑") + "\n" + str.tostring(close, "#.##") + "\nSL:" + str.tostring(activeSL, "#"),
@@ -324,7 +328,7 @@ else if bearEntry
     trailStop  := na
     bestPrice  := na
     inTrade    := true
-    activeSL   := enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
+    activeSL   := enableAtrSL ? math.round(atrVal * atrMult, 2) : enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
     _isDeep    = math.abs(legSlope) >= deepSlope
     label.new(bar_index, high,
               text      = (_isDeep ? "D↓" : "S↓") + "\n" + str.tostring(close, "#.##") + "\nSL:" + str.tostring(activeSL, "#"),
@@ -448,6 +452,7 @@ if posClosed
 plot(legSlope,                          "legSlope",      color=color.rgb(100,180,255), display=display.data_window)
 plot(tradeLegSlope,                     "tradeLegSlope", color=color.rgb(255,200,80),  display=display.data_window)
 plot(activeSL,                          "activeSL",      color=color.rgb(255,160,80),  display=display.data_window)
+plot(atrVal,                            "ATR",           color=color.rgb(180,255,180), display=display.data_window)
 plot(smaVal,                            "SMA",           color=color.rgb(255,220,100), display=display.data_window)
 plot(inTrade  ? 1 : 0,                 "inTrade",       color=color.purple,           display=display.data_window)
 plot(tradeDir,                          "tradeDir",      color=color.white,            display=display.data_window)
