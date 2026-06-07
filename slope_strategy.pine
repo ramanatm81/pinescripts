@@ -33,6 +33,9 @@ tExpHardSlope    = input.float(1.0, "Slope 'against' threshold for hard exit",  
 dojiPct      = input.float(10.0,"Doji body % of range (excluded from R²)", minval=1.0, maxval=49.0, step=1.0, group="R² Filter")
 cooldownBars = input.int(10,    "Cooldown bars after exit (0 = none)",    minval=0,  maxval=50,              group="R² Filter")
 deepSlope    = input.float(3.0, "Deep slope threshold (D↑/D↓ label)",              minval=0.5, step=0.1,    group="R² Filter")
+enableSRFilter = input.bool(false, "Block entries near S/R pivots",                             group="S/R Filter")
+srZoneWidth    = input.float(15.0, "Zone width (pts from pivot)",    minval=1.0, step=0.5,     group="S/R Filter")
+srLookback     = input.int(50,     "Pivot lookback (bars, 0=all)",   minval=0,   maxval=500,   group="S/R Filter")
 blockNYOpen  = input.bool(false,"Block NY open first 30 min (08:30–09:00 CT)",          group="Session Filter")
 blockLNOpen  = input.bool(true, "Block LN open first 30 min (02:00–02:30 CT)",          group="Session Filter")
 blockPreNY   = input.bool(true, "Block CME pre-open + NY open (07:30–09:00 CT)",        group="Session Filter")
@@ -58,6 +61,33 @@ atrMultTiered = atrVal < atrTier1 ? atrMult1 : atrVal < atrTier2 ? atrMult2 : at
 _range   = high - low
 _bodyPct = _range > 0.0 ? (math.abs(close - open) / _range) * 100.0 : 0.0
 isDoji   = _bodyPct < dojiPct
+
+//=============================
+// S/R fractal pivots — data window only, no chart shapes
+//=============================
+fractalHigh = high[2] > high[4] and high[2] > high[3] and high[2] > high[1] and high[2] > high[0]
+fractalLow  = low[2]  < low[4]  and low[2]  < low[3]  and low[2]  < low[1]  and low[2]  < low[0]
+
+var float lastFractalHigh = na
+var float lastFractalLow  = na
+var int   lastFractalHighBar = na
+var int   lastFractalLowBar  = na
+
+if fractalHigh
+    lastFractalHigh    := high[2]
+    lastFractalHighBar := bar_index - 2
+if fractalLow
+    lastFractalLow     := low[2]
+    lastFractalLowBar  := bar_index - 2
+
+// S/R zone check — true if price is within srZoneWidth of a recent pivot
+_highAge   = na(lastFractalHighBar) ? na : bar_index - lastFractalHighBar
+_lowAge    = na(lastFractalLowBar)  ? na : bar_index - lastFractalLowBar
+_highValid = not na(lastFractalHigh) and (srLookback == 0 or (not na(_highAge) and _highAge <= srLookback))
+_lowValid  = not na(lastFractalLow)  and (srLookback == 0 or (not na(_lowAge)  and _lowAge  <= srLookback))
+_nearHigh  = _highValid and math.abs(close - lastFractalHigh) <= srZoneWidth
+_nearLow   = _lowValid  and math.abs(close - lastFractalLow)  <= srZoneWidth
+inSRZone   = enableSRFilter and (_nearHigh or _nearLow)
 
 //=============================
 // State
@@ -293,8 +323,8 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
 //=============================
 canTrade = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and time >= startDate and time <= endDate and not na(legSlope)
 
-bullEntry = canTrade and legSlope < -slopeEntry and slExitDir != 1   // blocked only if Long was bad exit
-bearEntry = canTrade and legSlope >  slopeEntry and slExitDir != -1  // blocked only if Short was bad exit
+bullEntry = canTrade and legSlope < -slopeEntry and slExitDir != 1  and not inSRZone
+bearEntry = canTrade and legSlope >  slopeEntry and slExitDir != -1 and not inSRZone
 
 if bullEntry
     tp = close + tpPts * tpMult
@@ -466,7 +496,10 @@ plot(inTrade  ? 1 : 0,                 "inTrade",       color=color.purple,     
 plot(tradeDir,                          "tradeDir",      color=color.white,            display=display.data_window)
 plot(barsInTrade > 0 ? barsInTrade : na,"barsInTrade",  color=color.rgb(180,120,255), display=display.data_window)
 plot(cooldown > 0 ? cooldown : na,      "cooldown",      color=color.aqua,             display=display.data_window)
-plot(isDoji   ? 1 : 0,                 "isDoji",         color=color.yellow,           display=display.data_window)
+plot(isDoji      ? 1 : 0,              "isDoji",         color=color.yellow,           display=display.data_window)
+plot(lastFractalHigh,                  "srHigh",         color=color.rgb(255,100,100), display=display.data_window)
+plot(lastFractalLow,                   "srLow",          color=color.rgb(100,200,100), display=display.data_window)
+plot(inSRZone    ? 1 : 0,             "inSRZone",       color=color.rgb(255,165,0),   display=display.data_window)
 plot(slExitDir,                        "slExitDir",      color=color.rgb(255,100,100), display=display.data_window)
 plot(slBarrier,                          "slBarrier",    color=color.rgb(255,180,50),  display=display.data_window)
 plot(slEntryPrice,                       "slEntryPrice", color=color.rgb(255,80,80),   display=display.data_window)
