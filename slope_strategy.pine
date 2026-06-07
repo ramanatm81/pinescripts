@@ -35,8 +35,7 @@ cooldownBars = input.int(10,    "Cooldown bars after exit (0 = none)",    minval
 deepSlope    = input.float(3.0, "Deep slope threshold (D↑/D↓ label)",              minval=0.5, step=0.1,    group="R² Filter")
 enableSRFilter = input.bool(false, "Block entries near S/R pivots",                              group="S/R Filter")
 srHalfWidth    = input.int(10,     "Fractal half-width (bars each side, 10=21-bar pivot)", minval=1, maxval=20, group="S/R Filter")
-srZoneWidth    = input.float(25.0, "Zone width below high / above low (pts)", minval=1.0, step=0.5, group="S/R Filter")
-srBreakWidth   = input.float(25.0, "Zone width above high / below low (pts)", minval=1.0, step=0.5, group="S/R Filter")
+srZoneWidth    = input.float(25.0, "Zone width (pts either side of pivot)", minval=1.0, step=0.5, group="S/R Filter")
 srLookback     = input.int(50,     "Pivot lookback (bars, 0=all)",   minval=0,   maxval=500,    group="S/R Filter")
 blockNYOpen  = input.bool(false,"Block NY open first 30 min (08:30–09:00 CT)",          group="Session Filter")
 blockLNOpen  = input.bool(true, "Block LN open first 30 min (02:00–02:30 CT)",          group="Session Filter")
@@ -91,14 +90,12 @@ _highAge   = na(lastFractalHighBar) ? na : bar_index - lastFractalHighBar
 _lowAge    = na(lastFractalLowBar)  ? na : bar_index - lastFractalLowBar
 _highValid    = not na(lastFractalHigh) and (srLookback == 0 or (not na(_highAge) and _highAge <= srLookback))
 _lowValid     = not na(lastFractalLow)  and (srLookback == 0 or (not na(_lowAge)  and _lowAge  <= srLookback))
-// Long blocked when price is in band around fractal low:
-//   within srZoneWidth pts above (approaching support) OR srBreakWidth pts below (just broken down)
-_nearLow      = _lowValid  and (close - lastFractalLow) >= -srBreakWidth and (close - lastFractalLow) <= srZoneWidth
-// Short blocked when price is in band around fractal high:
-//   within srZoneWidth pts below (approaching resistance) OR srBreakWidth pts above (just broken above)
-_nearHigh     = _highValid and (lastFractalHigh - close) >= -srBreakWidth and (lastFractalHigh - close) <= srZoneWidth
-srBlockLong   = enableSRFilter and _nearLow    // Long blocked in band around fractal LOW
-srBlockShort  = enableSRFilter and _nearHigh   // Short blocked in band around fractal HIGH
+// Block any entry when price is within band of either fractal high or low
+_nearHigh     = _highValid and math.abs(close - lastFractalHigh) <= srZoneWidth
+_nearLow      = _lowValid  and math.abs(close - lastFractalLow)  <= srZoneWidth
+srBlockAny    = enableSRFilter and (_nearHigh or _nearLow)
+srBlockLong   = srBlockAny
+srBlockShort  = srBlockAny
 inSRZone      = srBlockLong or srBlockShort
 
 //=============================
@@ -515,7 +512,6 @@ plot(na(lastFractalHighBar) ? na : bar_index - lastFractalHighBar, "srHighBarsAg
 plot(na(lastFractalLowBar)  ? na : bar_index - lastFractalLowBar,  "srLowBarsAgo",  color=color.rgb(150,255,150), display=display.data_window)
 plot(inSRZone    ? 1 : 0,                         "inSRZone",      color=color.rgb(255,165,0),   display=display.data_window)
 plot(srZoneWidth,                                 "cfg_srZoneWidth",  color=color.gray,             display=display.data_window)
-plot(srBreakWidth,                                "cfg_srBreakWidth", color=color.gray,             display=display.data_window)
 plot(srLookback,                                  "cfg_srLookback",  color=color.gray,             display=display.data_window)
 plot(srHalfWidth,                                 "cfg_srHalfWidth", color=color.gray,             display=display.data_window)
 plot(enableSRFilter ? 1 : 0,                      "cfg_srEnabled",   color=color.gray,             display=display.data_window)
