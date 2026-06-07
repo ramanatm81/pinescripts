@@ -33,7 +33,7 @@ tExpHardSlope    = input.float(1.0, "Slope 'against' threshold for hard exit",  
 dojiPct      = input.float(10.0,"Doji body % of range (excluded from R²)", minval=1.0, maxval=49.0, step=1.0, group="R² Filter")
 cooldownBars = input.int(10,    "Cooldown bars after exit (0 = none)",    minval=0,  maxval=50,              group="R² Filter")
 deepSlope    = input.float(3.0, "Deep slope threshold (D↑/D↓ label)",              minval=0.5, step=0.1,    group="R² Filter")
-enableBodyFilter = input.bool(false, "Block entry if signal bar body < min size", minval=0,                 group="R² Filter")
+enableBodyFilter = input.bool(false, "Block entry if signal bar body < min size",                          group="R² Filter")
 minBodyPts       = input.float(10.0, "Min body size (pts)",               minval=0.5, step=0.5,            group="R² Filter")
 enableSRFilter = input.bool(false, "Block entries near S/R pivots",                              group="S/R Filter")
 srHalfWidth    = input.int(10,     "Fractal half-width (bars each side, 10=21-bar pivot)", minval=1, maxval=20, group="S/R Filter")
