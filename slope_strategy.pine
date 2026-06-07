@@ -33,9 +33,10 @@ tExpHardSlope    = input.float(1.0, "Slope 'against' threshold for hard exit",  
 dojiPct      = input.float(10.0,"Doji body % of range (excluded from R²)", minval=1.0, maxval=49.0, step=1.0, group="R² Filter")
 cooldownBars = input.int(10,    "Cooldown bars after exit (0 = none)",    minval=0,  maxval=50,              group="R² Filter")
 deepSlope    = input.float(3.0, "Deep slope threshold (D↑/D↓ label)",              minval=0.5, step=0.1,    group="R² Filter")
-enableSRFilter = input.bool(false, "Block entries near S/R pivots",                             group="S/R Filter")
-srZoneWidth    = input.float(15.0, "Zone width (pts from pivot)",    minval=1.0, step=0.5,     group="S/R Filter")
-srLookback     = input.int(50,     "Pivot lookback (bars, 0=all)",   minval=0,   maxval=500,   group="S/R Filter")
+enableSRFilter = input.bool(false, "Block entries near S/R pivots",                              group="S/R Filter")
+srHalfWidth    = input.int(5,      "Fractal half-width (bars each side, 5=11-bar pivot)", minval=1, maxval=20, group="S/R Filter")
+srZoneWidth    = input.float(15.0, "Zone width (pts from pivot)",    minval=1.0, step=0.5,      group="S/R Filter")
+srLookback     = input.int(50,     "Pivot lookback (bars, 0=all)",   minval=0,   maxval=500,    group="S/R Filter")
 blockNYOpen  = input.bool(false,"Block NY open first 30 min (08:30–09:00 CT)",          group="Session Filter")
 blockLNOpen  = input.bool(true, "Block LN open first 30 min (02:00–02:30 CT)",          group="Session Filter")
 blockPreNY   = input.bool(true, "Block CME pre-open + NY open (07:30–09:00 CT)",        group="Session Filter")
@@ -65,20 +66,24 @@ isDoji   = _bodyPct < dojiPct
 //=============================
 // S/R fractal pivots — data window only, no chart shapes
 //=============================
-fractalHigh = high[2] > high[4] and high[2] > high[3] and high[2] > high[1] and high[2] > high[0]
-fractalLow  = low[2]  < low[4]  and low[2]  < low[3]  and low[2]  < low[1]  and low[2]  < low[0]
+// ta.pivothigh/low returns the pivot price when confirmed, na otherwise
+// confirmed srHalfWidth bars after the pivot bar
+fractalHighVal = ta.pivothigh(high, srHalfWidth, srHalfWidth)
+fractalLowVal  = ta.pivotlow(low,  srHalfWidth, srHalfWidth)
+fractalHigh    = not na(fractalHighVal)
+fractalLow     = not na(fractalLowVal)
 
-var float lastFractalHigh = na
-var float lastFractalLow  = na
+var float lastFractalHigh    = na
+var float lastFractalLow     = na
 var int   lastFractalHighBar = na
 var int   lastFractalLowBar  = na
 
 if fractalHigh
-    lastFractalHigh    := high[2]
-    lastFractalHighBar := bar_index - 2
+    lastFractalHigh    := fractalHighVal
+    lastFractalHighBar := bar_index - srHalfWidth
 if fractalLow
-    lastFractalLow     := low[2]
-    lastFractalLowBar  := bar_index - 2
+    lastFractalLow     := fractalLowVal
+    lastFractalLowBar  := bar_index - srHalfWidth
 
 // S/R zone check — true if price is within srZoneWidth of a recent pivot
 _highAge   = na(lastFractalHighBar) ? na : bar_index - lastFractalHighBar
