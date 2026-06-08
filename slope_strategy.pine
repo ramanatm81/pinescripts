@@ -516,10 +516,10 @@ plot(tradeDir,                          "tradeDir",      color=color.white,     
 plot(barsInTrade > 0 ? barsInTrade : na,"barsInTrade",  color=color.rgb(180,120,255), display=display.data_window)
 plot(cooldown > 0 ? cooldown : na,      "cooldown",      color=color.aqua,             display=display.data_window)
 plot(isDoji      ? 1 : 0,              "isDoji",         color=color.yellow,           display=display.data_window)
-plot(lastFractalHigh,                              "srHighPrice",   color=color.rgb(255,100,100), display=display.data_window)
-plot(lastFractalLow,                               "srLowPrice",    color=color.rgb(100,200,100), display=display.data_window)
-plot(na(lastFractalHighBar) ? na : bar_index - lastFractalHighBar, "srHighBarsAgo", color=color.rgb(255,150,150), display=display.data_window)
-plot(na(lastFractalLowBar)  ? na : bar_index - lastFractalLowBar,  "srLowBarsAgo",  color=color.rgb(150,255,150), display=display.data_window)
+plot(_highValid ? lastFractalHigh : na,             "srHighPrice",   color=color.rgb(255,100,100), display=display.data_window)
+plot(_lowValid  ? lastFractalLow  : na,             "srLowPrice",    color=color.rgb(100,200,100), display=display.data_window)
+plot(_highValid ? bar_index - lastFractalHighBar : na, "srHighBarsAgo", color=color.rgb(255,150,150), display=display.data_window)
+plot(_lowValid  ? bar_index - lastFractalLowBar  : na, "srLowBarsAgo",  color=color.rgb(150,255,150), display=display.data_window)
 plot(inSRZone    ? 1 : 0,                         "inSRZone",      color=color.rgb(255,165,0),   display=display.data_window)
 plot(srZoneWidth,                                 "cfg_srZoneWidth",  color=color.gray,             display=display.data_window)
 plot(srLookback,                                  "cfg_srLookback",  color=color.gray,             display=display.data_window)
@@ -544,7 +544,7 @@ var table statsTable = table.new(position.bottom_right, 2, 5,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Naples",              text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Turin",              text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
