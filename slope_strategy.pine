@@ -23,8 +23,9 @@ slAboveSma   = input.float(50.0, "SL when close > SMA (upward, pts)",  minval=0.
 slBelowSma   = input.float(30.0, "SL when close < SMA (downward, pts)",minval=0.5, step=0.5,  group="SMA Stop Loss")
 tpPts        = input.float(40.0,"TP base (pts from entry)",               minval=0.5, step=1.0)
 tpMult       = input.float(3.0, "TP multiplier (× TP base)",              minval=0.1, step=0.1)
-trailTrigger = input.float(40.0,"Trail trigger (points profit)",          minval=1.0, step=0.5,  group="Trailing Stop")
-trailDist    = input.float(20.0,"Trail distance (points)",                minval=1.0, step=0.5,  group="Trailing Stop")
+trailTrigger     = input.float(40.0,"Trail trigger (points profit)",                        minval=1.0, step=0.5,  group="Trailing Stop")
+trailDist        = input.float(20.0,"Trail distance — normal (points)",                     minval=1.0, step=0.5,  group="Trailing Stop")
+trailDistStrong  = input.float(35.0,"Trail distance — strong slope (points, wider room)",   minval=1.0, step=0.5,  group="Trailing Stop")
 enableTExp   = input.bool(true, "Enable time expiry exit",                                       group="Time Expiry")
 tExpBars     = input.int(30,    "Max bars in trade (exit if profitable)",  minval=1,  maxval=500, group="Time Expiry")
 enableTExpHard   = input.bool(true, "Enable hard time expiry (exit even if loss, slope against)", group="Time Expiry")
@@ -397,7 +398,9 @@ trailFired := false
 if tradeDir == 1 and strategy.position_size != 0
     bestPrice := na(bestPrice) ? high : math.max(bestPrice, high)
     if bestPrice - entryPrice >= trailTrigger
-        trailStop := math.max(na(trailStop) ? bestPrice - trailDist : trailStop, bestPrice - trailDist)
+        // wider trail when slope still strongly in favour (continuing down = still mean-reverting up)
+        _activeDist = (not na(legSlope) and legSlope <= -deepSlope) ? trailDistStrong : trailDist
+        trailStop := math.max(na(trailStop) ? bestPrice - _activeDist : trailStop, bestPrice - _activeDist)
     if not na(trailStop) and low <= trailStop
         trailFired := true
         strategy.close("Long", comment="TRAIL")
@@ -410,7 +413,9 @@ if tradeDir == 1 and strategy.position_size != 0
 else if tradeDir == -1 and strategy.position_size != 0
     bestPrice := na(bestPrice) ? low : math.min(bestPrice, low)
     if entryPrice - bestPrice >= trailTrigger
-        trailStop := math.min(na(trailStop) ? bestPrice + trailDist : trailStop, bestPrice + trailDist)
+        // wider trail when slope still strongly in favour (continuing up = still mean-reverting down)
+        _activeDist = (not na(legSlope) and legSlope >= deepSlope) ? trailDistStrong : trailDist
+        trailStop := math.min(na(trailStop) ? bestPrice + _activeDist : trailStop, bestPrice + _activeDist)
     if not na(trailStop) and high >= trailStop
         trailFired := true
         strategy.close("Short", comment="TRAIL")
@@ -539,7 +544,7 @@ var table statsTable = table.new(position.bottom_right, 2, 5,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Milan",              text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Naples",              text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
