@@ -1,0 +1,390 @@
+//@version=6
+strategy("Fractal Drought Strategy", overlay=true, max_labels_count=500, max_bars_back=5000,
+         default_qty_type=strategy.fixed, default_qty_value=1, calc_on_every_tick=true)
+
+//=============================
+// Inputs
+//=============================
+slPts        = input.float(50.0, "Stop Loss (pts) — fallback",                    minval=0.5, step=0.5)
+enableAtrSL  = input.bool(false,  "Dynamic SL based on ATR (overrides SMA SL)",               group="ATR Stop Loss")
+atrPeriod    = input.int(14,      "ATR period",              minval=1,   maxval=500,            group="ATR Stop Loss")
+atrTier1     = input.float(10.0,  "Tier 1 max ATR",          minval=1.0, step=0.5,             group="ATR Stop Loss")
+atrMult1     = input.float(2.5,   "Tier 1 multiplier",       minval=0.1, step=0.1,             group="ATR Stop Loss")
+atrTier2     = input.float(20.0,  "Tier 2 max ATR",          minval=1.0, step=0.5,             group="ATR Stop Loss")
+atrMult2     = input.float(2.0,   "Tier 2 multiplier",       minval=0.1, step=0.1,             group="ATR Stop Loss")
+atrTier3     = input.float(35.0,  "Tier 3 max ATR",          minval=1.0, step=0.5,             group="ATR Stop Loss")
+atrMult3     = input.float(1.5,   "Tier 3 multiplier",       minval=0.1, step=0.1,             group="ATR Stop Loss")
+atrMult4     = input.float(1.0,   "Tier 4 multiplier",       minval=0.1, step=0.1,             group="ATR Stop Loss")
+enableSmaSL  = input.bool(true,   "Dynamic SL based on SMA",                                   group="SMA Stop Loss")
+smaPeriod    = input.int(30,      "SMA period",              minval=2,   maxval=500,            group="SMA Stop Loss")
+slAboveSma   = input.float(50.0,  "SL when close > SMA (pts)", minval=0.5, step=0.5,           group="SMA Stop Loss")
+slBelowSma   = input.float(30.0,  "SL when close < SMA (pts)", minval=0.5, step=0.5,           group="SMA Stop Loss")
+tpPts        = input.float(40.0,  "TP base (pts from entry)",  minval=0.5, step=1.0)
+tpMult       = input.float(3.0,   "TP multiplier (× TP base)", minval=0.1, step=0.1)
+trailTrigger = input.float(40.0,  "Trail trigger (pts profit)",             minval=1.0, step=0.5, group="Trailing Stop")
+trailDist    = input.float(20.0,  "Trail distance — normal (pts)",          minval=1.0, step=0.5, group="Trailing Stop")
+trailDistStrong = input.float(35.0, "Trail distance — no new fractal (pts)", minval=1.0, step=0.5, group="Trailing Stop")
+
+// Fractal drought entry
+fracHalfWidth  = input.int(10,   "Fractal half-width (bars each side)",      minval=1, maxval=20,  group="Fractal Drought")
+droughtBars    = input.int(50,   "Drought bars to trigger entry",             minval=10, maxval=500, group="Fractal Drought")
+slopeConfirm   = input.float(1.7,"Slope confirmation threshold (abs)",        minval=0.1, step=0.1, group="Fractal Drought")
+lookback       = input.int(10,   "Slope lookback (bars)",                     minval=5, maxval=50,  group="Fractal Drought")
+
+// Fractal exit
+exitOnNewFractal = input.bool(true, "Exit trade when new fractal forms",                          group="Fractal Exit")
+
+enableTExp     = input.bool(true,  "Enable time expiry exit",                                     group="Time Expiry")
+tExpBars       = input.int(30,     "Max bars (exit if profitable)",           minval=1, maxval=500, group="Time Expiry")
+cooldownBars   = input.int(10,     "Cooldown bars after exit",                minval=0, maxval=50)
+blockNYOpen    = input.bool(false, "Block NY open (08:30–09:00 CT)",                              group="Session Filter")
+blockLNOpen    = input.bool(true,  "Block LN open (02:00–02:30 CT)",                              group="Session Filter")
+blockPreNY     = input.bool(true,  "Block CME pre-open + NY open (07:30–09:00 CT)",               group="Session Filter")
+startDate      = input.time(timestamp("2000-01-01T00:00:00-06:00"), "Backtest Start",             group="Backtest")
+endDate        = input.time(timestamp("2099-12-31T23:59:00-06:00"), "Backtest End",               group="Backtest")
+
+//=============================
+// Per-bar metrics
+//=============================
+ctMins      = hour(time, "America/Chicago") * 60 + minute(time, "America/Chicago")
+eodClose    = ctMins >= 900 and ctMins < 960
+nyOpenBlock = blockNYOpen and ctMins >= 510 and ctMins < 540
+lnOpenBlock = blockLNOpen and ctMins >= 120 and ctMins < 150
+preNYBlock  = blockPreNY  and ctMins >= 450 and ctMins < 540
+
+smaVal         = ta.sma(close, smaPeriod)
+atrVal         = ta.atr(atrPeriod)
+atrMultTiered  = atrVal < atrTier1 ? atrMult1 : atrVal < atrTier2 ? atrMult2 : atrVal < atrTier3 ? atrMult3 : atrMult4
+
+//=============================
+// Rolling OLS slope
+//=============================
+var float[] slopeBuf = array.new_float(0)
+var float   legSlope = na
+legSlope := na
+if not eodClose
+    array.push(slopeBuf, close)
+    if array.size(slopeBuf) > lookback
+        array.shift(slopeBuf)
+if array.size(slopeBuf) == lookback
+    n     = lookback
+    sumX  = 0.0; sumY  = 0.0; sumXY = 0.0; sumX2 = 0.0
+    for i = 0 to n - 1
+        x = float(i); y = array.get(slopeBuf, i)
+        sumX += x; sumY += y; sumXY += x * y; sumX2 += x * x
+    denom    = n * sumX2 - sumX * sumX
+    legSlope := denom != 0.0 ? math.round((n * sumXY - sumX * sumY) / denom, 2) : 0.0
+
+//=============================
+// Fractal detection + drought counter
+//=============================
+fractalHighVal = ta.pivothigh(high, fracHalfWidth, fracHalfWidth)
+fractalLowVal  = ta.pivotlow(low,   fracHalfWidth, fracHalfWidth)
+newFractalHigh = not na(fractalHighVal)
+newFractalLow  = not na(fractalLowVal)
+newFractal     = newFractalHigh or newFractalLow
+
+var float lastFractalHigh    = na
+var float lastFractalLow     = na
+var int   lastFractalHighBar = na
+var int   lastFractalLowBar  = na
+var int   barsSinceAnyFractal = 0   // bars since any fractal (high or low) was confirmed
+
+if newFractalHigh
+    lastFractalHigh    := fractalHighVal
+    lastFractalHighBar := bar_index - fracHalfWidth
+if newFractalLow
+    lastFractalLow    := fractalLowVal
+    lastFractalLowBar := bar_index - fracHalfWidth
+
+// barsSinceAnyFractal: counts from the pivot bar itself (bar_index - fracHalfWidth)
+lastAnyFractalBar = na(lastFractalHighBar) and na(lastFractalLowBar) ? na :
+     na(lastFractalHighBar) ? lastFractalLowBar :
+     na(lastFractalLowBar)  ? lastFractalHighBar :
+     math.max(lastFractalHighBar, lastFractalLowBar)
+barsSinceAnyFractal := na(lastAnyFractalBar) ? bar_index : bar_index - lastAnyFractalBar
+
+// Drought signal — no fractal for droughtBars, slope confirms trend direction
+inDrought    = barsSinceAnyFractal >= droughtBars
+slopeUp      = not na(legSlope) and legSlope >= slopeConfirm    // price trending up → fade with short
+slopeDown    = not na(legSlope) and legSlope <= -slopeConfirm   // price trending down → fade with long
+
+//=============================
+// State
+//=============================
+var bool  inTrade      = false
+var int   tradeDir     = 0
+var float entryPrice   = na
+var float bestPrice    = na
+var float trailStop    = na
+var int   cooldown     = 0
+var int   barsInTrade  = 0
+var float activeSL     = na
+var int   slExitDir    = 0
+var float slBarrier    = na
+var int   barrierCool  = 0
+var float slEntryPrice = na
+var float barrierBuf   = na
+
+//=============================
+// Session block exits
+//=============================
+inAnyBlock = nyOpenBlock or lnOpenBlock or preNYBlock
+if inAnyBlock and inTrade and strategy.position_size != 0
+    strategy.close_all(comment="BLK")
+if inAnyBlock and inTrade
+    tradeDir    := 0; trailStop := na; bestPrice := na
+    inTrade     := false; barsInTrade := 0; cooldown := 0
+
+//=============================
+// EOD reset
+//=============================
+if eodClose and strategy.position_size != 0
+    strategy.close_all(comment="EOD")
+if eodClose
+    tradeDir := 0; trailStop := na; bestPrice := na
+    inTrade  := false; cooldown := 0; barsInTrade := 0
+    slExitDir := 0; slBarrier := na; slEntryPrice := na
+    barrierBuf := na; barrierCool := 0
+
+//=============================
+// Sync on TP/SL fill
+//=============================
+if strategy.position_size == 0 and (inTrade or tradeDir != 0)
+    tradeDir := 0; trailStop := na; bestPrice := na
+    inTrade  := false; cooldown := cooldownBars; barsInTrade := 0
+
+//=============================
+// Cooldown countdown
+//=============================
+if cooldown > 0 and not inTrade
+    cooldown -= 1
+
+//=============================
+// slExitDir barrier — same logic as slope strategy
+//=============================
+if slExitDir != 0 and not inTrade
+    if cooldown == 0
+        if barrierCool > 0
+            barrierCool -= 1
+        if barrierCool == 0
+            slBarrier   := close
+            barrierCool := cooldownBars
+    if na(slEntryPrice) or na(barrierBuf)
+        slExitDir := 0; slBarrier := na; slEntryPrice := na; barrierBuf := na; barrierCool := 0
+    else if slExitDir == 1
+        if close > slEntryPrice + barrierBuf
+            slExitDir := 0; slBarrier := na; slEntryPrice := na; barrierBuf := na; barrierCool := 0
+    else
+        if close < slEntryPrice - barrierBuf
+            slExitDir := 0; slBarrier := na; slEntryPrice := na; barrierBuf := na; barrierCool := 0
+
+//=============================
+// Hard SL
+//=============================
+if inTrade and strategy.position_size != 0
+    hardSLHit = (tradeDir == 1 and low <= entryPrice - activeSL) or (tradeDir == -1 and high >= entryPrice + activeSL)
+    if hardSLHit
+        strategy.close("Long",  comment="SL")
+        strategy.close("Short", comment="SL")
+        slExitDir    := tradeDir; slBarrier := na
+        slEntryPrice := entryPrice; barrierBuf := activeSL; barrierCool := 0
+        tradeDir := 0; trailStop := na; bestPrice := na
+        inTrade  := false; cooldown := cooldownBars
+
+//=============================
+// Bar counter + time expiry
+//=============================
+if inTrade and strategy.position_size != 0
+    barsInTrade += 1
+else if not inTrade
+    barsInTrade := 0
+
+if enableTExp and inTrade and strategy.position_size != 0 and barsInTrade >= tExpBars
+    isProfit = (tradeDir == 1 and close > entryPrice) or (tradeDir == -1 and close < entryPrice)
+    if isProfit
+        strategy.close("Long",  comment="TEXP")
+        strategy.close("Short", comment="TEXP")
+        tradeDir := 0; trailStop := na; bestPrice := na
+        inTrade  := false; barsInTrade := 0; cooldown := cooldownBars
+
+//=============================
+// Fractal exit — new fractal confirms trend exhaustion
+//=============================
+if exitOnNewFractal and inTrade and strategy.position_size != 0 and newFractal
+    strategy.close("Long",  comment="FRAC")
+    strategy.close("Short", comment="FRAC")
+    tradeDir := 0; trailStop := na; bestPrice := na
+    inTrade  := false; barsInTrade := 0; cooldown := cooldownBars
+
+//=============================
+// Entry — drought fade
+// inDrought: no fractal for droughtBars → trend ongoing → fade it
+// Long  when slope is down (market falling, fade = buy)
+// Short when slope is up   (market rising, fade = sell)
+//=============================
+canTrade  = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and time >= startDate and time <= endDate
+
+// only enter once per drought — require drought just became true this bar
+droughtJustFired = inDrought and not (barsSinceAnyFractal[1] >= droughtBars)
+
+bullEntry = canTrade and droughtJustFired and slopeDown and slExitDir != 1
+bearEntry = canTrade and droughtJustFired and slopeUp   and slExitDir != -1
+
+if bullEntry
+    _sl     = close - (enableAtrSL ? math.round(atrVal * atrMultTiered, 2) : enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts)
+    _tp     = close + tpPts * tpMult
+    _slPts  = enableAtrSL ? math.round(atrVal * atrMultTiered, 2) : enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
+    strategy.entry("Long",  strategy.long,  comment="F↑")
+    strategy.exit("Exit-Long",  "Long",  stop=_sl, limit=_tp)
+    slExitDir := 0; slBarrier := na; slEntryPrice := na; barrierBuf := na; barrierCool := 0
+    tradeDir  := 1; entryPrice := close; trailStop := na; bestPrice := na; inTrade := true
+    activeSL  := _slPts
+    label.new(bar_index, low,
+              text      = "F↑\n" + str.tostring(close, "#.##") + "\nSL:" + str.tostring(_slPts, "#") + "\nD:" + str.tostring(barsSinceAnyFractal),
+              style     = label.style_label_up,
+              color     = color.new(color.teal, 10),
+              textcolor = color.white, size = size.normal)
+
+else if bearEntry
+    _sl    = close + (enableAtrSL ? math.round(atrVal * atrMultTiered, 2) : enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts)
+    _tp    = close - tpPts * tpMult
+    _slPts = enableAtrSL ? math.round(atrVal * atrMultTiered, 2) : enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
+    strategy.entry("Short", strategy.short, comment="F↓")
+    strategy.exit("Exit-Short", "Short", stop=_sl, limit=_tp)
+    slExitDir := 0; slBarrier := na; slEntryPrice := na; barrierBuf := na; barrierCool := 0
+    tradeDir  := -1; entryPrice := close; trailStop := na; bestPrice := na; inTrade := true
+    activeSL  := _slPts
+    label.new(bar_index, high,
+              text      = "F↓\n" + str.tostring(close, "#.##") + "\nSL:" + str.tostring(_slPts, "#") + "\nD:" + str.tostring(barsSinceAnyFractal),
+              style     = label.style_label_down,
+              color     = color.new(color.orange, 10),
+              textcolor = color.white, size = size.normal)
+
+//=============================
+// Trailing stop — wider when still in drought (trend still running)
+//=============================
+var bool trailFired = false
+trailFired := false
+
+if tradeDir == 1 and strategy.position_size != 0
+    bestPrice := na(bestPrice) ? high : math.max(bestPrice, high)
+    if bestPrice - entryPrice >= trailTrigger
+        _dist = inDrought ? trailDistStrong : trailDist
+        trailStop := math.max(na(trailStop) ? bestPrice - _dist : trailStop, bestPrice - _dist)
+    if not na(trailStop) and low <= trailStop
+        trailFired := true
+        strategy.close("Long", comment="TRAIL")
+        tradeDir := 0; trailStop := na; bestPrice := na; inTrade := false; cooldown := cooldownBars
+
+else if tradeDir == -1 and strategy.position_size != 0
+    bestPrice := na(bestPrice) ? low : math.min(bestPrice, low)
+    if entryPrice - bestPrice >= trailTrigger
+        _dist = inDrought ? trailDistStrong : trailDist
+        trailStop := math.min(na(trailStop) ? bestPrice + _dist : trailStop, bestPrice + _dist)
+    if not na(trailStop) and high >= trailStop
+        trailFired := true
+        strategy.close("Short", comment="TRAIL")
+        tradeDir := 0; trailStop := na; bestPrice := na; inTrade := false; cooldown := cooldownBars
+
+else
+    trailStop := na; bestPrice := na
+
+//=============================
+// Exit labels
+//=============================
+posClosed = strategy.position_size == 0 and strategy.position_size[1] != 0 and not eodClose
+if posClosed
+    _ec     = strategy.closedtrades.exit_comment(strategy.closedtrades - 1)
+    _wasLong = tradeDir[1] == 1
+    _isProfit = strategy.netprofit > strategy.netprofit[1]
+    _col    = _ec == "SL"    ? color.new(color.red,    20) :
+              _ec == "TRAIL" ? color.new(color.green,  20) :
+              _ec == "FRAC"  ? color.new(color.aqua,   20) :
+              _ec == "TEXP"  ? color.new(color.blue,   20) :
+              _ec == "BLK"   ? color.new(color.gray,   20) :
+              _isProfit      ? color.new(color.green,  20) : color.new(color.red, 20)
+    _style  = (_ec == "SL" and _wasLong) ? label.style_label_down :
+              (_ec == "SL" and not _wasLong) ? label.style_label_up :
+              _wasLong ? label.style_label_up : label.style_label_down
+    label.new(bar_index, _wasLong ? low : high,
+              text      = _ec,
+              style     = _style,
+              color     = _col,
+              textcolor = color.white, size = size.small)
+
+//=============================
+// Data window
+//=============================
+plot(legSlope,                                    "legSlope",           color=color.rgb(100,180,255), display=display.data_window)
+plot(activeSL,                                    "activeSL",           color=color.rgb(255,160,80),  display=display.data_window)
+plot(atrVal,                                      "ATR",                color=color.rgb(180,255,180), display=display.data_window)
+plot(smaVal,                                      "SMA",                color=color.rgb(255,220,100), display=display.data_window)
+plot(inTrade  ? 1 : 0,                           "inTrade",            color=color.purple,           display=display.data_window)
+plot(tradeDir,                                    "tradeDir",           color=color.white,            display=display.data_window)
+plot(barsInTrade > 0 ? barsInTrade : na,          "barsInTrade",        color=color.rgb(180,120,255), display=display.data_window)
+plot(cooldown > 0 ? cooldown : na,                "cooldown",           color=color.aqua,             display=display.data_window)
+plot(barsSinceAnyFractal,                         "barsSinceFractal",   color=color.rgb(255,165,0),   display=display.data_window)
+plot(inDrought ? 1 : 0,                          "inDrought",          color=color.rgb(255,100,255), display=display.data_window)
+plot(lastFractalHigh,                             "lastFractalHigh",    color=color.rgb(255,100,100), display=display.data_window)
+plot(lastFractalLow,                              "lastFractalLow",     color=color.rgb(100,200,100), display=display.data_window)
+plot(slExitDir,                                   "slExitDir",          color=color.rgb(255,100,100), display=display.data_window)
+plot(slEntryPrice,                                "slEntryPrice",       color=color.rgb(255,80,80),   display=display.data_window)
+plot(barrierBuf,                                  "barrierBuf",         color=color.rgb(255,140,0),   display=display.data_window)
+
+//=============================
+// Stats table
+//=============================
+var table statsTable = table.new(position.bottom_right, 2, 4,
+     bgcolor=color.new(color.black, 20), border_width=1, border_color=color.new(color.gray, 50))
+
+if barstate.islast
+    table.cell(statsTable, 0, 0, "Genoa",              text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 1, 0, "Fractal Drought",    text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 1, "Drought bars",       text_color=color.white,  text_size=size.small)
+    table.cell(statsTable, 1, 1, str.tostring(droughtBars), text_color=color.rgb(255,165,0), text_size=size.small)
+    table.cell(statsTable, 0, 2, "Since fractal",      text_color=color.white,  text_size=size.small)
+    table.cell(statsTable, 1, 2, str.tostring(barsSinceAnyFractal) + (inDrought ? " 🔥" : ""),
+         text_color=inDrought ? color.rgb(255,100,255) : color.white, text_size=size.small)
+    table.cell(statsTable, 0, 3, "Live bars in trade", text_color=color.white,  text_size=size.small)
+    table.cell(statsTable, 1, 3, barsInTrade > 0 ? str.tostring(barsInTrade) : "—",
+         text_color=color.rgb(180,180,255), text_size=size.small)
+
+//=============================
+// Alerts
+//=============================
+if tradeDir == 1 and tradeDir[1] == 0
+    _sl = entryPrice - activeSL; _tp = entryPrice + tpPts * tpMult
+    alert('{"event":"entry","side":"long","price":' + str.tostring(close, "#.##") +
+          ',"sl":' + str.tostring(_sl, "#.##") + ',"tp":' + str.tostring(_tp, "#.##") +
+          ',"sl_pts":' + str.tostring(activeSL, "#.##") +
+          ',"drought_bars":' + str.tostring(barsSinceAnyFractal) +
+          ',"symbol":"' + syminfo.ticker + '"' +
+          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "America/Chicago") + '"' +
+          '}', alert.freq_once_per_bar)
+
+if tradeDir == -1 and tradeDir[1] == 0
+    _sl = entryPrice + activeSL; _tp = entryPrice - tpPts * tpMult
+    alert('{"event":"entry","side":"short","price":' + str.tostring(close, "#.##") +
+          ',"sl":' + str.tostring(_sl, "#.##") + ',"tp":' + str.tostring(_tp, "#.##") +
+          ',"sl_pts":' + str.tostring(activeSL, "#.##") +
+          ',"drought_bars":' + str.tostring(barsSinceAnyFractal) +
+          ',"symbol":"' + syminfo.ticker + '"' +
+          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "America/Chicago") + '"' +
+          '}', alert.freq_once_per_bar)
+
+if posClosed
+    _exitSide    = tradeDir[1] == 1 ? "long" : "short"
+    _exitComment = strategy.closedtrades.exit_comment(strategy.closedtrades - 1)
+    _exitPrice   = strategy.closedtrades.exit_price(strategy.closedtrades - 1)
+    _entryPx     = strategy.closedtrades.entry_price(strategy.closedtrades - 1)
+    _pnlPts      = tradeDir[1] == 1 ? _exitPrice - _entryPx : _entryPx - _exitPrice
+    alert('{"event":"exit","side":"' + _exitSide + '"' +
+          ',"exit_price":' + str.tostring(_exitPrice, "#.##") +
+          ',"entry_price":' + str.tostring(_entryPx, "#.##") +
+          ',"pnl_pts":' + str.tostring(_pnlPts, "#.##") +
+          ',"reason":"' + _exitComment + '"' +
+          ',"bars_held":' + str.tostring(barsInTrade[1]) +
+          ',"symbol":"' + syminfo.ticker + '"' +
+          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "America/Chicago") + '"' +
+          '}', alert.freq_once_per_bar)
