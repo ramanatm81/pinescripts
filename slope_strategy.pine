@@ -36,10 +36,12 @@ cooldownBars = input.int(10,    "Cooldown bars after exit (0 = none)",    minval
 deepSlope    = input.float(3.0, "Deep slope threshold (D↑/D↓ label)",              minval=0.5, step=0.1,    group="R² Filter")
 enableBodyFilter = input.bool(false, "Block entry if signal bar body < min size",                          group="R² Filter")
 minBodyPts       = input.float(10.0, "Min body size (pts)",               minval=0.5, step=0.5,            group="R² Filter")
-enableSRFilter = input.bool(false, "Block entries near S/R pivots",                              group="S/R Filter")
-srHalfWidth    = input.int(10,     "Fractal half-width (bars each side, 10=21-bar pivot)", minval=1, maxval=20, group="S/R Filter")
-srZoneWidth    = input.float(25.0, "Zone width (pts either side of pivot)", minval=1.0, step=0.5, group="S/R Filter")
-srLookback     = input.int(50,     "Pivot lookback (bars, 0=all)",   minval=0,   maxval=500,    group="S/R Filter")
+enableSRFilter   = input.bool(false, "Block entries near S/R pivots",                            group="S/R Filter")
+srHalfWidth      = input.int(10,     "Fractal half-width (bars each side, 10=21-bar pivot)", minval=1, maxval=20, group="S/R Filter")
+srZoneWidth      = input.float(25.0, "Zone width (pts either side of pivot)", minval=1.0, step=0.5, group="S/R Filter")
+srLookback       = input.int(50,     "Pivot lookback (bars, 0=all)",   minval=0,   maxval=500,    group="S/R Filter")
+enableDroughtBlock = input.bool(false, "Block entry when no fractal for N bars (trending market)", group="S/R Filter")
+droughtBlockBars   = input.int(50,    "Drought threshold (bars without any fractal)",  minval=5, maxval=500, group="S/R Filter")
 blockNYOpen  = input.bool(false,"Block NY open first 30 min (08:30–09:00 CT)",          group="Session Filter")
 blockLNOpen  = input.bool(true, "Block LN open first 30 min (02:00–02:30 CT)",          group="Session Filter")
 blockPreNY   = input.bool(true, "Block CME pre-open + NY open (07:30–09:00 CT)",        group="Session Filter")
@@ -100,6 +102,14 @@ srBlockAny    = enableSRFilter and (_nearHigh or _nearLow)
 srBlockLong   = srBlockAny
 srBlockShort  = srBlockAny
 inSRZone      = srBlockLong or srBlockShort
+
+// Fractal drought — bars since any fractal (high or low) was confirmed
+_lastAnyFractalBar = na(lastFractalHighBar) and na(lastFractalLowBar) ? na :
+     na(lastFractalHighBar) ? lastFractalLowBar :
+     na(lastFractalLowBar)  ? lastFractalHighBar :
+     math.max(lastFractalHighBar, lastFractalLowBar)
+barsSinceFractal = na(_lastAnyFractalBar) ? bar_index : bar_index - _lastAnyFractalBar
+inFractalDrought = enableDroughtBlock and barsSinceFractal >= droughtBlockBars
 
 //=============================
 // State
@@ -336,8 +346,8 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
 canTrade  = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and time >= startDate and time <= endDate and not na(legSlope)
 bigEnough = not enableBodyFilter or (math.abs(close - open) >= minBodyPts)
 
-bullEntry = canTrade and bigEnough and legSlope < -slopeEntry and slExitDir != 1  and not srBlockLong
-bearEntry = canTrade and bigEnough and legSlope >  slopeEntry and slExitDir != -1 and not srBlockShort
+bullEntry = canTrade and bigEnough and not inFractalDrought and legSlope < -slopeEntry and slExitDir != 1  and not srBlockLong
+bearEntry = canTrade and bigEnough and not inFractalDrought and legSlope >  slopeEntry and slExitDir != -1 and not srBlockShort
 
 if bullEntry
     tp  = close + tpPts * tpMult
@@ -525,6 +535,8 @@ plot(srZoneWidth,                                 "cfg_srZoneWidth",  color=colo
 plot(srLookback,                                  "cfg_srLookback",  color=color.gray,             display=display.data_window)
 plot(srHalfWidth,                                 "cfg_srHalfWidth", color=color.gray,             display=display.data_window)
 plot(enableSRFilter ? 1 : 0,                      "cfg_srEnabled",   color=color.gray,             display=display.data_window)
+plot(barsSinceFractal,                            "barsSinceFractal",color=color.rgb(255,165,0),   display=display.data_window)
+plot(inFractalDrought ? 1 : 0,                   "inDrought",       color=color.rgb(255,100,255), display=display.data_window)
 plot(slopeEntry,                                  "cfg_slopeEntry",  color=color.gray,             display=display.data_window)
 plot(cooldownBars,                                "cfg_cooldown",    color=color.gray,             display=display.data_window)
 plot(enableAtrSL ? 1 : 0,                         "cfg_atrSL",       color=color.gray,             display=display.data_window)
@@ -544,7 +556,7 @@ var table statsTable = table.new(position.bottom_right, 2, 5,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Turin",              text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Bologna",              text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
