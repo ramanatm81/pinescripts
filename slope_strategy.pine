@@ -276,13 +276,13 @@ if slExitDir != 0 and not inTrade
             barrierCool  := 0
 
 //=============================
-// Hard SL
+// Hard SL state update
+// strategy.exit stop= handles the actual fill — don't call strategy.close here
+// or it double-fires and allows a re-entry on the same bar
 //=============================
 if inTrade and strategy.position_size != 0
     hardSLHit = (tradeDir == 1 and low <= entryPrice - activeSL) or (tradeDir == -1 and high >= entryPrice + activeSL)
     if hardSLHit
-        strategy.close("Long",  comment="SL")
-        strategy.close("Short", comment="SL")
         slExitDir    := tradeDir
         slBarrier    := na
         slEntryPrice := entryPrice
@@ -556,7 +556,7 @@ var table statsTable = table.new(position.bottom_right, 2, 5,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Palermo",              text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Catania",              text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
