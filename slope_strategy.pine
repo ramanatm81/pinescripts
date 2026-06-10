@@ -556,7 +556,7 @@ var table statsTable = table.new(position.bottom_right, 2, 5,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Bologna",              text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Palermo",              text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
@@ -604,19 +604,12 @@ if tradeDir == -1 and tradeDir[1] == 0
           ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "America/Chicago") + '"' +
           '}', alert.freq_once_per_bar)
 
-// Exit alerts — fire when position just closed
+// Exit alerts — minimal payload, FastAPI uses this to close open orders
 if posClosed
-    _exitSide   = tradeDir[1] == 1 ? "long" : "short"
+    _exitSide    = tradeDir[1] == 1 ? "long" : "short"
     _exitComment = strategy.closedtrades.exit_comment(strategy.closedtrades - 1)
-    _exitPrice  = strategy.closedtrades.exit_price(strategy.closedtrades - 1)
-    _entryPx    = strategy.closedtrades.entry_price(strategy.closedtrades - 1)
-    _pnlPts     = tradeDir[1] == 1 ? _exitPrice - _entryPx : _entryPx - _exitPrice
     alert('{"event":"exit","side":"' + _exitSide + '"' +
-          ',"exit_price":' + str.tostring(_exitPrice, "#.##") +
-          ',"entry_price":' + str.tostring(_entryPx, "#.##") +
-          ',"pnl_pts":' + str.tostring(_pnlPts, "#.##") +
           ',"reason":"' + _exitComment + '"' +
-          ',"bars_held":' + str.tostring(barsInTrade[1]) +
           ',"symbol":"' + syminfo.ticker + '"' +
           ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "America/Chicago") + '"' +
           '}', alert.freq_once_per_bar)
