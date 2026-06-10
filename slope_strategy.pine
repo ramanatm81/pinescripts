@@ -192,6 +192,8 @@ else
 //=============================
 inAnyBlock = nyOpenBlock or lnOpenBlock or preNYBlock
 if inAnyBlock and inTrade and strategy.position_size != 0
+    strategy.cancel("Exit-Long")
+    strategy.cancel("Exit-Short")
     strategy.close_all(comment="BLK")
 if inAnyBlock and inTrade
     tradeDir    := 0
@@ -205,6 +207,8 @@ if inAnyBlock and inTrade
 // EOD reset
 //=============================
 if eodClose and strategy.position_size != 0
+    strategy.cancel("Exit-Long")
+    strategy.cancel("Exit-Short")
     strategy.close_all(comment="EOD")
 if eodClose
     tradeDir     := 0
@@ -306,6 +310,8 @@ else if not inTrade
 if enableTExp and inTrade and strategy.position_size != 0 and barsInTrade >= tExpBars
     isProfit = (tradeDir == 1 and close > entryPrice) or (tradeDir == -1 and close < entryPrice)
     if isProfit
+        strategy.cancel("Exit-Long")
+        strategy.cancel("Exit-Short")
         strategy.close("Long",  comment="TEXP")
         strategy.close("Short", comment="TEXP")
         tradeDir    := 0
@@ -323,6 +329,8 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
     slopeAgainst = (tradeDir == 1 and legSlope <= -tExpHardSlope) or (tradeDir == -1 and legSlope >= tExpHardSlope)
     if slopeAgainst
         thrdIsLoss = (tradeDir == 1 and close < entryPrice) or (tradeDir == -1 and close > entryPrice)
+        strategy.cancel("Exit-Long")
+        strategy.cancel("Exit-Short")
         strategy.close("Long",  comment="THRD")
         strategy.close("Short", comment="THRD")
         if thrdIsLoss
@@ -413,6 +421,7 @@ if tradeDir == 1 and strategy.position_size != 0
         trailStop := math.max(na(trailStop) ? bestPrice - _activeDist : trailStop, bestPrice - _activeDist)
     if not na(trailStop) and low <= trailStop
         trailFired := true
+        strategy.cancel("Exit-Long")
         strategy.close("Long", comment="TRAIL")
         tradeDir  := 0
         trailStop := na
@@ -428,6 +437,7 @@ else if tradeDir == -1 and strategy.position_size != 0
         trailStop := math.min(na(trailStop) ? bestPrice + _activeDist : trailStop, bestPrice + _activeDist)
     if not na(trailStop) and high >= trailStop
         trailFired := true
+        strategy.cancel("Exit-Short")
         strategy.close("Short", comment="TRAIL")
         tradeDir  := 0
         trailStop := na
@@ -556,7 +566,7 @@ var table statsTable = table.new(position.bottom_right, 2, 5,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Bari",              text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Osaka",              text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
