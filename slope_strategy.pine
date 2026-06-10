@@ -556,7 +556,7 @@ var table statsTable = table.new(position.bottom_right, 2, 5,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Catania",              text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Bari",              text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
@@ -583,11 +583,11 @@ if barstate.islast
 if tradeDir == 1 and tradeDir[1] == 0
     _sl = entryPrice - activeSL
     _tp = entryPrice + tpPts * tpMult
-    alert('{"event":"entry","side":"long","price":' + str.tostring(close, "#.##") +
-          ',"sl":' + str.tostring(_sl, "#.##") +
-          ',"tp":' + str.tostring(_tp, "#.##") +
-          ',"sl_pts":' + str.tostring(activeSL, "#.##") +
-          ',"slope":' + str.tostring(legSlope, "#.##") +
+    alert('{"event":"entry","side":"long","price":' + str.tostring(close, "0.00") +
+          ',"sl":' + str.tostring(_sl, "0.00") +
+          ',"tp":' + str.tostring(_tp, "0.00") +
+          ',"sl_pts":' + str.tostring(activeSL, "0.00") +
+          ',"slope":' + str.tostring(legSlope, "0.00") +
           ',"symbol":"' + syminfo.ticker + '"' +
           ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "America/Chicago") + '"' +
           '}', alert.freq_once_per_bar)
@@ -595,11 +595,11 @@ if tradeDir == 1 and tradeDir[1] == 0
 if tradeDir == -1 and tradeDir[1] == 0
     _sl = entryPrice + activeSL
     _tp = entryPrice - tpPts * tpMult
-    alert('{"event":"entry","side":"short","price":' + str.tostring(close, "#.##") +
-          ',"sl":' + str.tostring(_sl, "#.##") +
-          ',"tp":' + str.tostring(_tp, "#.##") +
-          ',"sl_pts":' + str.tostring(activeSL, "#.##") +
-          ',"slope":' + str.tostring(legSlope, "#.##") +
+    alert('{"event":"entry","side":"short","price":' + str.tostring(close, "0.00") +
+          ',"sl":' + str.tostring(_sl, "0.00") +
+          ',"tp":' + str.tostring(_tp, "0.00") +
+          ',"sl_pts":' + str.tostring(activeSL, "0.00") +
+          ',"slope":' + str.tostring(legSlope, "0.00") +
           ',"symbol":"' + syminfo.ticker + '"' +
           ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "America/Chicago") + '"' +
           '}', alert.freq_once_per_bar)
