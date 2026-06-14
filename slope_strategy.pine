@@ -8,15 +8,6 @@ strategy("Slope Strategy", overlay=true, max_labels_count=500, max_bars_back=500
 lookback     = 10  // fixed rolling window for slope calculation
 slopeEntry   = input.float(1.7, "Slope threshold (entry trigger)",        minval=0.1, step=0.1)
 slPts        = input.float(50.0,"Stop Loss (pts from entry) — fallback when SMA SL disabled", minval=0.5, step=0.5)
-enableAtrSL  = input.bool(false, "Dynamic SL based on ATR (overrides SMA SL)",               group="ATR Stop Loss")
-atrPeriod    = input.int(14,     "ATR period",              minval=1,   maxval=500,            group="ATR Stop Loss")
-atrTier1     = input.float(10.0, "Tier 1 max ATR (calm ETH, mult below)",    minval=1.0, step=0.5,  group="ATR Stop Loss")
-atrMult1     = input.float(2.5,  "Tier 1 multiplier (ATR < tier1)",           minval=0.1, step=0.1,  group="ATR Stop Loss")
-atrTier2     = input.float(20.0, "Tier 2 max ATR (normal, mult below)",       minval=1.0, step=0.5,  group="ATR Stop Loss")
-atrMult2     = input.float(2.0,  "Tier 2 multiplier (tier1 ≤ ATR < tier2)",   minval=0.1, step=0.1,  group="ATR Stop Loss")
-atrTier3     = input.float(35.0, "Tier 3 max ATR (volatile RTH, mult below)", minval=1.0, step=0.5,  group="ATR Stop Loss")
-atrMult3     = input.float(1.5,  "Tier 3 multiplier (tier2 ≤ ATR < tier3)",   minval=0.1, step=0.1,  group="ATR Stop Loss")
-atrMult4     = input.float(1.0,  "Tier 4 multiplier (ATR ≥ tier3, extreme)",  minval=0.1, step=0.1,  group="ATR Stop Loss")
 enableSmaSL  = input.bool(true,  "Dynamic SL based on SMA",                                   group="SMA Stop Loss")
 smaPeriod    = input.int(30,     "SMA period",              minval=2,   maxval=500,            group="SMA Stop Loss")
 slAboveSma   = input.float(50.0, "SL when close > SMA (upward, pts)",  minval=0.5, step=0.5,  group="SMA Stop Loss")
@@ -60,10 +51,8 @@ nyOpenBlock = blockNYOpen and ctMins >= 510 and ctMins < 540
 lnOpenBlock = blockLNOpen and ctMins >= 120 and ctMins < 150
 preNYBlock  = blockPreNY  and ctMins >= 450 and ctMins < 540   // 07:30–09:00 CT
 
-// SMA and ATR for dynamic SL
+// SMA for dynamic SL
 smaVal  = ta.sma(close, smaPeriod)
-atrVal  = ta.atr(atrPeriod)
-atrMultTiered = atrVal < atrTier1 ? atrMult1 : atrVal < atrTier2 ? atrMult2 : atrVal < atrTier3 ? atrMult3 : atrMult4
 
 // Doji detection — exclude from slope buffer
 _range   = high - low
@@ -367,7 +356,7 @@ if thrdReversalPending and not inTrade and not eodClose and time >= startDate an
     thrdReversalPending := false
     deepBlockDir        := 0  // THRD reversal clears deep block
     entryWasDeep        := false
-    _slAmt = enableAtrSL ? math.round(atrVal * atrMultTiered, 2) : enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
+    _slAmt = enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
     if thrdReversalDir == 1
         _tp      = close + tpPts * tpMult
         _slPrice = close - _slAmt
@@ -434,7 +423,7 @@ bearEntry = canTrade and bigEnough and not inFractalDrought and legSlope >  slop
 
 if bullEntry
     tp  = close + tpPts * tpMult
-    _slPrice = close - (enableAtrSL ? math.round(atrVal * atrMultTiered, 2) : enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts)
+    _slPrice = close - (enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts)
     strategy.entry("Long",  strategy.long,  comment="S↑")
     strategy.exit("Exit-Long",  "Long",  stop=_slPrice, limit=tp)  // stop pins fill at SL price — no gap slippage
     slExitDir    := 0
@@ -448,7 +437,7 @@ if bullEntry
     trailStop   := na
     bestPrice   := na
     inTrade     := true
-    activeSL    := enableAtrSL ? math.round(atrVal * atrMultTiered, 2) : enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
+    activeSL    := enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
     _isDeep     = math.abs(legSlope) >= deepSlope
     entryWasDeep := _isDeep
     deepBlockDir := 0  // new trade clears any prior deep block
@@ -461,7 +450,7 @@ if bullEntry
 
 else if bearEntry
     tp  = close - tpPts * tpMult
-    _slPrice = close + (enableAtrSL ? math.round(atrVal * atrMultTiered, 2) : enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts)
+    _slPrice = close + (enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts)
     strategy.entry("Short", strategy.short, comment="S↓")
     strategy.exit("Exit-Short", "Short", stop=_slPrice, limit=tp)  // stop pins fill at SL price — no gap slippage
     slExitDir    := 0
@@ -475,7 +464,7 @@ else if bearEntry
     trailStop  := na
     bestPrice  := na
     inTrade    := true
-    activeSL   := enableAtrSL ? math.round(atrVal * atrMultTiered, 2) : enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
+    activeSL   := enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
     _isDeep    = math.abs(legSlope) >= deepSlope
     entryWasDeep := _isDeep
     deepBlockDir := 0  // new trade clears any prior deep block
@@ -615,8 +604,6 @@ if posClosed
 plot(legSlope,                          "legSlope",      color=color.rgb(100,180,255), display=display.data_window)
 plot(tradeLegSlope,                     "tradeLegSlope", color=color.rgb(255,200,80),  display=display.data_window)
 plot(activeSL,                          "activeSL",      color=color.rgb(255,160,80),  display=display.data_window)
-plot(atrVal,                            "ATR",           color=color.rgb(180,255,180), display=display.data_window)
-plot(atrMultTiered,                     "ATRmult",       color=color.rgb(100,255,200), display=display.data_window)
 plot(smaVal,                            "SMA",           color=color.rgb(255,220,100), display=display.data_window)
 plot(inTrade  ? 1 : 0,                 "inTrade",       color=color.purple,           display=display.data_window)
 plot(tradeDir,                          "tradeDir",      color=color.white,            display=display.data_window)
@@ -636,7 +623,6 @@ plot(barsSinceFractal,                            "barsSinceFractal",color=color
 plot(inFractalDrought ? 1 : 0,                   "inDrought",       color=color.rgb(255,100,255), display=display.data_window)
 plot(slopeEntry,                                  "cfg_slopeEntry",  color=color.gray,             display=display.data_window)
 plot(cooldownBars,                                "cfg_cooldown",    color=color.gray,             display=display.data_window)
-plot(enableAtrSL ? 1 : 0,                         "cfg_atrSL",       color=color.gray,             display=display.data_window)
 plot(enableSmaSL ? 1 : 0,                         "cfg_smaSL",       color=color.gray,             display=display.data_window)
 plot(trailTrigger,                                "cfg_trailTrigger",color=color.gray,             display=display.data_window)
 plot(trailDist,                                   "cfg_trailDist",   color=color.gray,             display=display.data_window)
@@ -653,7 +639,7 @@ var table statsTable = table.new(position.bottom_right, 2, 5,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Nairobi",              text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Cairo",              text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
