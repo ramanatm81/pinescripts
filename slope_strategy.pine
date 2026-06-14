@@ -544,8 +544,9 @@ if posClosed
     isSL    = not isTrail and not isTExp and not isTHrd and not isBlk and not isTP
     wasLong = tradeDir[1] == 1
 
-    // Set deep block when a deep trade exits with profit
-    if enableDeepBlock and entryWasDeep and isTP
+    // Set deep block when a deep trade exits with profit (any exit type — trail, TP, texp)
+    _lastTradeProfit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if enableDeepBlock and entryWasDeep and _lastTradeProfit > 0
         deepBlockDir  := wasLong ? 1 : -1
         deepBestPrice := exitBestPrice[1]  // best price from previous bar (last bar of the trade)
 
