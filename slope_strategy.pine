@@ -522,15 +522,16 @@ else
 //=============================
 // Exit labels — all based on position actually closing
 //=============================
-posClosed = strategy.position_size == 0 and strategy.position_size[1] != 0 and not eodClose
+posClosed = strategy.position_size == 0 and strategy.position_size[1] != 0
 if posClosed
     exitComment = strategy.closedtrades.exit_comment(strategy.closedtrades - 1)
     isTrail = exitComment == "TRAIL"
     isTExp  = exitComment == "TEXP"
     isTHrd  = exitComment == "THRD"
     isBlk   = exitComment == "BLK"
-    isTP    = not isTrail and not isTExp and not isTHrd and not isBlk and strategy.netprofit > strategy.netprofit[1]
-    isSL    = not isTrail and not isTExp and not isTHrd and not isBlk and not isTP
+    isEOD   = exitComment == "EOD"
+    isTP    = not isTrail and not isTExp and not isTHrd and not isBlk and not isEOD and strategy.netprofit > strategy.netprofit[1]
+    isSL    = not isTrail and not isTExp and not isTHrd and not isBlk and not isEOD and not isTP
     wasLong = tradeDir[1] == 1
 
     // Set deep block when a deep trade exits with profit (any exit type — trail, TP, texp)
@@ -539,7 +540,14 @@ if posClosed
         deepBlockDir  := wasLong ? 1 : -1
         deepBestPrice := exitBestPrice[1]  // best price from previous bar (last bar of the trade)
 
-    if isBlk
+    if isEOD
+        label.new(bar_index, wasLong ? low : high,
+                  text      = "EOD",
+                  style     = wasLong ? label.style_label_up : label.style_label_down,
+                  color     = color.new(color.gray, 20),
+                  textcolor = color.white,
+                  size      = size.small)
+    else if isBlk
         label.new(bar_index, wasLong ? low : high,
                   text      = "BLK",
                   style     = wasLong ? label.style_label_up : label.style_label_down,
@@ -639,7 +647,7 @@ var table statsTable = table.new(position.bottom_right, 2, 5,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Cairo",              text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Dakar",              text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
