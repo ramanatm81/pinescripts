@@ -47,9 +47,10 @@ endDate      = input.time(timestamp("2099-12-31T23:59:00-06:00"), "Backtest End"
 ctMins      = hour(time, "America/Chicago") * 60 + minute(time, "America/Chicago")
 inRTH       = ctMins >= 510 and ctMins < 900
 eodClose    = ctMins >= 900 and ctMins < 960
-nyOpenBlock = blockNYOpen and ctMins >= 510 and ctMins < 540
-lnOpenBlock = blockLNOpen and ctMins >= 120 and ctMins < 150
-preNYBlock  = blockPreNY  and ctMins >= 450 and ctMins < 540   // 07:30–09:00 CT
+nyOpenBlock  = blockNYOpen and ctMins >= 510 and ctMins < 540
+lnOpenBlock  = blockLNOpen and ctMins >= 120 and ctMins < 150
+preNYBlock   = blockPreNY  and ctMins >= 450 and ctMins < 540   // 07:30–09:00 CT
+ethOpenBlock = ctMins >= 1020 and ctMins < 1050                 // 17:00–17:30 CT hardcoded
 
 // SMA for dynamic SL
 smaVal  = ta.sma(close, smaPeriod)
@@ -187,7 +188,7 @@ else
 //=============================
 // Session block exits — close any open trade on entering a blocked window
 //=============================
-inAnyBlock = nyOpenBlock or lnOpenBlock or preNYBlock
+inAnyBlock = nyOpenBlock or lnOpenBlock or preNYBlock or ethOpenBlock
 if inAnyBlock and inTrade and strategy.position_size != 0
     strategy.cancel("Exit-Long")
     strategy.cancel("Exit-Short")
@@ -414,7 +415,7 @@ inDeepBlock = enableDeepBlock and deepBlockDir != 0
 // legSlope < -slopeEntry → downtrend → enter LONG (mean reversion / reversal)
 // legSlope >  slopeEntry → uptrend   → enter SHORT
 //=============================
-canTrade  = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and time >= startDate and time <= endDate and not na(legSlope)
+canTrade  = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and not ethOpenBlock and time >= startDate and time <= endDate and not na(legSlope)
 bigEnough = not enableBodyFilter or (math.abs(close - open) >= minBodyPts)
 isDeepSignal = math.abs(legSlope) >= deepSlope
 
@@ -647,7 +648,7 @@ var table statsTable = table.new(position.bottom_right, 2, 5,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Oslo",               text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Lisbon",             text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
