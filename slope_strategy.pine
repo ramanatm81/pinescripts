@@ -682,7 +682,7 @@ if tradeDir == 1 and tradeDir[1] == 0
           ',"slope":' + str.tostring(legSlope, "0.00") +
           ',"symbol":"' + syminfo.ticker + '"' +
           ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "America/Chicago") + '"' +
-          '}', alert.freq_once_per_bar_close)
+          '}', alert.freq_once_per_bar)
 
 if tradeDir == -1 and tradeDir[1] == 0
     _sl = entryPrice + activeSL
@@ -694,7 +694,7 @@ if tradeDir == -1 and tradeDir[1] == 0
           ',"slope":' + str.tostring(legSlope, "0.00") +
           ',"symbol":"' + syminfo.ticker + '"' +
           ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "America/Chicago") + '"' +
-          '}', alert.freq_once_per_bar_close)
+          '}', alert.freq_once_per_bar)
 
 // Exit alerts — minimal payload, FastAPI uses this to close open orders
 if posClosed
@@ -704,4 +704,4 @@ if posClosed
           ',"reason":"' + _exitComment + '"' +
           ',"symbol":"' + syminfo.ticker + '"' +
           ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "America/Chicago") + '"' +
-          '}', alert.freq_once_per_bar_close)
+          '}', alert.freq_once_per_bar)
