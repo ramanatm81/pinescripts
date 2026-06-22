@@ -338,10 +338,10 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
             barrierBuf   := activeSL
             barrierCool  := 0
         if enableThrdReversal
-            // slope is against tradeDir → enter opposite direction next bar
+            // slope is against tradeDir → enter opposite direction after 2 bars
             thrdReversalPending := true
             thrdReversalDir     := -tradeDir  // Long was losing to downslope → go Short; Short losing to upslope → go Long
-            cooldown            := 0          // skip cooldown so entry fires immediately
+            cooldown            := 2          // 2-bar delay before reversal entry fires
         else
             cooldown := cooldownBars
         tradeDir    := 0
@@ -353,7 +353,7 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
 //=============================
 // THRD reversal entry — fires one bar after THRD exit, bypasses all normal filters
 //=============================
-if thrdReversalPending and not inTrade and not eodClose and time >= startDate and time <= endDate
+if thrdReversalPending and not inTrade and cooldown == 0 and not eodClose and time >= startDate and time <= endDate
     thrdReversalPending := false
     deepBlockDir        := 0  // THRD reversal clears deep block
     entryWasDeep        := false
