@@ -14,9 +14,9 @@ slAboveSma   = input.float(50.0, "SL when close > SMA (upward, pts)",  minval=0.
 slBelowSma   = input.float(30.0, "SL when close < SMA (downward, pts)",minval=0.5, step=0.5,  group="SMA Stop Loss")
 tpPts        = input.float(40.0,"TP base (pts from entry)",               minval=0.5, step=1.0)
 tpMult       = input.float(3.0, "TP multiplier (× TP base)",              minval=0.1, step=0.1)
-trailTrigger     = input.float(40.0,"Trail trigger (points profit)",                        minval=1.0, step=0.5,  group="Trailing Stop")
-trailDist        = input.float(20.0,"Trail distance — normal (points)",                     minval=1.0, step=0.5,  group="Trailing Stop")
-trailDistStrong  = input.float(35.0,"Trail distance — strong slope (points, wider room)",   minval=1.0, step=0.5,  group="Trailing Stop")
+trailTrigger     = input.float(30.0,"Trail trigger (points profit)",                        minval=1.0, step=0.5,  group="Trailing Stop")
+trailDist        = input.float(10.0,"Trail distance — normal (points)",                     minval=1.0, step=0.5,  group="Trailing Stop")
+trailDistStrong  = input.float(10.0,"Trail distance — strong slope (points, wider room)",   minval=1.0, step=0.5,  group="Trailing Stop")
 enableTExp   = input.bool(true, "Enable time expiry exit",                                       group="Time Expiry")
 tExpBars     = input.int(30,    "Max bars in trade (exit if profitable)",  minval=1,  maxval=500, group="Time Expiry")
 enableTExpHard   = input.bool(true, "Enable hard time expiry (exit even if loss, slope against)", group="Time Expiry")
@@ -29,7 +29,6 @@ cooldownBars = input.int(10,    "Cooldown bars after exit (0 = none)",    minval
 deepSlope    = input.float(3.0, "Deep slope threshold (D↑/D↓ label)",              minval=0.5, step=0.1,    group="R² Filter")
 enableBodyFilter = input.bool(false, "Block entry if signal bar body < min size",                          group="R² Filter")
 minBodyPts       = input.float(10.0, "Min body size (pts)",               minval=0.5, step=0.5,            group="R² Filter")
-enablePrevOpenFilter = input.bool(false, "Block entry if prev candle open doesn't confirm direction (Long: prev open > prev close; Short: prev open < prev close)", group="R² Filter")
 enableSRFilter   = input.bool(true,  "Block entries near S/R pivots",                            group="S/R Filter")
 srHalfWidth      = input.int(10,     "Fractal half-width (bars each side, 10=21-bar pivot)", minval=1, maxval=20, group="S/R Filter")
 srZoneWidth      = input.float(25.0, "Zone width (pts either side of pivot)", minval=1.0, step=0.5, group="S/R Filter")
@@ -420,20 +419,8 @@ canTrade  = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock a
 bigEnough = not enableBodyFilter or (math.abs(close - open) >= minBodyPts)
 isDeepSignal = math.abs(legSlope) >= deepSlope
 
-// Prev candle open filter: Long needs prev open > prev close (prev bar was bearish — down move to fade)
-//                          Short needs prev open < prev close (prev bar was bullish — up move to fade)
-prevOpenOkLong  = not enablePrevOpenFilter or open[1] > close[1]
-prevOpenOkShort = not enablePrevOpenFilter or open[1] < close[1]
-
-bullEntry = canTrade and bigEnough and not inFractalDrought and legSlope < -slopeEntry and slExitDir != 1  and not srBlockLong  and (not inDeepBlock or isDeepSignal) and prevOpenOkLong
-bearEntry = canTrade and bigEnough and not inFractalDrought and legSlope >  slopeEntry and slExitDir != -1 and not srBlockShort and (not inDeepBlock or isDeepSignal) and prevOpenOkShort
-
-// If prev open filter is the only thing blocking, reset cooldown to 0 so we don't waste bars waiting
-if enablePrevOpenFilter and canTrade and bigEnough and not inFractalDrought and not inDeepBlock and not eodClose
-    _wouldBullWithout = legSlope < -slopeEntry and slExitDir != 1  and not srBlockLong
-    _wouldBearWithout = legSlope >  slopeEntry and slExitDir != -1 and not srBlockShort
-    if (_wouldBullWithout and not prevOpenOkLong) or (_wouldBearWithout and not prevOpenOkShort)
-        cooldown := 0
+bullEntry = canTrade and bigEnough and not inFractalDrought and legSlope < -slopeEntry and slExitDir != 1  and not srBlockLong  and (not inDeepBlock or isDeepSignal)
+bearEntry = canTrade and bigEnough and not inFractalDrought and legSlope >  slopeEntry and slExitDir != -1 and not srBlockShort and (not inDeepBlock or isDeepSignal)
 
 if bullEntry
     tp  = close + tpPts * tpMult
