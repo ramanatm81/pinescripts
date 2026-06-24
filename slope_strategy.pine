@@ -32,7 +32,7 @@ minBodyPts       = input.float(10.0, "Min body size (pts)",               minval
 enableSRFilter   = input.bool(true,  "Block entries near S/R pivots",                            group="S/R Filter")
 srHalfWidth      = input.int(10,     "Fractal half-width (bars each side, 10=21-bar pivot)", minval=1, maxval=20, group="S/R Filter")
 srZoneWidth      = input.float(25.0, "Zone width (pts either side of pivot)", minval=1.0, step=0.5, group="S/R Filter")
-srLookback       = input.int(50,     "Pivot lookback (bars, 0=all)",   minval=0,   maxval=500,    group="S/R Filter")
+srLookback       = input.int(0,     "Pivot lookback (bars, 0=all)",   minval=0,   maxval=500,    group="S/R Filter")
 enableDroughtBlock = input.bool(false, "Block entry when no fractal for N bars (trending market)", group="S/R Filter")
 droughtBlockBars   = input.int(50,    "Drought threshold (bars without any fractal)",  minval=5, maxval=500, group="S/R Filter")
 blockNYOpen  = input.bool(false,"Block NY open first 30 min (08:30–09:00 CT)",          group="Session Filter")
@@ -126,6 +126,7 @@ var float deepBestPrice       = na     // best price reached in last profitable 
 var int   deepBlockDir        = 0      // 1=Long deep exited profit (wait for high), -1=Short deep exited profit (wait for low)
 var bool  entryWasDeep        = false  // true if current/last trade was a deep entry
 var float exitBestPrice       = na     // bestPrice snapshot at the moment of exit
+var int   deepLossBlockDir    = 0      // after deep loss: block same-dir shallow entries (1=Long blocked, -1=Short blocked)
 
 //=============================
 // Trade leg slope buffer — accumulates close prices from entry bar onward
@@ -209,17 +210,18 @@ if eodClose and strategy.position_size != 0
     strategy.cancel("Exit-Short")
     strategy.close_all(comment="EOD")
 if eodClose
-    tradeDir     := 0
-    trailStop    := na
-    bestPrice    := na
-    inTrade      := false
-    cooldown     := 0
-    barsInTrade  := 0
-    slExitDir    := 0
-    slBarrier    := na
-    slEntryPrice := na
-    barrierBuf   := na
-    barrierCool  := 0
+    tradeDir         := 0
+    trailStop        := na
+    bestPrice        := na
+    inTrade          := false
+    cooldown         := 0
+    barsInTrade      := 0
+    slExitDir        := 0
+    slBarrier        := na
+    slEntryPrice     := na
+    barrierBuf       := na
+    barrierCool      := 0
+    deepLossBlockDir := 0
 
 //=============================
 // Sync on TP/SL close
@@ -419,8 +421,12 @@ canTrade  = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock a
 bigEnough = not enableBodyFilter or (math.abs(close - open) >= minBodyPts)
 isDeepSignal = math.abs(legSlope) >= deepSlope
 
-bullEntry = canTrade and bigEnough and not inFractalDrought and legSlope < -slopeEntry and slExitDir != 1  and not srBlockLong  and (not inDeepBlock or isDeepSignal)
-bearEntry = canTrade and bigEnough and not inFractalDrought and legSlope >  slopeEntry and slExitDir != -1 and not srBlockShort and (not inDeepBlock or isDeepSignal)
+// After a deep loss in one direction, only allow re-entry in that direction if it's a deep signal
+deepLossBlockLong  = deepLossBlockDir == 1  and not isDeepSignal
+deepLossBlockShort = deepLossBlockDir == -1 and not isDeepSignal
+
+bullEntry = canTrade and bigEnough and not inFractalDrought and legSlope < -slopeEntry and slExitDir != 1  and not srBlockLong  and (not inDeepBlock or isDeepSignal) and not deepLossBlockLong
+bearEntry = canTrade and bigEnough and not inFractalDrought and legSlope >  slopeEntry and slExitDir != -1 and not srBlockShort and (not inDeepBlock or isDeepSignal) and not deepLossBlockShort
 
 if bullEntry
     tp  = close + tpPts * tpMult
@@ -441,7 +447,8 @@ if bullEntry
     activeSL    := enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
     _isDeep     = math.abs(legSlope) >= deepSlope
     entryWasDeep := _isDeep
-    deepBlockDir := 0  // new trade clears any prior deep block
+    deepBlockDir     := 0  // new trade clears any prior deep block
+    deepLossBlockDir := 0  // new trade clears deep-loss block
     label.new(bar_index, low,
               text      = (_isDeep ? "D↑" : "S↑") + "\n" + str.tostring(close, "#.##") + "\nSL:" + str.tostring(activeSL, "#"),
               style     = label.style_label_up,
@@ -468,7 +475,8 @@ else if bearEntry
     activeSL   := enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
     _isDeep    = math.abs(legSlope) >= deepSlope
     entryWasDeep := _isDeep
-    deepBlockDir := 0  // new trade clears any prior deep block
+    deepBlockDir     := 0  // new trade clears any prior deep block
+    deepLossBlockDir := 0  // new trade clears deep-loss block
     label.new(bar_index, high,
               text      = (_isDeep ? "D↓" : "S↓") + "\n" + str.tostring(close, "#.##") + "\nSL:" + str.tostring(activeSL, "#"),
               style     = label.style_label_down,
@@ -540,6 +548,10 @@ if posClosed
     if enableDeepBlock and entryWasDeep and _lastTradeProfit > 0
         deepBlockDir  := wasLong ? 1 : -1
         deepBestPrice := exitBestPrice[1]  // best price from previous bar (last bar of the trade)
+
+    // After deep loss: block re-entry in same direction unless next signal is also deep
+    if entryWasDeep and _lastTradeProfit <= 0
+        deepLossBlockDir := wasLong ? 1 : -1
 
     if isEOD
         label.new(bar_index, wasLong ? low : high,
