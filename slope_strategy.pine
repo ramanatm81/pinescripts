@@ -377,8 +377,7 @@ if thrdReversalPending and not inTrade and cooldown == 0 and not eodClose and ti
         bestPrice    := na
         inTrade      := true
         activeSL     := _slAmt
-        label.new(bar_index, low,  text="T↑\n" + str.tostring(close, "#.##") + "\nSL:" + str.tostring(_slAmt, "#"),
-                  style=label.style_label_up,   color=color.new(color.teal, 10), textcolor=color.white, size=size.normal)
+        label.new(bar_index, low,  text="T↑", style=label.style_label_up,   color=color.new(color.teal, 10), textcolor=color.white, size=size.normal)
     else if thrdReversalDir == -1
         _tp      = close - tpPts * tpMult
         _slPrice = close + _slAmt
@@ -396,8 +395,7 @@ if thrdReversalPending and not inTrade and cooldown == 0 and not eodClose and ti
         bestPrice    := na
         inTrade      := true
         activeSL     := _slAmt
-        label.new(bar_index, high, text="T↓\n" + str.tostring(close, "#.##") + "\nSL:" + str.tostring(_slAmt, "#"),
-                  style=label.style_label_down, color=color.new(color.teal, 10), textcolor=color.white, size=size.normal)
+        label.new(bar_index, high, text="T↓", style=label.style_label_down, color=color.new(color.teal, 10), textcolor=color.white, size=size.normal)
 
 //=============================
 // Deep block — after a profitable deep trade, clear block when price revisits best price
@@ -450,7 +448,7 @@ if bullEntry
     deepBlockDir     := 0  // new trade clears any prior deep block
     deepLossBlockDir := 0  // new trade clears deep-loss block
     label.new(bar_index, low,
-              text      = (_isDeep ? "D↑" : "S↑") + "\n" + str.tostring(close, "#.##") + "\nSL:" + str.tostring(activeSL, "#"),
+              text      = _isDeep ? "D↑" : "S↑",
               style     = label.style_label_up,
               color     = _isDeep ? color.new(color.orange, 10) : color.new(color.green, 10),
               textcolor = color.white,
@@ -478,7 +476,7 @@ else if bearEntry
     deepBlockDir     := 0  // new trade clears any prior deep block
     deepLossBlockDir := 0  // new trade clears deep-loss block
     label.new(bar_index, high,
-              text      = (_isDeep ? "D↓" : "S↓") + "\n" + str.tostring(close, "#.##") + "\nSL:" + str.tostring(activeSL, "#"),
+              text      = _isDeep ? "D↓" : "S↓",
               style     = label.style_label_down,
               color     = _isDeep ? color.new(color.orange, 10) : color.new(color.red, 10),
               textcolor = color.white,
