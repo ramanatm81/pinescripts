@@ -334,9 +334,8 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
 //=============================
 // Entry label state — drawn at bar close to avoid repaint from tick-dependent isDoji
 //=============================
-var int    pendingLabelDir  = 0
-var bool   pendingLabelDeep = false
-var string pendingLabelType = ""
+var bool   entryLabelDeep = false
+var string entryLabelType = ""   // "slope", "thrd"
 
 //=============================
 // THRD reversal entry
@@ -363,10 +362,8 @@ if thrdReversalPending and not inTrade and cooldown == 0 and not eodClose and ti
         bestPrice    := na
         inTrade      := true
         activeSL     := _slAmt
-        if pendingLabelDir == 0
-            pendingLabelDir  := 1
-            pendingLabelDeep := false
-            pendingLabelType := "thrd"
+        entryLabelDeep := false
+        entryLabelType := "thrd"
     else if thrdReversalDir == -1
         _tp      = close - tpPts * tpMult
         _slPrice = close + _slAmt
@@ -384,10 +381,8 @@ if thrdReversalPending and not inTrade and cooldown == 0 and not eodClose and ti
         bestPrice    := na
         inTrade      := true
         activeSL     := _slAmt
-        if pendingLabelDir == 0
-            pendingLabelDir  := -1
-            pendingLabelDeep := false
-            pendingLabelType := "thrd"
+        entryLabelDeep := false
+        entryLabelType := "thrd"
 
 //=============================
 // Deep block
@@ -433,10 +428,8 @@ if bullEntry
     entryWasDeep := _isDeep
     deepBlockDir     := 0
     deepLossBlockDir := 0
-    if pendingLabelDir == 0
-        pendingLabelDir  := 1
-        pendingLabelDeep := _isDeep
-        pendingLabelType := "slope"
+    entryLabelDeep := _isDeep
+    entryLabelType := "slope"
 
 else if bearEntry
     tp  = close - tpPts * tpMult
@@ -459,28 +452,24 @@ else if bearEntry
     entryWasDeep := _isDeep
     deepBlockDir     := 0
     deepLossBlockDir := 0
-    if pendingLabelDir == 0
-        pendingLabelDir  := -1
-        pendingLabelDeep := _isDeep
-        pendingLabelType := "slope"
+    entryLabelDeep := _isDeep
+    entryLabelType := "slope"
 
 //=============================
 // Entry labels — drawn at bar close to avoid repaint from tick-dependent isDoji
 //=============================
-if barstate.isconfirmed and pendingLabelDir != 0
-    if pendingLabelType == "thrd"
-        if pendingLabelDir == 1
+entryTransition = barstate.isconfirmed and tradeDir != tradeDir[1] and tradeDir != 0
+if entryTransition
+    if entryLabelType == "thrd"
+        if tradeDir == 1
             label.new(bar_index, low,  text="T↑", style=label.style_label_up,   color=color.new(color.teal, 10),   textcolor=color.white, size=size.normal)
         else
             label.new(bar_index, high, text="T↓", style=label.style_label_down, color=color.new(color.teal, 10),   textcolor=color.white, size=size.normal)
     else
-        if pendingLabelDir == 1
-            label.new(bar_index, low,  text=pendingLabelDeep ? "D↑" : "S↑", style=label.style_label_up,   color=pendingLabelDeep ? color.new(color.orange, 10) : color.new(color.green, 10), textcolor=color.white, size=size.normal)
+        if tradeDir == 1
+            label.new(bar_index, low,  text=entryLabelDeep ? "D↑" : "S↑", style=label.style_label_up,   color=entryLabelDeep ? color.new(color.orange, 10) : color.new(color.green, 10), textcolor=color.white, size=size.normal)
         else
-            label.new(bar_index, high, text=pendingLabelDeep ? "D↓" : "S↓", style=label.style_label_down, color=pendingLabelDeep ? color.new(color.orange, 10) : color.new(color.red,    10), textcolor=color.white, size=size.normal)
-    pendingLabelDir  := 0
-    pendingLabelDeep := false
-    pendingLabelType := ""
+            label.new(bar_index, high, text=entryLabelDeep ? "D↓" : "S↓", style=label.style_label_down, color=entryLabelDeep ? color.new(color.orange, 10) : color.new(color.red,    10), textcolor=color.white, size=size.normal)
 
 //=============================
 // Trailing stop
