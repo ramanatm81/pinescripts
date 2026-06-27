@@ -359,6 +359,8 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
 //=============================
 var bool   entryLabelDeep = false
 var string entryLabelType = ""   // "slope", "thrd"
+var int    entryLabelDir  = 0    // 1=long, -1=short, 0=none
+var int    entryLabelBar  = -1   // bar_index of the entry that should be labeled
 
 //=============================
 // THRD reversal entry — fires one bar after THRD exit, bypasses all normal filters
@@ -387,6 +389,8 @@ if thrdReversalPending and not inTrade and cooldown == 0 and not eodClose and ti
         activeSL     := _slAmt
         entryLabelDeep := false
         entryLabelType := "thrd"
+        entryLabelDir  := 1
+        entryLabelBar  := bar_index
     else if thrdReversalDir == -1
         _tp      = close - tpPts * tpMult
         _slPrice = close + _slAmt
@@ -406,6 +410,8 @@ if thrdReversalPending and not inTrade and cooldown == 0 and not eodClose and ti
         activeSL     := _slAmt
         entryLabelDeep := false
         entryLabelType := "thrd"
+        entryLabelDir  := -1
+        entryLabelBar  := bar_index
 
 //=============================
 // Deep block — after a profitable deep trade, clear block when price revisits best price
@@ -459,6 +465,8 @@ if bullEntry
     deepLossBlockDir := 0  // new trade clears deep-loss block
     entryLabelDeep := _isDeep
     entryLabelType := "slope"
+    entryLabelDir  := 1
+    entryLabelBar  := bar_index
 
 else if bearEntry
     tp  = close - tpPts * tpMult
@@ -483,25 +491,29 @@ else if bearEntry
     deepLossBlockDir := 0  // new trade clears deep-loss block
     entryLabelDeep := _isDeep
     entryLabelType := "slope"
+    entryLabelDir  := -1
+    entryLabelBar  := bar_index
 
 //=============================
-// Entry labels — drawn once on the bar where tradeDir transitions into a
-// position (tradeDir != tradeDir[1] and tradeDir != 0). This transition is
-// true on exactly one bar, immune to the calc_on_every_tick / isDoji race that
-// caused duplicate labels on consecutive bars.
+// Entry labels — drawn once per trade, the bar the trade actually opens.
+// `entryLabelBar` records the bar_index captured at the entry tick; we draw
+// only when that bar is fully confirmed AND we haven't already labeled it.
+// Anchoring to a stored bar_index (not a per-bar transition test) makes the
+// draw immune to the calc_on_every_tick recalc that re-fired the old logic.
 //=============================
-entryTransition = barstate.isconfirmed and tradeDir != tradeDir[1] and tradeDir != 0
-if entryTransition
+var int lastLabeledBar = -1
+if barstate.isconfirmed and entryLabelBar == bar_index and entryLabelBar != lastLabeledBar and entryLabelDir != 0
     if entryLabelType == "thrd"
-        if tradeDir == 1
+        if entryLabelDir == 1
             label.new(bar_index, low,  text="T↑", style=label.style_label_up,   color=color.new(color.teal, 10),   textcolor=color.white, size=size.normal)
         else
             label.new(bar_index, high, text="T↓", style=label.style_label_down, color=color.new(color.teal, 10),   textcolor=color.white, size=size.normal)
     else
-        if tradeDir == 1
+        if entryLabelDir == 1
             label.new(bar_index, low,  text=entryLabelDeep ? "D↑" : "S↑", style=label.style_label_up,   color=entryLabelDeep ? color.new(color.orange, 10) : color.new(color.green, 10), textcolor=color.white, size=size.normal)
         else
             label.new(bar_index, high, text=entryLabelDeep ? "D↓" : "S↓", style=label.style_label_down, color=entryLabelDeep ? color.new(color.orange, 10) : color.new(color.red,    10), textcolor=color.white, size=size.normal)
+    lastLabeledBar := bar_index
 
 //=============================
 // Trailing stop
@@ -679,7 +691,7 @@ var table statsTable = table.new(position.bottom_right, 2, 5,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Helsinki v4",        text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Helsinki v5",        text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),

@@ -336,6 +336,8 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
 //=============================
 var bool   entryLabelDeep = false
 var string entryLabelType = ""   // "slope", "thrd"
+var int    entryLabelDir  = 0    // 1=long, -1=short, 0=none
+var int    entryLabelBar  = -1   // bar_index of the entry that should be labeled
 
 //=============================
 // THRD reversal entry
@@ -364,6 +366,8 @@ if thrdReversalPending and not inTrade and cooldown == 0 and not eodClose and ti
         activeSL     := _slAmt
         entryLabelDeep := false
         entryLabelType := "thrd"
+        entryLabelDir  := 1
+        entryLabelBar  := bar_index
     else if thrdReversalDir == -1
         _tp      = close - tpPts * tpMult
         _slPrice = close + _slAmt
@@ -383,6 +387,8 @@ if thrdReversalPending and not inTrade and cooldown == 0 and not eodClose and ti
         activeSL     := _slAmt
         entryLabelDeep := false
         entryLabelType := "thrd"
+        entryLabelDir  := -1
+        entryLabelBar  := bar_index
 
 //=============================
 // Deep block
@@ -430,6 +436,8 @@ if bullEntry
     deepLossBlockDir := 0
     entryLabelDeep := _isDeep
     entryLabelType := "slope"
+    entryLabelDir  := 1
+    entryLabelBar  := bar_index
 
 else if bearEntry
     tp  = close - tpPts * tpMult
@@ -454,22 +462,26 @@ else if bearEntry
     deepLossBlockDir := 0
     entryLabelDeep := _isDeep
     entryLabelType := "slope"
+    entryLabelDir  := -1
+    entryLabelBar  := bar_index
 
 //=============================
-// Entry labels — drawn at bar close to avoid repaint from tick-dependent isDoji
+// Entry labels — drawn once per trade, anchored to the stored entry bar_index.
+// Immune to the calc_on_every_tick recalc that re-fired the transition test.
 //=============================
-entryTransition = barstate.isconfirmed and tradeDir != tradeDir[1] and tradeDir != 0
-if entryTransition
+var int lastLabeledBar = -1
+if barstate.isconfirmed and entryLabelBar == bar_index and entryLabelBar != lastLabeledBar and entryLabelDir != 0
     if entryLabelType == "thrd"
-        if tradeDir == 1
+        if entryLabelDir == 1
             label.new(bar_index, low,  text="T↑", style=label.style_label_up,   color=color.new(color.teal, 10),   textcolor=color.white, size=size.normal)
         else
             label.new(bar_index, high, text="T↓", style=label.style_label_down, color=color.new(color.teal, 10),   textcolor=color.white, size=size.normal)
     else
-        if tradeDir == 1
+        if entryLabelDir == 1
             label.new(bar_index, low,  text=entryLabelDeep ? "D↑" : "S↑", style=label.style_label_up,   color=entryLabelDeep ? color.new(color.orange, 10) : color.new(color.green, 10), textcolor=color.white, size=size.normal)
         else
             label.new(bar_index, high, text=entryLabelDeep ? "D↓" : "S↓", style=label.style_label_down, color=entryLabelDeep ? color.new(color.orange, 10) : color.new(color.red,    10), textcolor=color.white, size=size.normal)
+    lastLabeledBar := bar_index
 
 //=============================
 // Trailing stop
