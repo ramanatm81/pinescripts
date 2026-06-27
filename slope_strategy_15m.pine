@@ -1,40 +1,40 @@
 //@version=6
-strategy("Slope Strategy", overlay=true, max_labels_count=500, max_bars_back=5000,
+strategy("Slope Strategy 15m", overlay=true, max_labels_count=500, max_bars_back=5000,
          default_qty_type=strategy.fixed, default_qty_value=1, calc_on_every_tick=true)
 
 //=============================
 // Inputs
 //=============================
-lookback     = 10  // fixed rolling window for slope calculation
-slopeEntry   = input.float(1.7, "Slope threshold (entry trigger)",        minval=0.1, step=0.1)
-slPts        = input.float(50.0,"Stop Loss (pts from entry) — fallback when SMA SL disabled", minval=0.5, step=0.5)
+lookback     = 5   // 5 bars × 15m = 75 min rolling window for slope
+slopeEntry   = input.float(4.0, "Slope threshold (entry trigger)",        minval=0.1, step=0.1)
+slPts        = input.float(200.0,"Stop Loss (pts from entry) — fallback when SMA SL disabled", minval=0.5, step=0.5)
 enableSmaSL  = input.bool(true,  "Dynamic SL based on SMA",                                   group="SMA Stop Loss")
-smaPeriod    = input.int(9,      "SMA period",              minval=2,   maxval=500,            group="SMA Stop Loss")
-slAboveSma   = input.float(50.0, "SL when close > SMA (upward, pts)",  minval=0.5, step=0.5,  group="SMA Stop Loss")
-slBelowSma   = input.float(30.0, "SL when close < SMA (downward, pts)",minval=0.5, step=0.5,  group="SMA Stop Loss")
-tpPts        = input.float(40.0,"TP base (pts from entry)",               minval=0.5, step=1.0)
-tpMult       = input.float(3.0, "TP multiplier (× TP base)",              minval=0.1, step=0.1)
-trailTrigger     = input.float(30.0,"Trail trigger (points profit)",                        minval=1.0, step=0.5,  group="Trailing Stop")
-trailDist        = input.float(10.0,"Trail distance — normal (points)",                     minval=1.0, step=0.5,  group="Trailing Stop")
-trailDistStrong  = input.float(10.0,"Trail distance — strong slope (points, wider room)",   minval=1.0, step=0.5,  group="Trailing Stop")
+smaPeriod    = input.int(20,     "SMA period",              minval=2,   maxval=500,            group="SMA Stop Loss")
+slAboveSma   = input.float(175.0,"SL when close > SMA (upward, pts)",  minval=0.5, step=0.5,  group="SMA Stop Loss")
+slBelowSma   = input.float(125.0,"SL when close < SMA (downward, pts)",minval=0.5, step=0.5,  group="SMA Stop Loss")
+tpPts        = input.float(60.0, "TP base (pts from entry)",               minval=0.5, step=1.0)
+tpMult       = input.float(4.0,  "TP multiplier (× TP base)",              minval=0.1, step=0.1)
+trailTrigger     = input.float(100.0,"Trail trigger (points profit)",                       minval=1.0, step=1.0,  group="Trailing Stop")
+trailDist        = input.float(50.0, "Trail distance — normal (points)",                    minval=1.0, step=1.0,  group="Trailing Stop")
+trailDistStrong  = input.float(50.0, "Trail distance — strong slope (points, wider room)",  minval=1.0, step=1.0,  group="Trailing Stop")
 enableTExp   = input.bool(true, "Enable time expiry exit",                                       group="Time Expiry")
-tExpBars     = input.int(30,    "Max bars in trade (exit if profitable)",  minval=1,  maxval=500, group="Time Expiry")
+tExpBars     = input.int(8,     "Max bars in trade (exit if profitable)",  minval=1,  maxval=500, group="Time Expiry")
 enableTExpHard   = input.bool(true, "Enable hard time expiry (exit even if loss, slope against)", group="Time Expiry")
-tExpHardBars     = input.int(20,    "Hard max bars (exit if slope against trade)",                minval=1,  maxval=500, group="Time Expiry")
-tExpHardSlope    = input.float(1.0, "Slope 'against' threshold for hard exit",                   minval=0.1, step=0.1,  group="Time Expiry")
+tExpHardBars     = input.int(5,     "Hard max bars (exit if slope against trade)",                minval=1,  maxval=500, group="Time Expiry")
+tExpHardSlope    = input.float(1.5, "Slope 'against' threshold for hard exit",                   minval=0.1, step=0.1,  group="Time Expiry")
 enableThrdReversal = input.bool(true,  "On THRD exit, immediately enter opposite direction",     group="Time Expiry")
 enableDeepBlock    = input.bool(false, "After profitable deep trade, block shallow entries until price revisits best price", group="R² Filter")
 dojiPct      = input.float(10.0,"Doji body % of range (excluded from R²)", minval=1.0, maxval=49.0, step=1.0, group="R² Filter")
-cooldownBars = input.int(10,    "Cooldown bars after exit (0 = none)",    minval=0,  maxval=50,              group="R² Filter")
-deepSlope    = input.float(3.0, "Deep slope threshold (D↑/D↓ label)",              minval=0.5, step=0.1,    group="R² Filter")
+cooldownBars = input.int(3,     "Cooldown bars after exit (0 = none)",    minval=0,  maxval=50,              group="R² Filter")
+deepSlope    = input.float(6.0, "Deep slope threshold (D↑/D↓ label)",              minval=0.5, step=0.1,    group="R² Filter")
 enableBodyFilter = input.bool(false, "Block entry if signal bar body < min size",                          group="R² Filter")
-minBodyPts       = input.float(10.0, "Min body size (pts)",               minval=0.5, step=0.5,            group="R² Filter")
+minBodyPts       = input.float(30.0, "Min body size (pts)",               minval=0.5, step=0.5,            group="R² Filter")
 enableSRFilter   = input.bool(true,  "Block entries near S/R pivots",                            group="S/R Filter")
-srHalfWidth      = input.int(10,     "Fractal half-width (bars each side, 10=21-bar pivot)", minval=1, maxval=20, group="S/R Filter")
-srZoneWidth      = input.float(25.0, "Zone width (pts either side of pivot)", minval=1.0, step=0.5, group="S/R Filter")
-srLookback       = input.int(0,     "Pivot lookback (bars, 0=all)",   minval=0,   maxval=500,    group="S/R Filter")
+srHalfWidth      = input.int(5,      "Fractal half-width (bars each side, 5=11-bar pivot)", minval=1, maxval=20, group="S/R Filter")
+srZoneWidth      = input.float(70.0, "Zone width (pts either side of pivot)", minval=1.0, step=1.0, group="S/R Filter")
+srLookback       = input.int(0,      "Pivot lookback (bars, 0=all)",   minval=0,   maxval=500,    group="S/R Filter")
 enableDroughtBlock = input.bool(false, "Block entry when no fractal for N bars (trending market)", group="S/R Filter")
-droughtBlockBars   = input.int(50,    "Drought threshold (bars without any fractal)",  minval=5, maxval=500, group="S/R Filter")
+droughtBlockBars   = input.int(20,    "Drought threshold (bars without any fractal)",  minval=5, maxval=500, group="S/R Filter")
 blockNYOpen  = input.bool(false,"Block NY open first 30 min (08:30–09:00 CT)",          group="Session Filter")
 blockLNOpen  = input.bool(true, "Block LN open first 30 min (02:00–02:30 CT)",          group="Session Filter")
 blockPreNY   = input.bool(true, "Block CME pre-open + NY open (07:30–09:00 CT)",        group="Session Filter")
@@ -63,8 +63,6 @@ isDoji   = _bodyPct < dojiPct
 //=============================
 // S/R fractal pivots — data window only, no chart shapes
 //=============================
-// ta.pivothigh/low returns the pivot price when confirmed, na otherwise
-// confirmed srHalfWidth bars after the pivot bar
 fractalHighVal = ta.pivothigh(high, srHalfWidth, srHalfWidth)
 fractalLowVal  = ta.pivotlow(low,  srHalfWidth, srHalfWidth)
 fractalHigh    = not na(fractalHighVal)
@@ -82,12 +80,10 @@ if fractalLow
     lastFractalLow     := fractalLowVal
     lastFractalLowBar  := bar_index - srHalfWidth
 
-// S/R zone check — true if price is within srZoneWidth of a recent pivot
 _highAge   = na(lastFractalHighBar) ? na : bar_index - lastFractalHighBar
 _lowAge    = na(lastFractalLowBar)  ? na : bar_index - lastFractalLowBar
 _highValid    = not na(lastFractalHigh) and (srLookback == 0 or (not na(_highAge) and _highAge <= srLookback))
 _lowValid     = not na(lastFractalLow)  and (srLookback == 0 or (not na(_lowAge)  and _lowAge  <= srLookback))
-// Block any entry when price is within band of either fractal high or low
 _nearHigh     = _highValid and math.abs(close - lastFractalHigh) <= srZoneWidth
 _nearLow      = _lowValid  and math.abs(close - lastFractalLow)  <= srZoneWidth
 srBlockAny    = enableSRFilter and (_nearHigh or _nearLow)
@@ -95,7 +91,6 @@ srBlockLong   = srBlockAny
 srBlockShort  = srBlockAny
 inSRZone      = srBlockLong or srBlockShort
 
-// Fractal drought — bars since any fractal (high or low) was confirmed
 _lastAnyFractalBar = na(lastFractalHighBar) and na(lastFractalLowBar) ? na :
      na(lastFractalHighBar) ? lastFractalLowBar :
      na(lastFractalLowBar)  ? lastFractalHighBar :
@@ -109,24 +104,24 @@ inFractalDrought = enableDroughtBlock and barsSinceFractal >= droughtBlockBars
 var bool  inTrade      = false
 var int   tradeDir     = 0
 var float entryPrice   = na
-var float entrySlope   = na   // slope at entry — used to decide exit mode
+var float entrySlope   = na
 var float bestPrice    = na
 var float trailStop    = na
 var int   cooldown     = 0
 var int   barsInTrade  = 0
-var float activeSL     = na   // SL locked in at entry (SMA-based or fixed)
-var int   slExitDir    = 0    // blocks re-entry after bad exit: 1=Long blocked, -1=Short blocked
-var float slBarrier    = na   // checkpoint close — updated every cooldownBars for display
-var int   barrierCool  = 0    // countdown between checkpoint updates
-var float slEntryPrice = na   // entry price of bad trade — anchor for clear condition
-var float barrierBuf   = na   // activeSL at time of bad exit
-var bool  thrdReversalPending = false  // true for one bar after THRD exit
-var int   thrdReversalDir     = 0      // direction to enter: 1=Long, -1=Short
-var float deepBestPrice       = na     // best price reached in last profitable deep trade
-var int   deepBlockDir        = 0      // 1=Long deep exited profit (wait for high), -1=Short deep exited profit (wait for low)
-var bool  entryWasDeep        = false  // true if current/last trade was a deep entry
-var float exitBestPrice       = na     // bestPrice snapshot at the moment of exit
-var int   deepLossBlockDir    = 0      // after deep loss: block same-dir shallow entries (1=Long blocked, -1=Short blocked)
+var float activeSL     = na
+var int   slExitDir    = 0
+var float slBarrier    = na
+var int   barrierCool  = 0
+var float slEntryPrice = na
+var float barrierBuf   = na
+var bool  thrdReversalPending = false
+var int   thrdReversalDir     = 0
+var float deepBestPrice       = na
+var int   deepBlockDir        = 0
+var bool  entryWasDeep        = false
+var float exitBestPrice       = na
+var int   deepLossBlockDir    = 0
 
 //=============================
 // Trade leg slope buffer — accumulates close prices from entry bar onward
@@ -187,7 +182,7 @@ else
         tradeLegSlope := denom2 != 0.0 ? math.round((n2 * sumXY2 - sumX2 * sumY2) / denom2, 2) : 0.0
 
 //=============================
-// Session block exits — close any open trade on entering a blocked window
+// Session block exits
 //=============================
 inAnyBlock = nyOpenBlock or lnOpenBlock or preNYBlock or ethOpenBlock
 if inAnyBlock and inTrade and strategy.position_size != 0
@@ -200,7 +195,7 @@ if inAnyBlock and inTrade
     bestPrice   := na
     inTrade     := false
     barsInTrade := 0
-    cooldown    := 0   // no cooldown — block window itself prevents re-entry
+    cooldown    := 0
 
 //=============================
 // EOD reset
@@ -242,22 +237,14 @@ if cooldown > 0 and not inTrade
 
 //=============================
 // slExitDir — entry price barrier
-// Anchor = entry price of bad trade. Buffer = activeSL.
-// Clear when price proves it moved SL distance in correct direction from entry:
-//   slExitDir=1  (Long bad exit) → clear when close > slEntryPrice + barrierBuf
-//   slExitDir=-1 (Short bad exit) → clear when close < slEntryPrice - barrierBuf
-// slBarrier checkpoints every cooldownBars for display only.
 //=============================
 if slExitDir != 0 and not inTrade
-    // checkpoint for display — only after cooldown expires
     if cooldown == 0
         if barrierCool > 0
             barrierCool -= 1
         if barrierCool == 0
             slBarrier   := close
             barrierCool := cooldownBars
-    // clear condition checked every bar (including during cooldown)
-    // so price crossing barrier during cooldown still unblocks
     if na(slEntryPrice) or na(barrierBuf)
         slExitDir    := 0
         slBarrier    := na
@@ -281,8 +268,6 @@ if slExitDir != 0 and not inTrade
 
 //=============================
 // Hard SL state update
-// strategy.exit stop= handles the actual fill — don't call strategy.close here
-// or it double-fires and allows a re-entry on the same bar
 //=============================
 if inTrade and strategy.position_size != 0
     hardSLHit = (tradeDir == 1 and low <= entryPrice - activeSL) or (tradeDir == -1 and high >= entryPrice + activeSL)
@@ -300,7 +285,6 @@ if inTrade and strategy.position_size != 0
 
 //=============================
 // Bar counter + time expiry exit
-// Close only if profitable after N bars in trade
 //=============================
 if inTrade and strategy.position_size != 0
     barsInTrade += 1
@@ -321,10 +305,6 @@ if enableTExp and inTrade and strategy.position_size != 0 and barsInTrade >= tEx
         barsInTrade := 0
         cooldown    := cooldownBars
 
-// Hard time expiry — exit regardless of P&L when slope is deeply against the trade
-// All slope inputs are absolute values, applied directionally:
-//   Long  entered on legSlope < -slopeEntry → mean reversion failed if slope STILL <= -tExpHardSlope (trend never reversed)
-//   Short entered on legSlope > +slopeEntry → mean reversion failed if slope STILL >= +tExpHardSlope (trend never reversed)
 if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >= tExpHardBars and not na(legSlope)
     slopeAgainst = (tradeDir == 1 and legSlope <= -tExpHardSlope) or (tradeDir == -1 and legSlope >= tExpHardSlope)
     if slopeAgainst
@@ -340,10 +320,9 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
             barrierBuf   := activeSL
             barrierCool  := 0
         if enableThrdReversal
-            // slope is against tradeDir → enter opposite direction after 2 bars
             thrdReversalPending := true
-            thrdReversalDir     := -tradeDir  // Long was losing to downslope → go Short; Short losing to upslope → go Long
-            cooldown            := 2          // 2-bar delay before reversal entry fires
+            thrdReversalDir     := -tradeDir
+            cooldown            := 2
         else
             cooldown := cooldownBars
         tradeDir    := 0
@@ -355,16 +334,16 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
 //=============================
 // Entry label state — drawn at bar close to avoid repaint from tick-dependent isDoji
 //=============================
-var int   pendingLabelDir  = 0   // 1=long, -1=short, 0=none
-var bool  pendingLabelDeep = false
-var string pendingLabelType = ""  // "slope", "thrd"
+var int    pendingLabelDir  = 0
+var bool   pendingLabelDeep = false
+var string pendingLabelType = ""
 
 //=============================
-// THRD reversal entry — fires one bar after THRD exit, bypasses all normal filters
+// THRD reversal entry
 //=============================
 if thrdReversalPending and not inTrade and cooldown == 0 and not eodClose and time >= startDate and time <= endDate
     thrdReversalPending := false
-    deepBlockDir        := 0  // THRD reversal clears deep block
+    deepBlockDir        := 0
     entryWasDeep        := false
     _slAmt = enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
     if thrdReversalDir == 1
@@ -409,28 +388,22 @@ if thrdReversalPending and not inTrade and cooldown == 0 and not eodClose and ti
         pendingLabelType := "thrd"
 
 //=============================
-// Deep block — after a profitable deep trade, clear block when price revisits best price
+// Deep block
 //=============================
 if enableDeepBlock and deepBlockDir != 0 and not na(deepBestPrice)
-    // Long deep profit: wait for price to rise back to the high reached
-    // Short deep profit: wait for price to fall back to the low reached
     if (deepBlockDir == 1 and high >= deepBestPrice) or (deepBlockDir == -1 and low <= deepBestPrice)
         deepBlockDir  := 0
         deepBestPrice := na
 
-// shallow entries blocked while deep block is active
 inDeepBlock = enableDeepBlock and deepBlockDir != 0
 
 //=============================
 // Entry signals
-// legSlope < -slopeEntry → downtrend → enter LONG (mean reversion / reversal)
-// legSlope >  slopeEntry → uptrend   → enter SHORT
 //=============================
 canTrade  = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and not ethOpenBlock and time >= startDate and time <= endDate and not na(legSlope)
 bigEnough = not enableBodyFilter or (math.abs(close - open) >= minBodyPts)
 isDeepSignal = math.abs(legSlope) >= deepSlope
 
-// After a deep loss in one direction, only allow re-entry in that direction if it's a deep signal
 deepLossBlockLong  = deepLossBlockDir == 1  and not isDeepSignal
 deepLossBlockShort = deepLossBlockDir == -1 and not isDeepSignal
 
@@ -441,7 +414,7 @@ if bullEntry
     tp  = close + tpPts * tpMult
     _slPrice = close - (enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts)
     strategy.entry("Long",  strategy.long,  comment="S↑")
-    strategy.exit("Exit-Long",  "Long",  stop=_slPrice, limit=tp)  // stop pins fill at SL price — no gap slippage
+    strategy.exit("Exit-Long",  "Long",  stop=_slPrice, limit=tp)
     slExitDir    := 0
     slBarrier    := na
     slEntryPrice := na
@@ -456,8 +429,8 @@ if bullEntry
     activeSL    := enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
     _isDeep     = math.abs(legSlope) >= deepSlope
     entryWasDeep := _isDeep
-    deepBlockDir     := 0  // new trade clears any prior deep block
-    deepLossBlockDir := 0  // new trade clears deep-loss block
+    deepBlockDir     := 0
+    deepLossBlockDir := 0
     pendingLabelDir  := 1
     pendingLabelDeep := _isDeep
     pendingLabelType := "slope"
@@ -466,7 +439,7 @@ else if bearEntry
     tp  = close - tpPts * tpMult
     _slPrice = close + (enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts)
     strategy.entry("Short", strategy.short, comment="S↓")
-    strategy.exit("Exit-Short", "Short", stop=_slPrice, limit=tp)  // stop pins fill at SL price — no gap slippage
+    strategy.exit("Exit-Short", "Short", stop=_slPrice, limit=tp)
     slExitDir    := 0
     slBarrier    := na
     slEntryPrice := na
@@ -481,14 +454,14 @@ else if bearEntry
     activeSL   := enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
     _isDeep    = math.abs(legSlope) >= deepSlope
     entryWasDeep := _isDeep
-    deepBlockDir     := 0  // new trade clears any prior deep block
-    deepLossBlockDir := 0  // new trade clears deep-loss block
+    deepBlockDir     := 0
+    deepLossBlockDir := 0
     pendingLabelDir  := -1
     pendingLabelDeep := _isDeep
     pendingLabelType := "slope"
 
 //=============================
-// Entry labels — drawn at bar close to avoid tick-based repaint
+// Entry labels — drawn at bar close to avoid repaint from tick-dependent isDoji
 //=============================
 if barstate.isconfirmed and pendingLabelDir != 0
     if pendingLabelType == "thrd"
@@ -513,9 +486,8 @@ trailFired := false
 
 if tradeDir == 1 and strategy.position_size != 0
     bestPrice := na(bestPrice) ? high : math.max(bestPrice, high)
-    exitBestPrice := bestPrice  // keep snapshot current while in trade
+    exitBestPrice := bestPrice
     if bestPrice - entryPrice >= trailTrigger
-        // wider trail when slope still strongly in favour (continuing down = still mean-reverting up)
         _activeDist = (not na(legSlope) and legSlope <= -deepSlope) ? trailDistStrong : trailDist
         trailStop := math.max(na(trailStop) ? bestPrice - _activeDist : trailStop, bestPrice - _activeDist)
     if not na(trailStop) and low <= trailStop
@@ -530,9 +502,8 @@ if tradeDir == 1 and strategy.position_size != 0
 
 else if tradeDir == -1 and strategy.position_size != 0
     bestPrice := na(bestPrice) ? low : math.min(bestPrice, low)
-    exitBestPrice := bestPrice  // keep snapshot current while in trade
+    exitBestPrice := bestPrice
     if entryPrice - bestPrice >= trailTrigger
-        // wider trail when slope strongly confirms short direction (deeply negative = price falling)
         _activeDist = (not na(legSlope) and legSlope <= -deepSlope) ? trailDistStrong : trailDist
         trailStop := math.min(na(trailStop) ? bestPrice + _activeDist : trailStop, bestPrice + _activeDist)
     if not na(trailStop) and high >= trailStop
@@ -550,7 +521,7 @@ else
     bestPrice := na
 
 //=============================
-// Exit labels — all based on position actually closing
+// Exit labels
 //=============================
 posClosed = strategy.position_size == 0 and strategy.position_size[1] != 0
 if posClosed
@@ -564,13 +535,11 @@ if posClosed
     isSL    = not isTrail and not isTExp and not isTHrd and not isBlk and not isEOD and not isTP
     wasLong = tradeDir[1] == 1
 
-    // Set deep block when a deep trade exits with profit (any exit type — trail, TP, texp)
     _lastTradeProfit = strategy.closedtrades.profit(strategy.closedtrades - 1)
     if enableDeepBlock and entryWasDeep and _lastTradeProfit > 0
         deepBlockDir  := wasLong ? 1 : -1
-        deepBestPrice := exitBestPrice[1]  // best price from previous bar (last bar of the trade)
+        deepBestPrice := exitBestPrice[1]
 
-    // After deep loss: block re-entry in same direction unless next signal is also deep
     if entryWasDeep and _lastTradeProfit <= 0
         deepLossBlockDir := wasLong ? 1 : -1
 
@@ -625,11 +594,11 @@ if posClosed
                   size      = size.small)
 
 //=============================
-// No-traction trade tracker — avg bars held for SL/THRD/TEXP/BLK exits
+// No-traction trade tracker
 //=============================
-var int   noTractCount    = 0    // number of no-traction closes so far
-var float noTractBarsSum  = 0.0  // running sum of bars held
-var float avgNoTractBars  = na   // rolling average — updates on each no-traction exit
+var int   noTractCount    = 0
+var float noTractBarsSum  = 0.0
+var float avgNoTractBars  = na
 
 if posClosed
     exitComment2  = strategy.closedtrades.exit_comment(strategy.closedtrades - 1)
@@ -681,7 +650,7 @@ var table statsTable = table.new(position.bottom_right, 2, 5,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Helsinki",           text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "15m",                  text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
@@ -701,10 +670,8 @@ if barstate.islast
 
 //=============================
 // Alerts — JSON payloads for webhook REST API
-// In TradingView alert dialog: paste your webhook URL, set message to {{alert_message}}
 //=============================
 
-// Entry alerts
 if tradeDir == 1 and tradeDir[1] == 0
     _sl = entryPrice - activeSL
     _tp = entryPrice + tpPts * tpMult
@@ -729,7 +696,6 @@ if tradeDir == -1 and tradeDir[1] == 0
           ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "America/Chicago") + '"' +
           '}', alert.freq_once_per_bar)
 
-// Exit alerts — minimal payload, FastAPI uses this to close open orders
 if posClosed
     _exitSide    = tradeDir[1] == 1 ? "long" : "short"
     _exitComment = strategy.closedtrades.exit_comment(strategy.closedtrades - 1)
