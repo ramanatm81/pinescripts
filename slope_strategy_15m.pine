@@ -363,9 +363,10 @@ if thrdReversalPending and not inTrade and cooldown == 0 and not eodClose and ti
         bestPrice    := na
         inTrade      := true
         activeSL     := _slAmt
-        pendingLabelDir  := 1
-        pendingLabelDeep := false
-        pendingLabelType := "thrd"
+        if pendingLabelDir == 0
+            pendingLabelDir  := 1
+            pendingLabelDeep := false
+            pendingLabelType := "thrd"
     else if thrdReversalDir == -1
         _tp      = close - tpPts * tpMult
         _slPrice = close + _slAmt
@@ -383,9 +384,10 @@ if thrdReversalPending and not inTrade and cooldown == 0 and not eodClose and ti
         bestPrice    := na
         inTrade      := true
         activeSL     := _slAmt
-        pendingLabelDir  := -1
-        pendingLabelDeep := false
-        pendingLabelType := "thrd"
+        if pendingLabelDir == 0
+            pendingLabelDir  := -1
+            pendingLabelDeep := false
+            pendingLabelType := "thrd"
 
 //=============================
 // Deep block
@@ -431,9 +433,10 @@ if bullEntry
     entryWasDeep := _isDeep
     deepBlockDir     := 0
     deepLossBlockDir := 0
-    pendingLabelDir  := 1
-    pendingLabelDeep := _isDeep
-    pendingLabelType := "slope"
+    if pendingLabelDir == 0
+        pendingLabelDir  := 1
+        pendingLabelDeep := _isDeep
+        pendingLabelType := "slope"
 
 else if bearEntry
     tp  = close - tpPts * tpMult
@@ -456,9 +459,10 @@ else if bearEntry
     entryWasDeep := _isDeep
     deepBlockDir     := 0
     deepLossBlockDir := 0
-    pendingLabelDir  := -1
-    pendingLabelDeep := _isDeep
-    pendingLabelType := "slope"
+    if pendingLabelDir == 0
+        pendingLabelDir  := -1
+        pendingLabelDeep := _isDeep
+        pendingLabelType := "slope"
 
 //=============================
 // Entry labels — drawn at bar close to avoid repaint from tick-dependent isDoji

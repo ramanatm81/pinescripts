@@ -384,9 +384,10 @@ if thrdReversalPending and not inTrade and cooldown == 0 and not eodClose and ti
         bestPrice    := na
         inTrade      := true
         activeSL     := _slAmt
-        pendingLabelDir  := 1
-        pendingLabelDeep := false
-        pendingLabelType := "thrd"
+        if pendingLabelDir == 0
+            pendingLabelDir  := 1
+            pendingLabelDeep := false
+            pendingLabelType := "thrd"
     else if thrdReversalDir == -1
         _tp      = close - tpPts * tpMult
         _slPrice = close + _slAmt
@@ -404,9 +405,10 @@ if thrdReversalPending and not inTrade and cooldown == 0 and not eodClose and ti
         bestPrice    := na
         inTrade      := true
         activeSL     := _slAmt
-        pendingLabelDir  := -1
-        pendingLabelDeep := false
-        pendingLabelType := "thrd"
+        if pendingLabelDir == 0
+            pendingLabelDir  := -1
+            pendingLabelDeep := false
+            pendingLabelType := "thrd"
 
 //=============================
 // Deep block — after a profitable deep trade, clear block when price revisits best price
@@ -458,9 +460,10 @@ if bullEntry
     entryWasDeep := _isDeep
     deepBlockDir     := 0  // new trade clears any prior deep block
     deepLossBlockDir := 0  // new trade clears deep-loss block
-    pendingLabelDir  := 1
-    pendingLabelDeep := _isDeep
-    pendingLabelType := "slope"
+    if pendingLabelDir == 0
+        pendingLabelDir  := 1
+        pendingLabelDeep := _isDeep
+        pendingLabelType := "slope"
 
 else if bearEntry
     tp  = close - tpPts * tpMult
@@ -483,9 +486,10 @@ else if bearEntry
     entryWasDeep := _isDeep
     deepBlockDir     := 0  // new trade clears any prior deep block
     deepLossBlockDir := 0  // new trade clears deep-loss block
-    pendingLabelDir  := -1
-    pendingLabelDeep := _isDeep
-    pendingLabelType := "slope"
+    if pendingLabelDir == 0
+        pendingLabelDir  := -1
+        pendingLabelDeep := _isDeep
+        pendingLabelType := "slope"
 
 //=============================
 // Entry labels — drawn at bar close to avoid tick-based repaint
@@ -681,7 +685,7 @@ var table statsTable = table.new(position.bottom_right, 2, 5,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Helsinki v2",        text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Helsinki v3",        text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
