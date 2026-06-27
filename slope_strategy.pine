@@ -681,7 +681,7 @@ var table statsTable = table.new(position.bottom_right, 2, 5,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Helsinki",           text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Helsinki v2",        text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
