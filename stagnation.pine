@@ -10,7 +10,7 @@ legLookback = input.int(20,   "Leg lookback (bars to find pivot)",     minval=3,
 legPts      = input.float(15.0,"Min leg size (pts from pivot to stall)",minval=0.5, step=0.5, group="Leg")
 showBox     = input.bool(true, "Draw box around stall zone",            group="Display")
 showLabel   = input.bool(true, "Show direction label",                  group="Display")
-showPivot   = input.bool(true, "Mark pivot low/high (leg origin)",      group="Display")
+showPivot   = input.bool(false,"Mark pivot low/high (leg origin)",      group="Display")
 
 //=============================
 // Stall — last stallBars closes sit within bandPts of each other
