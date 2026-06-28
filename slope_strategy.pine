@@ -356,7 +356,7 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
         barsInTrade := 0
 
 //=============================
-// THRD reversal entry — fires one bar after THRD exit, bypasses all normal filters
+// THRD reversal entry — fires two bars after THRD exit (cooldown 2→1→0), bypasses all normal filters
 //=============================
 if thrdReversalPending and not inTrade and cooldown == 0 and not eodClose and time >= startDate and time <= endDate
     thrdReversalPending := false
@@ -422,9 +422,11 @@ canTrade  = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock a
 bigEnough = not enableBodyFilter or (math.abs(close - open) >= minBodyPts)
 isDeepSignal = math.abs(legSlope) >= deepSlope
 
-// After a deep loss in one direction, only allow re-entry in that direction if it's a deep signal
-deepLossBlockLong  = deepLossBlockDir == 1  and not isDeepSignal
-deepLossBlockShort = deepLossBlockDir == -1 and not isDeepSignal
+// After a deep loss in one direction, block ALL same-direction re-entries (deep or
+// shallow) — only the opposite side may trade. Clears when an opposite trade fires
+// (line ~452/480 sets deepLossBlockDir := 0) or at EOD reset.
+deepLossBlockLong  = deepLossBlockDir == 1
+deepLossBlockShort = deepLossBlockDir == -1
 
 bullEntry = canTrade and bigEnough and not inFractalDrought and legSlope < -slopeEntry and slExitDir != 1  and not srBlockLong  and (not inDeepBlock or isDeepSignal) and not deepLossBlockLong
 bearEntry = canTrade and bigEnough and not inFractalDrought and legSlope >  slopeEntry and slExitDir != -1 and not srBlockShort and (not inDeepBlock or isDeepSignal) and not deepLossBlockShort
@@ -662,7 +664,7 @@ var table statsTable = table.new(position.bottom_right, 2, 5,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Helsinki v7",        text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Helsinki v8",        text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
