@@ -6,6 +6,7 @@ indicator("Stagnation After Leg", overlay=true, max_labels_count=500, max_boxes_
 //=============================
 stallBars   = input.int(6,    "Stall window (bars of tight closes)",   minval=2,  maxval=50,  group="Stall")
 bandPts     = input.float(20.0,"Stall band width (pts, max close spread)", minval=0.5, step=0.5, group="Stall")
+maxStepPts  = input.float(15.0,"Max single close-to-close step (pts) — rejects rips/grinds", minval=0.5, step=0.5, group="Stall")
 legLookback = input.int(20,   "Leg lookback (bars to find pivot)",     minval=3,  maxval=200, group="Leg")
 legPts      = input.float(15.0,"Min leg size (pts from pivot to stall)",minval=0.5, step=0.5, group="Leg")
 showBox     = input.bool(true, "Draw box around stall zone",            group="Display")
@@ -17,7 +18,16 @@ showPivot   = input.bool(false,"Mark pivot low/high (leg origin)",      group="D
 //=============================
 stallHi = ta.highest(close, stallBars)
 stallLo = ta.lowest(close, stallBars)
-isTight = (stallHi - stallLo) <= bandPts
+// No big step: a genuine stall moves in small increments. A grind or rip
+// contains at least one large close-to-close jump even if the overall spread
+// is tight. Reject the window if its biggest single step exceeds maxStepPts.
+maxStep = 0.0
+for i = 0 to stallBars - 2
+    _step = math.abs(close[i] - close[i + 1])
+    if _step > maxStep
+        maxStep := _step
+smallSteps = maxStep <= maxStepPts
+isTight = (stallHi - stallLo) <= bandPts and smallSteps
 
 //=============================
 // Leg context
@@ -80,6 +90,7 @@ if freshStall and showPivot
 //=============================
 // Data window
 //=============================
+plot(maxStep,                  "maxStep",   color=color.fuchsia,display=display.data_window)
 plot(isTight ? 1 : 0,          "isTight",   color=color.gray,   display=display.data_window)
 plot(bouncePts,                "bouncePts", color=color.orange, display=display.data_window)
 plot(dropPts,                  "dropPts",   color=color.teal,   display=display.data_window)
