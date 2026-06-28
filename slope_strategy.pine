@@ -6,19 +6,19 @@ strategy("Slope Strategy", overlay=true, max_labels_count=500, max_bars_back=500
 // Inputs
 //=============================
 lookback     = 10  // fixed rolling window for slope calculation
-slopeEntry   = input.float(1.7, "Slope threshold (entry trigger)",        minval=0.1, step=0.1)
+slopeEntry   = input.float(2.5, "Slope threshold (entry trigger)",        minval=0.1, step=0.1)
 slPts        = input.float(50.0,"Stop Loss (pts from entry) — fallback when SMA SL disabled", minval=0.5, step=0.5)
 enableSmaSL  = input.bool(true,  "Dynamic SL based on SMA",                                   group="SMA Stop Loss")
 smaPeriod    = input.int(9,      "SMA period",              minval=2,   maxval=500,            group="SMA Stop Loss")
 slAboveSma   = input.float(50.0, "SL when close > SMA (upward, pts)",  minval=0.5, step=0.5,  group="SMA Stop Loss")
 slBelowSma   = input.float(30.0, "SL when close < SMA (downward, pts)",minval=0.5, step=0.5,  group="SMA Stop Loss")
-tpPts        = input.float(40.0,"TP base (pts from entry)",               minval=0.5, step=1.0)
+tpPts        = input.float(50.0,"TP base (pts from entry)",               minval=0.5, step=1.0)
 tpMult       = input.float(3.0, "TP multiplier (× TP base)",              minval=0.1, step=0.1)
 trailTrigger     = input.float(30.0,"Trail trigger (points profit)",                        minval=1.0, step=0.5,  group="Trailing Stop")
-trailDist        = input.float(10.0,"Trail distance — normal (points)",                     minval=1.0, step=0.5,  group="Trailing Stop")
+trailDist        = input.float(8.0, "Trail distance — normal (points)",                     minval=1.0, step=0.5,  group="Trailing Stop")
 trailDistStrong  = input.float(10.0,"Trail distance — strong slope (points, wider room)",   minval=1.0, step=0.5,  group="Trailing Stop")
 enableTExp   = input.bool(true, "Enable time expiry exit",                                       group="Time Expiry")
-tExpBars     = input.int(30,    "Max bars in trade (exit if profitable)",  minval=1,  maxval=500, group="Time Expiry")
+tExpBars     = input.int(20,    "Max bars in trade (exit if profitable)",  minval=1,  maxval=500, group="Time Expiry")
 enableTExpHard   = input.bool(true, "Enable hard time expiry (exit even if loss, slope against)", group="Time Expiry")
 tExpHardBars     = input.int(20,    "Hard max bars (exit if slope against trade)",                minval=1,  maxval=500, group="Time Expiry")
 tExpHardSlope    = input.float(1.0, "Slope 'against' threshold for hard exit",                   minval=0.1, step=0.1,  group="Time Expiry")
@@ -677,7 +677,7 @@ var table statsTable = table.new(position.bottom_right, 2, 5,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Sapporo",            text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Fukuoka",            text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
