@@ -28,7 +28,7 @@ dojiPct      = input.float(10.0,"Doji body % of range (excluded from R²)", minv
 cooldownBars    = input.int(10, "Cooldown bars after exit — ETH (0 = none)", minval=0,  maxval=50,           group="R² Filter")
 cooldownBarsRTH = input.int(10, "Cooldown bars after exit — RTH (0 = none)", minval=0,  maxval=50,           group="R² Filter")
 deepSlope    = input.float(3.0, "Deep slope threshold (D↑/D↓ label)",              minval=0.5, step=0.1,    group="R² Filter")
-deepLossSmaGate = input.bool(false, "After deep loss, gate same-side re-entry by SMA side (long needs close>SMA, short needs close<SMA)", group="R² Filter")
+deepLossConfirmPts = input.float(20.0, "After deep loss, points price must move past exit before same-side re-entry", minval=0.0, step=1.0, group="R² Filter")
 enableBodyFilter = input.bool(false, "Block entry if signal bar body < min size",                          group="R² Filter")
 minBodyPts       = input.float(10.0, "Min body size (pts)",               minval=0.5, step=0.5,            group="R² Filter")
 enableSRFilter   = input.bool(true,  "Block entries near S/R pivots",                            group="S/R Filter")
@@ -189,7 +189,8 @@ var float deepBestPrice       = na     // best price reached in last profitable 
 var int   deepBlockDir        = 0      // 1=Long deep exited profit (wait for high), -1=Short deep exited profit (wait for low)
 var bool  entryWasDeep        = false  // true if current/last trade was a deep entry
 var float exitBestPrice       = na     // bestPrice snapshot at the moment of exit
-var int   deepLossBlockDir    = 0      // after deep loss: block same-dir shallow entries (1=Long blocked, -1=Short blocked)
+var int   deepLossBlockDir    = 0      // after deep loss: block same-dir re-entry (1=Long blocked, -1=Short blocked)
+var float deepLossExitPrice   = na     // exit price of the deep loss — re-entry waits until price moves deepLossConfirmPts past this
 
 //=============================
 // Trade leg slope buffer — accumulates close prices from entry bar onward
@@ -304,6 +305,7 @@ if eodClose
     barrierBuf       := na
     barrierCool      := 0
     deepLossBlockDir := 0
+    deepLossExitPrice := na
 
 //=============================
 // Sync on TP/SL close
@@ -501,14 +503,14 @@ canTrade  = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock a
 bigEnough = not enableBodyFilter or (math.abs(close - open) >= minBodyPts)
 isDeepSignal = math.abs(legSlope) >= deepSlope
 
-// After a deep loss in one direction, gate same-side re-entry.
-//   deepLossSmaGate OFF → allow same-side re-entry only on a deep signal (original behavior)
-//   deepLossSmaGate ON  → allow same-side re-entry only when price is on the favouring SMA side
-//                         (long needs close > SMA, short needs close < SMA); slope depth ignored
-deepLossAllowLong  = deepLossSmaGate ? (close > smaVal) : isDeepSignal
-deepLossAllowShort = deepLossSmaGate ? (close < smaVal) : isDeepSignal
-deepLossBlockLong  = deepLossBlockDir == 1  and not deepLossAllowLong
-deepLossBlockShort = deepLossBlockDir == -1 and not deepLossAllowShort
+// After a deep loss, block same-side re-entry until price moves deepLossConfirmPts
+// PAST the loss exit (proving the turn). Opposite side stays allowed.
+//   deep LONG loss  → block longs  until close > exitPrice + confirm
+//   deep SHORT loss → block shorts until close < exitPrice - confirm
+deepLossLongConfirmed  = not na(deepLossExitPrice) and close > deepLossExitPrice + deepLossConfirmPts
+deepLossShortConfirmed = not na(deepLossExitPrice) and close < deepLossExitPrice - deepLossConfirmPts
+deepLossBlockLong  = deepLossBlockDir == 1  and not deepLossLongConfirmed
+deepLossBlockShort = deepLossBlockDir == -1 and not deepLossShortConfirmed
 
 bullEntry = canTrade and bigEnough and not inFractalDrought and legSlope < -slopeEntry and slExitDir != 1  and not srBlockLong  and (not inDeepBlock or isDeepSignal) and not deepLossBlockLong  and not stallBlockLong
 bearEntry = canTrade and bigEnough and not inFractalDrought and legSlope >  slopeEntry and slExitDir != -1 and not srBlockShort and (not inDeepBlock or isDeepSignal) and not deepLossBlockShort and not stallBlockShort
@@ -534,6 +536,7 @@ if bullEntry
     entryWasDeep := _isDeep
     deepBlockDir     := 0  // new trade clears any prior deep block
     deepLossBlockDir := 0  // new trade clears deep-loss block
+    deepLossExitPrice := na
     label.new(bar_index, low,
               text      = _isDeep ? "D↑" : "S↑",
               style     = label.style_label_up,
@@ -562,6 +565,7 @@ else if bearEntry
     entryWasDeep := _isDeep
     deepBlockDir     := 0  // new trade clears any prior deep block
     deepLossBlockDir := 0  // new trade clears deep-loss block
+    deepLossExitPrice := na
     label.new(bar_index, high,
               text      = _isDeep ? "D↓" : "S↓",
               style     = label.style_label_down,
@@ -635,9 +639,11 @@ if posClosed
         deepBlockDir  := wasLong ? 1 : -1
         deepBestPrice := exitBestPrice[1]  // best price from previous bar (last bar of the trade)
 
-    // After deep loss: block re-entry in same direction unless next signal is also deep
+    // After deep loss: block same-direction re-entry until price moves
+    // deepLossConfirmPts past the loss exit (proves the turn). Capture exit price.
     if entryWasDeep and _lastTradeProfit <= 0
-        deepLossBlockDir := wasLong ? 1 : -1
+        deepLossBlockDir  := wasLong ? 1 : -1
+        deepLossExitPrice := strategy.closedtrades.exit_price(strategy.closedtrades - 1)
 
     if isEOD
         label.new(bar_index, wasLong ? low : high,
@@ -758,7 +764,7 @@ var table statsTable = table.new(position.bottom_right, 2, 5,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Kyoto",              text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Osaka",              text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
