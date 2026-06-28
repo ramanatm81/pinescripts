@@ -28,8 +28,7 @@ dojiPct      = input.float(10.0,"Doji body % of range (excluded from R²)", minv
 cooldownBars    = input.int(10, "Cooldown bars after exit — ETH (0 = none)", minval=0,  maxval=50,           group="R² Filter")
 cooldownBarsRTH = input.int(10, "Cooldown bars after exit — RTH (0 = none)", minval=0,  maxval=50,           group="R² Filter")
 deepSlope    = input.float(3.0, "Deep slope threshold (D↑/D↓ label)",              minval=0.5, step=0.1,    group="R² Filter")
-enableDeepLossConfirm = input.bool(false, "After deep loss, require price to confirm turn before same-side re-entry (else: block shallow only)", group="R² Filter")
-deepLossConfirmPts    = input.float(20.0, "  └ Points price must move past loss exit to confirm", minval=0.0, step=1.0, group="R² Filter")
+enableDeepLossOppBlock = input.bool(false, "After deep loss, block ALL trades until an opposite-direction deep signal fires", group="R² Filter")
 enableBodyFilter = input.bool(false, "Block entry if signal bar body < min size",                          group="R² Filter")
 minBodyPts       = input.float(10.0, "Min body size (pts)",               minval=0.5, step=0.5,            group="R² Filter")
 enableSRFilter   = input.bool(true,  "Block entries near S/R pivots",                            group="S/R Filter")
@@ -131,8 +130,7 @@ var float deepBestPrice       = na     // best price reached in last profitable 
 var int   deepBlockDir        = 0      // 1=Long deep exited profit (wait for high), -1=Short deep exited profit (wait for low)
 var bool  entryWasDeep        = false  // true if current/last trade was a deep entry
 var float exitBestPrice       = na     // bestPrice snapshot at the moment of exit
-var int   deepLossBlockDir    = 0      // after deep loss: block same-dir re-entry (1=Long blocked, -1=Short blocked)
-var float deepLossExitPrice   = na     // exit price of the deep loss — re-entry waits until price moves deepLossConfirmPts past this
+var int   deepLossBlockDir    = 0      // after deep loss: 1=last deep loss was LONG, -1=was SHORT. While set (opp-block mode), ALL entries blocked until an opposite deep signal fires.
 
 //=============================
 // Trade leg slope buffer — accumulates close prices from entry bar onward
@@ -228,7 +226,6 @@ if eodClose
     barrierBuf       := na
     barrierCool      := 0
     deepLossBlockDir := 0
-    deepLossExitPrice := na
 
 //=============================
 // Sync on TP/SL close
@@ -426,16 +423,22 @@ canTrade  = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock a
 bigEnough = not enableBodyFilter or (math.abs(close - open) >= minBodyPts)
 isDeepSignal = math.abs(legSlope) >= deepSlope
 
-// After a deep loss, gate same-side re-entry.
-//   enableDeepLossConfirm ON  → block until price moves deepLossConfirmPts PAST the
-//                               loss exit (proving the turn). Opposite side stays open.
-//   enableDeepLossConfirm OFF → block only shallow same-dir re-entries (deep signals pass).
-deepLossLongConfirmed  = not na(deepLossExitPrice) and close > deepLossExitPrice + deepLossConfirmPts
-deepLossShortConfirmed = not na(deepLossExitPrice) and close < deepLossExitPrice - deepLossConfirmPts
-deepLossAllowLong  = enableDeepLossConfirm ? deepLossLongConfirmed  : isDeepSignal
-deepLossAllowShort = enableDeepLossConfirm ? deepLossShortConfirmed : isDeepSignal
-deepLossBlockLong  = deepLossBlockDir == 1  and not deepLossAllowLong
-deepLossBlockShort = deepLossBlockDir == -1 and not deepLossAllowShort
+// After a deep loss, gate re-entry. Two modes via enableDeepLossOppBlock:
+//   ON  → block ALL entries until an OPPOSITE-direction deep signal fires.
+//         deep LONG loss (dir=1)  → only a deep SHORT signal trades & unlocks
+//         deep SHORT loss (dir=-1)→ only a deep LONG signal trades & unlocks
+//   OFF → original: block only shallow same-direction re-entries (deep signals pass).
+deepLossBlockLong  = false
+deepLossBlockShort = false
+if deepLossBlockDir != 0
+    if enableDeepLossOppBlock
+        // dir=1 (deep long loss): block longs entirely; allow only deep shorts
+        // dir=-1 (deep short loss): block shorts entirely; allow only deep longs
+        deepLossBlockLong  := deepLossBlockDir == 1 or (deepLossBlockDir == -1 and not isDeepSignal)
+        deepLossBlockShort := deepLossBlockDir == -1 or (deepLossBlockDir == 1 and not isDeepSignal)
+    else
+        deepLossBlockLong  := deepLossBlockDir == 1  and not isDeepSignal
+        deepLossBlockShort := deepLossBlockDir == -1 and not isDeepSignal
 
 bullEntry = canTrade and bigEnough and not inFractalDrought and legSlope < -slopeEntry and slExitDir != 1  and not srBlockLong  and (not inDeepBlock or isDeepSignal) and not deepLossBlockLong
 bearEntry = canTrade and bigEnough and not inFractalDrought and legSlope >  slopeEntry and slExitDir != -1 and not srBlockShort and (not inDeepBlock or isDeepSignal) and not deepLossBlockShort
@@ -461,7 +464,6 @@ if bullEntry
     entryWasDeep := _isDeep
     deepBlockDir     := 0  // new trade clears any prior deep block
     deepLossBlockDir := 0  // new trade clears deep-loss block
-    deepLossExitPrice := na
     label.new(bar_index, low,
               text      = _isDeep ? "D↑" : "S↑",
               style     = label.style_label_up,
@@ -490,7 +492,6 @@ else if bearEntry
     entryWasDeep := _isDeep
     deepBlockDir     := 0  // new trade clears any prior deep block
     deepLossBlockDir := 0  // new trade clears deep-loss block
-    deepLossExitPrice := na
     label.new(bar_index, high,
               text      = _isDeep ? "D↓" : "S↓",
               style     = label.style_label_down,
@@ -563,11 +564,10 @@ if posClosed
         deepBlockDir  := wasLong ? 1 : -1
         deepBestPrice := exitBestPrice[1]  // best price from previous bar (last bar of the trade)
 
-    // After deep loss: block same-direction re-entry until price moves
-    // deepLossConfirmPts past the loss exit (proves the turn). Capture exit price.
+    // After deep loss: record the direction. In opp-block mode this blocks ALL
+    // entries until an opposite deep signal fires; cleared when any new trade opens.
     if entryWasDeep and _lastTradeProfit <= 0
-        deepLossBlockDir  := wasLong ? 1 : -1
-        deepLossExitPrice := strategy.closedtrades.exit_price(strategy.closedtrades - 1)
+        deepLossBlockDir := wasLong ? 1 : -1
 
     if isEOD
         label.new(bar_index, wasLong ? low : high,
@@ -677,7 +677,7 @@ var table statsTable = table.new(position.bottom_right, 2, 5,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Nagoya",             text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Sapporo",            text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
