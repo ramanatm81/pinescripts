@@ -28,6 +28,7 @@ dojiPct      = input.float(10.0,"Doji body % of range (excluded from R²)", minv
 cooldownBars    = input.int(10, "Cooldown bars after exit — ETH (0 = none)", minval=0,  maxval=50,           group="R² Filter")
 cooldownBarsRTH = input.int(10, "Cooldown bars after exit — RTH (0 = none)", minval=0,  maxval=50,           group="R² Filter")
 deepSlope    = input.float(3.0, "Deep slope threshold (D↑/D↓ label)",              minval=0.5, step=0.1,    group="R² Filter")
+deepLossSmaGate = input.bool(false, "After deep loss, gate same-side re-entry by SMA side (long needs close>SMA, short needs close<SMA)", group="R² Filter")
 enableBodyFilter = input.bool(false, "Block entry if signal bar body < min size",                          group="R² Filter")
 minBodyPts       = input.float(10.0, "Min body size (pts)",               minval=0.5, step=0.5,            group="R² Filter")
 enableSRFilter   = input.bool(true,  "Block entries near S/R pivots",                            group="S/R Filter")
@@ -422,9 +423,14 @@ canTrade  = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock a
 bigEnough = not enableBodyFilter or (math.abs(close - open) >= minBodyPts)
 isDeepSignal = math.abs(legSlope) >= deepSlope
 
-// After a deep loss in one direction, only allow re-entry in that direction if it's a deep signal
-deepLossBlockLong  = deepLossBlockDir == 1  and not isDeepSignal
-deepLossBlockShort = deepLossBlockDir == -1 and not isDeepSignal
+// After a deep loss in one direction, gate same-side re-entry.
+//   deepLossSmaGate OFF → allow same-side re-entry only on a deep signal (original behavior)
+//   deepLossSmaGate ON  → allow same-side re-entry only when price is on the favouring SMA side
+//                         (long needs close > SMA, short needs close < SMA); slope depth ignored
+deepLossAllowLong  = deepLossSmaGate ? (close > smaVal) : isDeepSignal
+deepLossAllowShort = deepLossSmaGate ? (close < smaVal) : isDeepSignal
+deepLossBlockLong  = deepLossBlockDir == 1  and not deepLossAllowLong
+deepLossBlockShort = deepLossBlockDir == -1 and not deepLossAllowShort
 
 bullEntry = canTrade and bigEnough and not inFractalDrought and legSlope < -slopeEntry and slExitDir != 1  and not srBlockLong  and (not inDeepBlock or isDeepSignal) and not deepLossBlockLong
 bearEntry = canTrade and bigEnough and not inFractalDrought and legSlope >  slopeEntry and slExitDir != -1 and not srBlockShort and (not inDeepBlock or isDeepSignal) and not deepLossBlockShort
@@ -662,7 +668,7 @@ var table statsTable = table.new(position.bottom_right, 2, 5,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Helsinki v9",        text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Helsinki v10",       text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
