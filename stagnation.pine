@@ -1,0 +1,96 @@
+//@version=6
+indicator("Stagnation After Leg", overlay=true, max_labels_count=500, max_boxes_count=500)
+
+//=============================
+// Inputs
+//=============================
+stallBars   = input.int(6,    "Stall window (bars of tight closes)",   minval=2,  maxval=50,  group="Stall")
+bandPts     = input.float(20.0,"Stall band width (pts, max close spread)", minval=0.5, step=0.5, group="Stall")
+legLookback = input.int(20,   "Leg lookback (bars to find pivot)",     minval=3,  maxval=200, group="Leg")
+legPts      = input.float(15.0,"Min leg size (pts from pivot to stall)",minval=0.5, step=0.5, group="Leg")
+showBox     = input.bool(true, "Draw box around stall zone",            group="Display")
+showLabel   = input.bool(true, "Show direction label",                  group="Display")
+showPivot   = input.bool(true, "Mark pivot low/high (leg origin)",      group="Display")
+
+//=============================
+// Stall — last stallBars closes sit within bandPts of each other
+//=============================
+stallHi = ta.highest(close, stallBars)
+stallLo = ta.lowest(close, stallBars)
+isTight = (stallHi - stallLo) <= bandPts
+
+//=============================
+// Leg context
+//   bounce-up: tight cluster sits >= legPts ABOVE the lowest low of the wider window
+//   drop-down: tight cluster sits >= legPts BELOW the highest high of the wider window
+// priorLow/High are measured over legLookback bars ending at the start of the stall
+//=============================
+priorLow  = ta.lowest(low,  legLookback)[stallBars]   // lowest low BEFORE the stall window
+priorHigh = ta.highest(high, legLookback)[stallBars]  // highest high BEFORE the stall window
+
+bouncePts = stallLo - priorLow    // how far the stall sits above the prior low
+dropPts   = priorHigh - stallHi   // how far the stall sits below the prior high
+
+// bars-ago offset of the pivot low/high within the pre-stall window (for marker placement)
+lowOffRaw  = ta.lowestbars(low,  legLookback)[stallBars]   // 0..-(legLookback-1), measured at [stallBars]
+highOffRaw = ta.highestbars(high, legLookback)[stallBars]
+pivotLowBarsAgo  = na(lowOffRaw)  ? na : stallBars - lowOffRaw   // total bars ago from current bar
+pivotHighBarsAgo = na(highOffRaw) ? na : stallBars - highOffRaw
+
+
+stalledAfterBounce = isTight and not na(priorLow)  and bouncePts >= legPts
+stalledAfterDrop   = isTight and not na(priorHigh) and dropPts   >= legPts
+
+//=============================
+// Fire once per fresh stall (avoid re-flagging every bar while still stalling)
+//=============================
+var bool wasStalling = false
+isStall   = stalledAfterBounce or stalledAfterDrop
+freshStall = isStall and not wasStalling
+wasStalling := isStall
+
+//=============================
+// Draw
+//=============================
+if freshStall and showBox
+    _left  = bar_index - (stallBars - 1)
+    _top   = stallHi
+    _bot   = stallLo
+    _col   = stalledAfterBounce ? color.new(color.orange, 80) : color.new(color.teal, 80)
+    box.new(_left, _top, bar_index, _bot, border_color=na, bgcolor=_col)
+
+if freshStall and showLabel
+    _txt = stalledAfterBounce ? "STALL ▲bounce" : "STALL ▼drop"
+    _y   = stalledAfterBounce ? stallHi : stallLo
+    _sty = stalledAfterBounce ? label.style_label_down : label.style_label_up
+    _lc  = stalledAfterBounce ? color.new(color.orange, 10) : color.new(color.teal, 10)
+    label.new(bar_index, _y, text=_txt, style=_sty, color=_lc, textcolor=color.white, size=size.small)
+
+// Mark the pivot the leg originated from (only on a fresh stall, so no flooding)
+if freshStall and showPivot
+    if stalledAfterBounce and not na(pivotLowBarsAgo)
+        label.new(bar_index - pivotLowBarsAgo, low[pivotLowBarsAgo],
+                  text="◢ pivot low", style=label.style_label_up,
+                  color=color.new(color.blue, 20), textcolor=color.white, size=size.tiny)
+    if stalledAfterDrop and not na(pivotHighBarsAgo)
+        label.new(bar_index - pivotHighBarsAgo, high[pivotHighBarsAgo],
+                  text="◤ pivot high", style=label.style_label_down,
+                  color=color.new(color.purple, 20), textcolor=color.white, size=size.tiny)
+
+//=============================
+// Data window
+//=============================
+plot(isTight ? 1 : 0,          "isTight",   color=color.gray,   display=display.data_window)
+plot(bouncePts,                "bouncePts", color=color.orange, display=display.data_window)
+plot(dropPts,                  "dropPts",   color=color.teal,   display=display.data_window)
+plot(stallHi - stallLo,        "stallSpread",color=color.white, display=display.data_window)
+plot(stalledAfterBounce ? 1 : 0, "afterBounce", color=color.orange, display=display.data_window)
+plot(stalledAfterDrop   ? 1 : 0, "afterDrop",   color=color.teal,   display=display.data_window)
+
+//=============================
+// Alerts
+//=============================
+if freshStall and stalledAfterBounce
+    alert("Stall after bounce — tight closes at " + str.tostring(stallHi, "#.##") + " (bounced " + str.tostring(bouncePts, "#") + " pts off low)", alert.freq_once_per_bar)
+if freshStall and stalledAfterDrop
+    alert("Stall after drop — tight closes at " + str.tostring(stallLo, "#.##") + " (dropped " + str.tostring(dropPts, "#") + " pts off high)", alert.freq_once_per_bar)
