@@ -37,6 +37,15 @@ srZoneWidth      = input.float(25.0, "Zone width (pts either side of pivot)", mi
 srLookback       = input.int(0,     "Pivot lookback (bars, 0=all)",   minval=0,   maxval=500,    group="S/R Filter")
 enableDroughtBlock = input.bool(false, "Block entry when no fractal for N bars (trending market)", group="S/R Filter")
 droughtBlockBars   = input.int(50,    "Drought threshold (bars without any fractal)",  minval=5, maxval=500, group="S/R Filter")
+enableStallBlock  = input.bool(false, "Block fades during a confirmed staircase (repeated same-dir stalls)", group="Stall Block")
+stallBarsIn       = input.int(6,    "Stall window (bars of tight closes)",        minval=2, maxval=50,  group="Stall Block")
+stallBandPts      = input.float(20.0,"Stall band width (pts, max close spread)",  minval=0.5, step=0.5, group="Stall Block")
+stallMaxStepPts   = input.float(15.0,"Stall max single close step (pts)",         minval=0.5, step=0.5, group="Stall Block")
+stallLegLookback  = input.int(20,   "Stall leg lookback (bars to pivot)",         minval=3, maxval=200, group="Stall Block")
+stallLegPts       = input.float(15.0,"Stall min leg size (pts)",                   minval=0.5, step=0.5, group="Stall Block")
+stallRepeatCount  = input.int(2,    "Stalls needed to confirm staircase",         minval=1, maxval=10,  group="Stall Block")
+stallRepeatWindow = input.int(30,   "Window to count repeated stalls (bars)",     minval=5, maxval=200, group="Stall Block")
+stallBlockBars    = input.int(10,   "Block bars after last qualifying stall",     minval=1, maxval=100, group="Stall Block")
 blockNYOpen  = input.bool(false,"Block NY open first 30 min (08:30–09:00 CT)",          group="Session Filter")
 blockLNOpen  = input.bool(true, "Block LN open first 30 min (02:00–02:30 CT)",          group="Session Filter")
 blockPreNY   = input.bool(true, "Block CME pre-open + NY open (07:30–09:00 CT)",        group="Session Filter")
@@ -63,6 +72,56 @@ smaVal  = ta.sma(close, smaPeriod)
 _range   = high - low
 _bodyPct = _range > 0.0 ? (math.abs(close - open) / _range) * 100.0 : 0.0
 isDoji   = _bodyPct < dojiPct
+
+//=============================
+// Stagnation detection (inlined from stagnation.pine)
+//   stall = tight close-spread + no big single step. Tagged by leg direction:
+//   ▼drop  = stalled below a prior high  (staircase-down signature)
+//   ▲bounce = stalled above a prior low  (staircase-up signature)
+//=============================
+_stallHi = ta.highest(close, stallBarsIn)
+_stallLo = ta.lowest(close,  stallBarsIn)
+_maxStep = 0.0
+for i = 0 to stallBarsIn - 2
+    _s = math.abs(close[i] - close[i + 1])
+    if _s > _maxStep
+        _maxStep := _s
+_stallTight = (_stallHi - _stallLo) <= stallBandPts and _maxStep <= stallMaxStepPts
+
+_priorLow  = ta.lowest(low,  stallLegLookback)[stallBarsIn]
+_priorHigh = ta.highest(high, stallLegLookback)[stallBarsIn]
+_bouncePts = _stallLo - _priorLow
+_dropPts   = _priorHigh - _stallHi
+
+_stallAfterBounce = _stallTight and not na(_priorLow)  and _bouncePts >= stallLegPts
+_stallAfterDrop   = _stallTight and not na(_priorHigh) and _dropPts   >= stallLegPts
+
+// fire once per fresh stall of each type
+var bool _wasBounceStall = false
+var bool _wasDropStall   = false
+freshBounceStall = _stallAfterBounce and not _wasBounceStall
+freshDropStall   = _stallAfterDrop   and not _wasDropStall
+_wasBounceStall := _stallAfterBounce
+_wasDropStall   := _stallAfterDrop
+
+// count fresh stalls of each type within the repeat window
+bounceStallCount = math.sum(freshBounceStall ? 1 : 0, stallRepeatWindow)
+dropStallCount   = math.sum(freshDropStall   ? 1 : 0, stallRepeatWindow)
+
+// staircase confirmed when count reaches threshold; hold a block for N bars after
+var int dropBlockCool   = 0   // staircase-DOWN active → block fade-longs
+var int bounceBlockCool = 0   // staircase-UP active → block fade-shorts
+if enableStallBlock and dropStallCount >= stallRepeatCount
+    dropBlockCool := stallBlockBars
+else if dropBlockCool > 0
+    dropBlockCool -= 1
+if enableStallBlock and bounceStallCount >= stallRepeatCount
+    bounceBlockCool := stallBlockBars
+else if bounceBlockCool > 0
+    bounceBlockCool -= 1
+
+stallBlockLong  = enableStallBlock and dropBlockCool   > 0   // staircase down → no fade-longs
+stallBlockShort = enableStallBlock and bounceBlockCool > 0   // staircase up → no fade-shorts
 
 //=============================
 // S/R fractal pivots — data window only, no chart shapes
@@ -205,6 +264,25 @@ if inAnyBlock and inTrade
     inTrade     := false
     barsInTrade := 0
     cooldown    := 0   // no cooldown — block window itself prevents re-entry
+
+//=============================
+// Stall block exit — flatten an open fade when a staircase confirms against it
+//   long  vs staircase-down (stallBlockLong)  → trend resuming down, cut it
+//   short vs staircase-up   (stallBlockShort) → trend resuming up, cut it
+//=============================
+stallExitLong  = stallBlockLong  and inTrade and tradeDir == 1
+stallExitShort = stallBlockShort and inTrade and tradeDir == -1
+if (stallExitLong or stallExitShort) and strategy.position_size != 0
+    strategy.cancel("Exit-Long")
+    strategy.cancel("Exit-Short")
+    strategy.close_all(comment="STAL")
+if stallExitLong or stallExitShort
+    tradeDir    := 0
+    trailStop   := na
+    bestPrice   := na
+    inTrade     := false
+    barsInTrade := 0
+    cooldown    := activeCooldown
 
 //=============================
 // EOD reset
@@ -432,8 +510,8 @@ deepLossAllowShort = deepLossSmaGate ? (close < smaVal) : isDeepSignal
 deepLossBlockLong  = deepLossBlockDir == 1  and not deepLossAllowLong
 deepLossBlockShort = deepLossBlockDir == -1 and not deepLossAllowShort
 
-bullEntry = canTrade and bigEnough and not inFractalDrought and legSlope < -slopeEntry and slExitDir != 1  and not srBlockLong  and (not inDeepBlock or isDeepSignal) and not deepLossBlockLong
-bearEntry = canTrade and bigEnough and not inFractalDrought and legSlope >  slopeEntry and slExitDir != -1 and not srBlockShort and (not inDeepBlock or isDeepSignal) and not deepLossBlockShort
+bullEntry = canTrade and bigEnough and not inFractalDrought and legSlope < -slopeEntry and slExitDir != 1  and not srBlockLong  and (not inDeepBlock or isDeepSignal) and not deepLossBlockLong  and not stallBlockLong
+bearEntry = canTrade and bigEnough and not inFractalDrought and legSlope >  slopeEntry and slExitDir != -1 and not srBlockShort and (not inDeepBlock or isDeepSignal) and not deepLossBlockShort and not stallBlockShort
 
 if bullEntry
     tp  = close + tpPts * tpMult
@@ -546,8 +624,9 @@ if posClosed
     isTHrd  = exitComment == "THRD"
     isBlk   = exitComment == "BLK"
     isEOD   = exitComment == "EOD"
-    isTP    = not isTrail and not isTExp and not isTHrd and not isBlk and not isEOD and strategy.netprofit > strategy.netprofit[1]
-    isSL    = not isTrail and not isTExp and not isTHrd and not isBlk and not isEOD and not isTP
+    isStal  = exitComment == "STAL"
+    isTP    = not isTrail and not isTExp and not isTHrd and not isBlk and not isEOD and not isStal and strategy.netprofit > strategy.netprofit[1]
+    isSL    = not isTrail and not isTExp and not isTHrd and not isBlk and not isEOD and not isStal and not isTP
     wasLong = tradeDir[1] == 1
 
     // Set deep block when a deep trade exits with profit (any exit type — trail, TP, texp)
@@ -565,6 +644,13 @@ if posClosed
                   text      = "EOD",
                   style     = wasLong ? label.style_label_up : label.style_label_down,
                   color     = color.new(color.gray, 20),
+                  textcolor = color.white,
+                  size      = size.small)
+    else if isStal
+        label.new(bar_index, wasLong ? low : high,
+                  text      = "STAL",
+                  style     = wasLong ? label.style_label_up : label.style_label_down,
+                  color     = color.new(color.fuchsia, 20),
                   textcolor = color.white,
                   size      = size.small)
     else if isBlk
@@ -652,6 +738,10 @@ plot(inFractalDrought ? 1 : 0,                   "inDrought",       color=color.
 plot(slopeEntry,                                  "cfg_slopeEntry",  color=color.gray,             display=display.data_window)
 plot(activeCooldown,                              "cfg_cooldown",    color=color.gray,             display=display.data_window)
 plot(cooldownBarsRTH,                             "cfg_cooldownRTH", color=color.gray,             display=display.data_window)
+plot(dropStallCount,                              "dropStallCount",  color=color.teal,             display=display.data_window)
+plot(bounceStallCount,                            "bounceStallCount",color=color.orange,           display=display.data_window)
+plot(stallBlockLong  ? 1 : 0,                     "stallBlockLong",  color=color.teal,             display=display.data_window)
+plot(stallBlockShort ? 1 : 0,                     "stallBlockShort", color=color.orange,           display=display.data_window)
 plot(enableSmaSL ? 1 : 0,                         "cfg_smaSL",       color=color.gray,             display=display.data_window)
 plot(trailTrigger,                                "cfg_trailTrigger",color=color.gray,             display=display.data_window)
 plot(trailDist,                                   "cfg_trailDist",   color=color.gray,             display=display.data_window)
@@ -668,7 +758,7 @@ var table statsTable = table.new(position.bottom_right, 2, 5,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Tokyo",              text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Kyoto",              text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
