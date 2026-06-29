@@ -131,6 +131,34 @@ var int   deepBlockDir        = 0      // 1=Long deep exited profit (wait for hi
 var bool  entryWasDeep        = false  // true if current/last trade was a deep entry
 var float exitBestPrice       = na     // bestPrice snapshot at the moment of exit
 var int   deepLossBlockDir    = 0      // after deep loss: 1=last deep loss was LONG, -1=was SHORT. While set (opp-block mode), ALL entries blocked until an opposite deep signal fires.
+var int    tradeSeq    = 0     // monotonic trade counter (uniqueness seed)
+var string tradeId     = ""    // pseudo-GUID for the current trade — shared by its entry & exit alerts
+
+// Deterministic pseudo-GUID: 8 hex chars from a 32-bit hash of the entry bar
+// time (unix ms, unique per bar), a monotonic counter (uniqueness within a bar)
+// and the entry price. No randomness in Pine, so this is stable & reproducible —
+// the same trade yields the same id on history & realtime. All arithmetic is
+// kept under 2^31 each step so float precision (2^53) is never exceeded.
+MOD32 = 4294967296.0
+makeTradeId(seq) =>
+    // build a 32-bit seed value from the trade's unique inputs
+    _seed = (int(time) % 4294967296)
+    _seed := int((_seed + seq * 2654435761.0) % MOD32)
+    _seed := int((_seed + int(close * 100)) % MOD32)
+    // xorshift-style scramble using multiply+mod (kept < 2^53 by splitting)
+    _h = _seed
+    _h := int((_h * 65599.0) % MOD32)
+    _h := int((_h + math.floor(_h / 7919.0)) % MOD32)
+    _h := int((_h * 40503.0) % MOD32)
+    // render as 8 hex chars
+    _hex = ""
+    _digits = "0123456789abcdef"
+    _v = _h
+    for _i = 0 to 7
+        _nib = _v % 16
+        _hex := str.substring(_digits, _nib, _nib + 1) + _hex
+        _v := math.floor(_v / 16)
+    _hex
 
 //=============================
 // Trade leg slope buffer — accumulates close prices from entry bar onward
@@ -381,6 +409,8 @@ if thrdReversalPending and not inTrade and cooldown == 0 and not eodClose and ti
         bestPrice    := na
         inTrade      := true
         activeSL     := _slAmt
+        tradeSeq += 1
+        tradeId := makeTradeId(tradeSeq)
         label.new(bar_index, low,  text="T↑", style=label.style_label_up,   color=color.new(color.teal, 10), textcolor=color.white, size=size.normal)
     else if thrdReversalDir == -1
         _tp      = close - tpPts * tpMult
@@ -399,6 +429,8 @@ if thrdReversalPending and not inTrade and cooldown == 0 and not eodClose and ti
         bestPrice    := na
         inTrade      := true
         activeSL     := _slAmt
+        tradeSeq += 1
+        tradeId := makeTradeId(tradeSeq)
         label.new(bar_index, high, text="T↓", style=label.style_label_down, color=color.new(color.teal, 10), textcolor=color.white, size=size.normal)
 
 //=============================
@@ -464,6 +496,8 @@ if bullEntry
     entryWasDeep := _isDeep
     deepBlockDir     := 0  // new trade clears any prior deep block
     deepLossBlockDir := 0  // new trade clears deep-loss block
+    tradeSeq += 1
+    tradeId := makeTradeId(tradeSeq)
     label.new(bar_index, low,
               text      = _isDeep ? "D↑" : "S↑",
               style     = label.style_label_up,
@@ -492,6 +526,8 @@ else if bearEntry
     entryWasDeep := _isDeep
     deepBlockDir     := 0  // new trade clears any prior deep block
     deepLossBlockDir := 0  // new trade clears deep-loss block
+    tradeSeq += 1
+    tradeId := makeTradeId(tradeSeq)
     label.new(bar_index, high,
               text      = _isDeep ? "D↓" : "S↓",
               style     = label.style_label_down,
@@ -644,6 +680,7 @@ plot(activeSL,                          "activeSL",      color=color.rgb(255,160
 plot(smaVal,                            "SMA",           color=color.rgb(255,220,100), display=display.data_window)
 plot(inTrade  ? 1 : 0,                 "inTrade",       color=color.purple,           display=display.data_window)
 plot(tradeDir,                          "tradeDir",      color=color.white,            display=display.data_window)
+plot(tradeSeq,                          "tradeSeq",      color=color.white,            display=display.data_window)
 plot(barsInTrade > 0 ? barsInTrade : na,"barsInTrade",  color=color.rgb(180,120,255), display=display.data_window)
 plot(cooldown > 0 ? cooldown : na,      "cooldown",      color=color.aqua,             display=display.data_window)
 plot(isDoji      ? 1 : 0,              "isDoji",         color=color.yellow,           display=display.data_window)
@@ -671,13 +708,13 @@ plot(barrierBuf,                         "barrierBuf",  color=color.rgb(255,140,
 plot(barrierCool > 0 ? barrierCool : na, "barrierCool", color=color.rgb(200,100,255), display=display.data_window)
 
 // No-traction stats table — bottom-right corner of chart
-var table statsTable = table.new(position.bottom_right, 2, 5,
+var table statsTable = table.new(position.bottom_right, 2, 6,
      bgcolor      = color.new(color.black, 20),
      border_width = 1,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Fukuoka",            text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Kobe",               text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
@@ -694,6 +731,9 @@ if barstate.islast
          (slExitDir == 1 ? "↑" : "↓") + str.tostring(slEntryPrice, "#.##") + " ±" + str.tostring(barrierBuf, "#")
     table.cell(statsTable, 1, 4, _barrierTxt,
          text_color=color.rgb(255,180,50), text_size=size.small)
+    table.cell(statsTable, 0, 5, "Trade ID",          text_color=color.white, text_size=size.small)
+    table.cell(statsTable, 1, 5, inTrade and tradeId != "" ? tradeId : "—",
+         text_color=color.rgb(150,220,255), text_size=size.small)
 
 //=============================
 // Alerts — JSON payloads for webhook REST API
@@ -704,7 +744,7 @@ if barstate.islast
 if tradeDir == 1 and tradeDir[1] == 0
     _sl = entryPrice - activeSL
     _tp = entryPrice + tpPts * tpMult
-    alert('{"event":"entry","side":"long","price":' + str.tostring(close, "0.00") +
+    alert('{"event":"entry","side":"long","id":"' + tradeId + '","price":' + str.tostring(close, "0.00") +
           ',"sl":' + str.tostring(_sl, "0.00") +
           ',"tp":' + str.tostring(_tp, "0.00") +
           ',"sl_pts":' + str.tostring(activeSL, "0.00") +
@@ -716,7 +756,7 @@ if tradeDir == 1 and tradeDir[1] == 0
 if tradeDir == -1 and tradeDir[1] == 0
     _sl = entryPrice + activeSL
     _tp = entryPrice - tpPts * tpMult
-    alert('{"event":"entry","side":"short","price":' + str.tostring(close, "0.00") +
+    alert('{"event":"entry","side":"short","id":"' + tradeId + '","price":' + str.tostring(close, "0.00") +
           ',"sl":' + str.tostring(_sl, "0.00") +
           ',"tp":' + str.tostring(_tp, "0.00") +
           ',"sl_pts":' + str.tostring(activeSL, "0.00") +
@@ -729,7 +769,7 @@ if tradeDir == -1 and tradeDir[1] == 0
 if posClosed
     _exitSide    = tradeDir[1] == 1 ? "long" : "short"
     _exitComment = strategy.closedtrades.exit_comment(strategy.closedtrades - 1)
-    alert('{"event":"exit","side":"' + _exitSide + '"' +
+    alert('{"event":"exit","side":"' + _exitSide + '","id":"' + tradeId + '"' +
           ',"reason":"' + _exitComment + '"' +
           ',"symbol":"' + syminfo.ticker + '"' +
           ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "America/Chicago") + '"' +
