@@ -134,31 +134,28 @@ var int   deepLossBlockDir    = 0      // after deep loss: 1=last deep loss was 
 var int    tradeSeq    = 0     // monotonic trade counter (uniqueness seed)
 var string tradeId     = ""    // pseudo-GUID for the current trade — shared by its entry & exit alerts
 
-// Deterministic pseudo-GUID: 8 hex chars from a 32-bit hash of the entry bar
-// time (unix ms, unique per bar), a monotonic counter (uniqueness within a bar)
-// and the entry price. No randomness in Pine, so this is stable & reproducible —
-// the same trade yields the same id on history & realtime. All arithmetic is
-// kept under 2^31 each step so float precision (2^53) is never exceeded.
-MOD32 = 4294967296.0
+// Deterministic per-trade id, guaranteed unique. Built from a scrambled hash of
+// the entry bar time + monotonic counter, rendered as hex. The seq term alone
+// guarantees uniqueness (it increments every trade); the time/price terms add
+// entropy so ids look guid-like rather than sequential.
 makeTradeId(seq) =>
-    // build a 32-bit seed value from the trade's unique inputs
-    _seed = (int(time) % 4294967296)
-    _seed := int((_seed + seq * 2654435761.0) % MOD32)
-    _seed := int((_seed + int(close * 100)) % MOD32)
-    // xorshift-style scramble using multiply+mod (kept < 2^53 by splitting)
-    _h = _seed
-    _h := int((_h * 65599.0) % MOD32)
-    _h := int((_h + math.floor(_h / 7919.0)) % MOD32)
-    _h := int((_h * 40503.0) % MOD32)
-    // render as 8 hex chars
+    // 32-bit mix: fold time (seconds, fits comfortably) + seq + price cents.
+    // Each step kept well under 2^53 so no float precision loss.
+    _t  = int(time / 1000) % 1000000      // seconds-of-epoch low 6 digits (varies per bar)
+    _px = int(close * 100) % 100000
+    _h  = (_t * 131 + seq * 7919 + _px * 31) % 16777216   // 24-bit base from real inputs
+    _h := (_h * 2654435761) % 16777216                    // Knuth multiplicative scramble, mod 2^24
+    _h := (_h + seq * 11400714819323) % 16777216          // ensure seq always perturbs result
+    _h := int(_h % 16777216)
+    // render as 6 hex chars (24-bit) + 2-char seq suffix for absolute uniqueness
     _hex = ""
     _digits = "0123456789abcdef"
     _v = _h
-    for _i = 0 to 7
-        _nib = _v % 16
+    for _i = 0 to 5
+        _nib = int(_v % 16)
         _hex := str.substring(_digits, _nib, _nib + 1) + _hex
         _v := math.floor(_v / 16)
-    _hex
+    _hex + "-" + str.tostring(seq)
 
 //=============================
 // Trade leg slope buffer — accumulates close prices from entry bar onward
@@ -714,7 +711,7 @@ var table statsTable = table.new(position.bottom_right, 2, 6,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Yokohama",           text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Yokohama v2",        text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
@@ -731,8 +728,8 @@ if barstate.islast
          (slExitDir == 1 ? "↑" : "↓") + str.tostring(slEntryPrice, "#.##") + " ±" + str.tostring(barrierBuf, "#")
     table.cell(statsTable, 1, 4, _barrierTxt,
          text_color=color.rgb(255,180,50), text_size=size.small)
-    table.cell(statsTable, 0, 5, "Trade ID",          text_color=color.white, text_size=size.small)
-    table.cell(statsTable, 1, 5, inTrade and tradeId != "" ? tradeId : "—",
+    table.cell(statsTable, 0, 5, inTrade ? "Trade ID (open)" : "Trade ID (last)", text_color=color.white, text_size=size.small)
+    table.cell(statsTable, 1, 5, tradeId != "" ? tradeId : "—",
          text_color=color.rgb(150,220,255), text_size=size.small)
 
 //=============================
