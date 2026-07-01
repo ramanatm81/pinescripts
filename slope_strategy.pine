@@ -45,6 +45,10 @@ endDate      = input.time(timestamp("2099-12-31T23:59:00-06:00"), "Backtest End"
 
 //=============================
 // Per-bar metrics
+// Session windows stay anchored to America/Chicago (real US market hours) — this
+// is independent of the chart's display timezone, so switching the chart to
+// London does NOT shift when blocks fire. Only the alert bar_time is shown in
+// London (see alerts section) so it matches your London chart clock.
 //=============================
 ctMins      = hour(time, "America/Chicago") * 60 + minute(time, "America/Chicago")
 inRTH       = ctMins >= 510 and ctMins < 900
@@ -711,7 +715,7 @@ var table statsTable = table.new(position.bottom_right, 2, 6,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Yokohama v2",        text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "London",             text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
@@ -747,7 +751,7 @@ if tradeDir == 1 and tradeDir[1] == 0
           ',"sl_pts":' + str.tostring(activeSL, "0.00") +
           ',"slope":' + str.tostring(legSlope, "0.00") +
           ',"symbol":"' + syminfo.ticker + '"' +
-          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "America/Chicago") + '"' +
+          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London") + '"' +
           '}', alert.freq_once_per_bar)
 
 if tradeDir == -1 and tradeDir[1] == 0
@@ -759,7 +763,7 @@ if tradeDir == -1 and tradeDir[1] == 0
           ',"sl_pts":' + str.tostring(activeSL, "0.00") +
           ',"slope":' + str.tostring(legSlope, "0.00") +
           ',"symbol":"' + syminfo.ticker + '"' +
-          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "America/Chicago") + '"' +
+          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London") + '"' +
           '}', alert.freq_once_per_bar)
 
 // Exit alerts — minimal payload, FastAPI uses this to close open orders
@@ -769,5 +773,5 @@ if posClosed
     alert('{"event":"exit","side":"' + _exitSide + '","id":"' + tradeId + '"' +
           ',"reason":"' + _exitComment + '"' +
           ',"symbol":"' + syminfo.ticker + '"' +
-          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "America/Chicago") + '"' +
+          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London") + '"' +
           '}', alert.freq_once_per_bar)
