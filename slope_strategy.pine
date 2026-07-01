@@ -35,6 +35,7 @@ enableSRFilter   = input.bool(true,  "Block entries near S/R pivots",           
 srHalfWidth      = input.int(10,     "Fractal half-width (bars each side, 10=21-bar pivot)", minval=1, maxval=20, group="S/R Filter")
 srZoneWidth      = input.float(25.0, "Zone width (pts either side of pivot)", minval=1.0, step=0.5, group="S/R Filter")
 srLookback       = input.int(0,     "Pivot lookback (bars, 0=all)",   minval=0,   maxval=500,    group="S/R Filter")
+showSRZones      = input.bool(false, "Draw S/R zones on chart (±zone band around active pivots)",  group="S/R Filter")
 enableDroughtBlock = input.bool(false, "Block entry when no fractal for N bars (trending market)", group="S/R Filter")
 droughtBlockBars   = input.int(50,    "Drought threshold (bars without any fractal)",  minval=5, maxval=500, group="S/R Filter")
 blockNYOpen  = input.bool(false,"Block NY open first 30 min (14:30–15:00 London / 08:30–09:00 CT)",       group="Session Filter")
@@ -102,6 +103,19 @@ srBlockAny    = enableSRFilter and (_nearHigh or _nearLow)
 srBlockLong   = srBlockAny
 srBlockShort  = srBlockAny
 inSRZone      = srBlockLong or srBlockShort
+
+// ---- S/R zone visualization (chart) — shaded ±srZoneWidth band around active pivots ----
+// Only drawn when showSRZones is on and the pivot is valid; na hides the line otherwise.
+_shH   = showSRZones and _highValid ? lastFractalHigh : na
+_shL   = showSRZones and _lowValid  ? lastFractalLow  : na
+_pHiTop = plot(na(_shH) ? na : _shH + srZoneWidth, "srHi zone top", color=na, display=display.all)
+_pHiBot = plot(na(_shH) ? na : _shH - srZoneWidth, "srHi zone bot", color=na, display=display.all)
+_pLoTop = plot(na(_shL) ? na : _shL + srZoneWidth, "srLo zone top", color=na, display=display.all)
+_pLoBot = plot(na(_shL) ? na : _shL - srZoneWidth, "srLo zone bot", color=na, display=display.all)
+plot(_shH, "srHi pivot", color=na(_shH) ? na : color.new(color.red, 0),   linewidth=1, display=display.all)
+plot(_shL, "srLo pivot", color=na(_shL) ? na : color.new(color.green, 0), linewidth=1, display=display.all)
+fill(_pHiTop, _pHiBot, color=na(_shH) ? na : color.new(color.red, 88),   title="srHi band")
+fill(_pLoTop, _pLoBot, color=na(_shL) ? na : color.new(color.green, 88), title="srLo band")
 
 // Fractal drought — bars since any fractal (high or low) was confirmed
 _lastAnyFractalBar = na(lastFractalHighBar) and na(lastFractalLowBar) ? na :
@@ -715,7 +729,7 @@ var table statsTable = table.new(position.bottom_right, 2, 6,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "London",             text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "London v3",          text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
