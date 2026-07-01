@@ -51,8 +51,8 @@ endDate      = input.time(timestamp("2099-12-31T23:59:00-06:00"), "Backtest End"
 // London (see alerts section) so it matches your London chart clock.
 //=============================
 ctMins      = hour(time, "America/Chicago") * 60 + minute(time, "America/Chicago")
-inRTH       = ctMins >= 510 and ctMins < 900
-eodClose    = ctMins >= 900 and ctMins < 960
+inRTH       = ctMins >= 510 and ctMins < 840    // RTH ends 20:00 London / 14:00 CT
+eodClose    = ctMins >= 840 and ctMins < 960    // 20:00–22:00 London / 14:00–16:00 CT — day ends 20:00 LDN, 2h window
 // Cooldown switches by session — separate RTH/ETH values, configurable above
 activeCooldown = inRTH ? cooldownBarsRTH : cooldownBars
 nyOpenBlock  = blockNYOpen and ctMins >= 510 and ctMins < 540
@@ -715,7 +715,7 @@ var table statsTable = table.new(position.bottom_right, 2, 6,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "London",             text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "London v2",          text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
