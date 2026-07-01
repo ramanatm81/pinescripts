@@ -37,9 +37,9 @@ srZoneWidth      = input.float(25.0, "Zone width (pts either side of pivot)", mi
 srLookback       = input.int(0,     "Pivot lookback (bars, 0=all)",   minval=0,   maxval=500,    group="S/R Filter")
 enableDroughtBlock = input.bool(false, "Block entry when no fractal for N bars (trending market)", group="S/R Filter")
 droughtBlockBars   = input.int(50,    "Drought threshold (bars without any fractal)",  minval=5, maxval=500, group="S/R Filter")
-blockNYOpen  = input.bool(false,"Block NY open first 30 min (08:30–09:00 CT)",          group="Session Filter")
-blockLNOpen  = input.bool(true, "Block LN open first 30 min (02:00–02:30 CT)",          group="Session Filter")
-blockPreNY   = input.bool(true, "Block CME pre-open + NY open (07:30–09:00 CT)",        group="Session Filter")
+blockNYOpen  = input.bool(false,"Block NY open first 30 min (14:30–15:00 London / 08:30–09:00 CT)",       group="Session Filter")
+blockLNOpen  = input.bool(true, "Block LN open first 30 min (08:00–08:30 London / 02:00–02:30 CT)",       group="Session Filter")
+blockPreNY   = input.bool(true, "Block CME pre-open + NY open (13:30–15:00 London / 07:30–09:00 CT)",     group="Session Filter")
 startDate    = input.time(timestamp("2000-01-01T00:00:00-06:00"), "Backtest Start", group="Backtest")
 endDate      = input.time(timestamp("2099-12-31T23:59:00-06:00"), "Backtest End",   group="Backtest")
 
@@ -57,8 +57,8 @@ eodClose    = ctMins >= 900 and ctMins < 960
 activeCooldown = inRTH ? cooldownBarsRTH : cooldownBars
 nyOpenBlock  = blockNYOpen and ctMins >= 510 and ctMins < 540
 lnOpenBlock  = blockLNOpen and ctMins >= 120 and ctMins < 150
-preNYBlock   = blockPreNY  and ctMins >= 450 and ctMins < 540   // 07:30–09:00 CT
-ethOpenBlock = ctMins >= 1020 and ctMins < 1050                 // 17:00–17:30 CT hardcoded
+preNYBlock   = blockPreNY  and ctMins >= 450 and ctMins < 540   // 13:30–15:00 London / 07:30–09:00 CT
+ethOpenBlock = ctMins >= 1020 and ctMins < 1050                 // 23:00–23:30 London / 17:00–17:30 CT hardcoded
 
 // SMA for dynamic SL
 smaVal  = ta.sma(close, smaPeriod)
