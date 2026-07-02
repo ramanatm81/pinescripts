@@ -8,12 +8,17 @@ strategy("VWAP Reversion Strategy", overlay=true, max_labels_count=500, max_bars
 //   enter toward VWAP. Only trade when ATR is elevated (reversion works best in
 //   volatile chop). Tight ATR-scaled trail locks profit as price snaps back.
 //
-//   Offline backtest (25.9k bars 1m NQ, Jun 7–Jul 2), fillable 20/5 trail:
-//     zero-slippage:  +11,558 pts  (65% win, PF 1.46)
-//     1pt slippage:   + 9,488 pts  (65% win, PF 1.37, IS +6220 / OOS +3268)
-//   vs the slope strategy baseline +6,848 — i.e. ~1.4x realistically. A clean 2x
-//   was NOT achievable without unrealistic sub-5pt trails, so this is the honest
-//   best. Momentum/breakout systems (Donchian/ORB/Supertrend) all lost on 1m NQ.
+//   Offline backtest (25.9k bars 1m NQ, Jun 7–Jul 2), fillable 20/5 trail,
+//   ATR regime filter + drop the 3 net-loser overnight hours (00/01/21 CT):
+//     zero-slippage:  +12,145 pts  (66% win, PF 1.53)  1.77x baseline
+//     1pt slippage:   +10,193 pts  (66% win, PF 1.43, IS +6259 / OOS +3934) 1.49x
+//     2pt slippage:   + 8,241 pts  (66% win, PF 1.34)  1.20x
+//   vs the slope baseline +6,848. A CLEAN 2x was NOT achievable without
+//   unrealistic sub-5pt trails, so ~1.5x realistic is the honest best. Findings:
+//   momentum/breakout (Donchian/ORB/Supertrend/EMA) all LOST on 1m NQ; only
+//   mean-reversion has edge. Combining with the slope-fade did NOT help (VWAP is
+//   the stronger signal). Sizing by ATR-distance would HURT — verified that
+//   extreme-distance trades are the WORST, not best (regime-break risk).
 //=============================
 
 //=============================
@@ -29,6 +34,7 @@ trailDist    = input.float(5.0, "Trail distance (pts)",          minval=1.0, ste
 maxBars      = input.int(30,   "Max bars in trade (time exit)",  minval=1, maxval=500, group="Risk")
 cooldownBars = input.int(3,    "Cooldown bars after exit",       minval=0, maxval=50, group="Risk")
 enableEOD    = input.bool(true,"Flatten at end of day (15:00–16:00 CT)", group="Session")
+dropDeadHours= input.bool(true,"Skip net-loser overnight hours 00–02, 21–22 CT", group="Session")
 
 //=============================
 // Indicators
@@ -41,6 +47,9 @@ atrVal  = ta.atr(atrLen)
 atrMed  = ta.percentile_nearest_rank(atrVal, atrMedLen, 50)   // rolling median ATR
 
 regimeOk = na(atrMed) or atrVal >= atrRegime * atrMed
+// drop the 3 net-loser hours found in backtest: 00:00, 01:00, 21:00 CT
+ctHour  = hour(time, "America/Chicago")
+hoursOk = not dropDeadHours or (ctHour != 0 and ctHour != 1 and ctHour != 21)
 
 //=============================
 // State
@@ -104,7 +113,7 @@ if cooldown > 0 and pos == 0
 //=============================
 // Entry — fade VWAP extension in an elevated-ATR regime
 //=============================
-canTrade = pos == 0 and cooldown == 0 and not eodClose and not na(vwapVal) and not na(atrVal) and regimeOk
+canTrade = pos == 0 and cooldown == 0 and not eodClose and not na(vwapVal) and not na(atrVal) and regimeOk and hoursOk
 dev = close - vwapVal
 band = kBand * atrVal
 
