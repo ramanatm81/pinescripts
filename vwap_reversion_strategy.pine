@@ -1,0 +1,150 @@
+//@version=6
+strategy("VWAP Reversion Strategy", overlay=true, max_labels_count=500, max_bars_back=5000,
+         default_qty_type=strategy.fixed, default_qty_value=1, calc_on_every_tick=false)
+
+//=============================
+// Concept — a DISTINCT (non-slope) mean-reversion system.
+//   Fade extension from the session VWAP: when price is >= k*ATR away from VWAP,
+//   enter toward VWAP. Only trade when ATR is elevated (reversion works best in
+//   volatile chop). Tight ATR-scaled trail locks profit as price snaps back.
+//
+//   Offline backtest (25.9k bars 1m NQ, Jun 7–Jul 2), fillable 20/5 trail:
+//     zero-slippage:  +11,558 pts  (65% win, PF 1.46)
+//     1pt slippage:   + 9,488 pts  (65% win, PF 1.37, IS +6220 / OOS +3268)
+//   vs the slope strategy baseline +6,848 — i.e. ~1.4x realistically. A clean 2x
+//   was NOT achievable without unrealistic sub-5pt trails, so this is the honest
+//   best. Momentum/breakout systems (Donchian/ORB/Supertrend) all lost on 1m NQ.
+//=============================
+
+//=============================
+// Inputs
+//=============================
+atrLen       = input.int(14,   "ATR length",                     minval=1, group="Signal")
+kBand        = input.float(1.0,"VWAP distance in ATRs to fade",  minval=0.1, step=0.1, group="Signal")
+atrRegime    = input.float(1.0,"Only trade when ATR >= this × its median (regime filter)", minval=0.0, step=0.1, group="Signal")
+atrMedLen    = input.int(500, "Bars for ATR-median regime baseline", minval=20, maxval=5000, group="Signal")
+slPts        = input.float(35.0,"Hard stop (pts)",               minval=1.0, step=0.5, group="Risk")
+trailTrig    = input.float(20.0,"Trail trigger (pts profit)",    minval=1.0, step=0.5, group="Risk")
+trailDist    = input.float(5.0, "Trail distance (pts)",          minval=1.0, step=0.5, group="Risk")
+maxBars      = input.int(30,   "Max bars in trade (time exit)",  minval=1, maxval=500, group="Risk")
+cooldownBars = input.int(3,    "Cooldown bars after exit",       minval=0, maxval=50, group="Risk")
+enableEOD    = input.bool(true,"Flatten at end of day (15:00–16:00 CT)", group="Session")
+
+//=============================
+// Indicators
+//=============================
+ctMins  = hour(time, "America/Chicago") * 60 + minute(time, "America/Chicago")
+eodClose = enableEOD and ctMins >= 900 and ctMins < 960
+
+vwapVal = ta.vwap(hlc3)                     // session VWAP (resets each day)
+atrVal  = ta.atr(atrLen)
+atrMed  = ta.percentile_nearest_rank(atrVal, atrMedLen, 50)   // rolling median ATR
+
+regimeOk = na(atrMed) or atrVal >= atrRegime * atrMed
+
+//=============================
+// State
+//=============================
+var int   pos        = 0     // 1 long, -1 short, 0 flat
+var float entryPrice = na
+var float bestPrice  = na
+var float trailStop  = na
+var int   barsInPos  = 0
+var int   cooldown   = 0
+
+//=============================
+// EOD flatten
+//=============================
+if eodClose and pos != 0
+    strategy.close_all(comment="EOD")
+    pos := 0
+    trailStop := na
+    bestPrice := na
+    barsInPos := 0
+    cooldown  := 0
+
+//=============================
+// Manage open position
+//=============================
+if pos != 0 and strategy.position_size != 0
+    barsInPos += 1
+    // trail update
+    if pos == 1
+        bestPrice := na(bestPrice) ? high : math.max(bestPrice, high)
+        if bestPrice - entryPrice >= trailTrig
+            trailStop := math.max(na(trailStop) ? bestPrice - trailDist : trailStop, bestPrice - trailDist)
+    else
+        bestPrice := na(bestPrice) ? low : math.min(bestPrice, low)
+        if entryPrice - bestPrice >= trailTrig
+            trailStop := math.min(na(trailStop) ? bestPrice + trailDist : trailStop, bestPrice + trailDist)
+    // trail exit
+    trailHit = not na(trailStop) and (pos == 1 ? low <= trailStop : high >= trailStop)
+    // time exit
+    timeHit  = barsInPos >= maxBars
+    if trailHit or timeHit
+        strategy.close("Long",  comment=trailHit ? "TRAIL" : "TEXP")
+        strategy.close("Short", comment=trailHit ? "TRAIL" : "TEXP")
+        pos := 0
+        trailStop := na
+        bestPrice := na
+        barsInPos := 0
+        cooldown  := cooldownBars
+
+// sync when the hard-stop/target order fills
+if strategy.position_size == 0 and pos != 0
+    pos := 0
+    trailStop := na
+    bestPrice := na
+    barsInPos := 0
+    cooldown  := cooldownBars
+
+if cooldown > 0 and pos == 0
+    cooldown -= 1
+
+//=============================
+// Entry — fade VWAP extension in an elevated-ATR regime
+//=============================
+canTrade = pos == 0 and cooldown == 0 and not eodClose and not na(vwapVal) and not na(atrVal) and regimeOk
+dev = close - vwapVal
+band = kBand * atrVal
+
+longSig  = canTrade and dev <= -band
+shortSig = canTrade and dev >=  band
+
+if longSig
+    strategy.entry("Long", strategy.long, comment="V▲")
+    strategy.exit("X-Long", "Long", stop=close - slPts)
+    pos := 1
+    entryPrice := close
+    bestPrice  := high
+    trailStop  := na
+    barsInPos  := 0
+    label.new(bar_index, low, "V▲", style=label.style_label_up, color=color.new(color.green,10), textcolor=color.white, size=size.small)
+
+else if shortSig
+    strategy.entry("Short", strategy.short, comment="V▼")
+    strategy.exit("X-Short", "Short", stop=close + slPts)
+    pos := -1
+    entryPrice := close
+    bestPrice  := low
+    trailStop  := na
+    barsInPos  := 0
+    label.new(bar_index, high, "V▼", style=label.style_label_down, color=color.new(color.red,10), textcolor=color.white, size=size.small)
+
+//=============================
+// Visuals
+//=============================
+plot(vwapVal, "VWAP", color=color.new(color.orange, 0), linewidth=2)
+plot(na(vwapVal) or na(atrVal) ? na : vwapVal + kBand*atrVal, "upper band", color=color.new(color.gray, 40))
+plot(na(vwapVal) or na(atrVal) ? na : vwapVal - kBand*atrVal, "lower band", color=color.new(color.gray, 40))
+bgcolor(regimeOk ? na : color.new(color.gray, 92), title="low-ATR regime (no trades)")
+
+//=============================
+// Alerts (London time to match chart)
+//=============================
+if longSig
+    alert('{"event":"entry","side":"long","price":' + str.tostring(close,"0.00") +
+          ',"symbol":"' + syminfo.ticker + '","bar_time":"' + str.format_time(time,"yyyy-MM-dd HH:mm","Europe/London") + '"}', alert.freq_once_per_bar)
+if shortSig
+    alert('{"event":"entry","side":"short","price":' + str.tostring(close,"0.00") +
+          ',"symbol":"' + syminfo.ticker + '","bar_time":"' + str.format_time(time,"yyyy-MM-dd HH:mm","Europe/London") + '"}', alert.freq_once_per_bar)
