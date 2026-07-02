@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# OS / IDE
+.DS_Store
+.idea/
+.claude/
+
+# Excel temp/lock files
+~$*.xlsx
+.~lock.*#
+
+# Market data — large, reproducible from etl/ scripts (do NOT commit)
+ohlcv/*.dbn.zst
+ohlcv/*.csv
+ohlcv/mnq_continuous/
+_dbn_raw.csv
+*.raw.csv
+
+# Ad-hoc data exports
+data.csv
+input*.xlsx
+output*.xlsx
+positions.xlsx
+results.txt

@@ -10,10 +10,10 @@ up into a single position.
 A new position starts every time the running contract size goes from
 flat to non-flat; it closes when the running size returns to flat.
 
-The output Positions sheet uses Excel row grouping: each position is a
-parent (summary) row, with one collapsible child row per constituent
-trade pair (entry + exit). Click the +/- in the outline gutter (or use
-the 1/2 buttons at the top-left) to collapse or expand all children.
+The output Positions sheet has ONE row per position (summary only). The
+constituent trade legs are intentionally NOT written as separate rows, so
+summing the Net P&L column gives the true total with no double-counting.
+(Per-leg detail is still available in the raw "List of trades" sheet.)
 
 Usage:
     python trades_to_positions.py INPUT.xlsx [OUTPUT.xlsx] [--print-summary]
@@ -316,17 +316,13 @@ def _write_positions_sheet(
     wb: Workbook, pos_df: pd.DataFrame, children: list[list[dict]]
 ) -> tuple[int, list[int], list[tuple[int, int]]]:
     """
-    Write the Positions sheet with hierarchical parent/child rows.
+    Write the Positions sheet — one summary row per position, no leg rows.
     Returns (n_positions, parent_row_indices, child_ranges) where
     parent_row_indices[i] is the Excel row of position i+1 and
-    child_ranges[i] = (first_child_row, last_child_row) for that position.
+    child_ranges is empty (legs are no longer written).
     """
     ws = wb.active
     ws.title = "Positions"
-
-    # Outline: parent (summary) rows ABOVE their children, gutter on the left
-    ws.sheet_properties.outlinePr.summaryBelow = False
-    ws.sheet_properties.outlinePr.summaryRight = False
 
     # Header row
     ws.append(POS_HEADERS)
@@ -343,26 +339,23 @@ def _write_positions_sheet(
     for h, w in WIDTHS.items():
         ws.column_dimensions[get_column_letter(POS_HEADERS.index(h) + 1)].width = w
 
-    parent_row_idx_for: dict[int, int] = {}
     child_ranges: list[tuple[int, int]] = []
     parent_rows: list[int] = []
 
     parent_font = Font(name="Arial", bold=True, size=10)
     parent_fill = PatternFill("solid", start_color="F2F2F2")
-    child_font = Font(name="Arial", size=9, color="595959")
-    child_fill_long = PatternFill("solid", start_color="EAF1FB")
-    child_fill_short = PatternFill("solid", start_color="FDEDE7")
     long_color = Font(name="Arial", size=10, color="1F4E78", bold=True)
     short_color = Font(name="Arial", size=10, color="C00000", bold=True)
 
+    # One row per position (summary only) — leg/child rows are intentionally
+    # omitted so summing the Net P&L column gives the true total (no double count).
     cur_row = 2
     for i, parent_record in enumerate(pos_df.to_dict(orient="records")):
-        # ---- Parent (position summary) row ----
         for col_idx, h in enumerate(POS_HEADERS, 1):
             val = parent_record.get(h, "")
             _write_cell(ws, cur_row, col_idx, val, font=parent_font, fill=parent_fill)
 
-        # Direction tint on the parent's Direction cell
+        # Direction tint on the Direction cell
         dir_col = POS_HEADERS.index("Direction") + 1
         dir_cell = ws.cell(row=cur_row, column=dir_col)
         if parent_record["Direction"] == "Long":
@@ -373,25 +366,7 @@ def _write_positions_sheet(
             dir_cell.font = short_color
 
         parent_rows.append(cur_row)
-        parent_row_idx_for[i + 1] = cur_row
         cur_row += 1
-
-        # ---- Children (constituent trades) ----
-        first_child = cur_row
-        for child in children[i]:
-            child_fill = child_fill_long if parent_record["Direction"] == "Long" else child_fill_short
-            for col_idx, h in enumerate(POS_HEADERS, 1):
-                val = child.get(h, "")
-                _write_cell(ws, cur_row, col_idx, val, font=child_font, fill=child_fill)
-            # Indent visual cue: prefix Trade # cell with a small marker
-            tnum_col = POS_HEADERS.index("Trade #") + 1
-            tcell = ws.cell(row=cur_row, column=tnum_col)
-            tcell.alignment = Alignment(vertical="center", indent=1)
-            # Mark this row as outline level 1 so it groups under the parent
-            ws.row_dimensions[cur_row].outline_level = 1
-            cur_row += 1
-        last_child = cur_row - 1
-        child_ranges.append((first_child, last_child))
 
     # Number formats — apply across all data rows
     for h, fmt in NUM_FMTS.items():

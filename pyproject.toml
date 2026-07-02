@@ -1,0 +1,29 @@
+[project]
+name = "pinescripts-tooling"
+version = "0.1.0"
+description = "Python tooling for the pinescripts trading project: backtest harness, TradingView export processing, OHLC MCP server, and market-data ETL."
+requires-python = ">=3.9"
+
+# Runtime dependencies actually imported by the project's Python modules.
+dependencies = [
+    "pandas>=2.0",            # trades_to_positions.py (TV export -> position rollup)
+    "openpyxl>=3.1",          # trades_to_positions.py (xlsx read/write, formatting)
+    "python-dateutil>=2.8.2", # ohlc_mcp_server.py (flexible timestamp parsing)
+    "mcp[cli]>=1.0.0",        # ohlc_mcp_server.py (Model Context Protocol server)
+    "watchdog>=4.0.0",        # watch_downloads.py (filesystem watcher)
+    "duckdb>=1.0.0",          # etl/dbn_to_parquet.py (DBN CSV -> partitioned parquet)
+]
+
+[project.optional-dependencies]
+# Vendor-data decoding. Either the `dbn` Rust CLI (cargo install dbn-cli) OR this
+# Python package is needed to read Databento DBN files in the ETL step.
+data = [
+    "databento>=0.34",
+]
+
+[tool.notes]
+# The backtest harness (backtest/*.py) and the ETL script intentionally use only
+# the Python STANDARD LIBRARY at their core (csv, math, datetime) so they run on a
+# bare `/usr/bin/python3` — the machine's anaconda pandas is broken. duckdb is the
+# one extra needed for the parquet ETL. External CLIs used (not pip): `dbn`
+# (Rust, ~/.cargo/bin) and the DuckDB CLI (brew).
