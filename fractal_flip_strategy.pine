@@ -1,0 +1,132 @@
+//@version=6
+strategy("Fractal Flip Strategy", overlay=true, max_labels_count=500, max_bars_back=5000,
+         default_qty_type=strategy.fixed, default_qty_value=1, calc_on_every_tick=false)
+
+//=============================
+// Concept
+//   Bill Williams 5-bar fractals (from fractals.pine), confirmed at the middle
+//   bar which is [2] (2 bars ago). We act the MOMENT the fractal confirms — i.e.
+//   on the current bar's close, 2 bars after the actual pivot. This is the
+//   earliest a fractal is knowable without repainting.
+//     bottom fractal (swing low, ▲)  → go LONG  (close any short)
+//     top fractal    (swing high, ▼) → go SHORT (close any long)
+//   Always-in-market: flips direction on each new fractal.
+//
+//   ⚠ STARTING POINT, NOT VALIDATED. The raw flip backtests NEGATIVE on 1m NQ
+//   (~24k bars): every variant lost — BW flip -2023 pts / 42.5% win over 5264
+//   trades; best was regular flip -471 / 44.5% / 3199 trades. Fractals fire ~every
+//   5 bars and whipsaw in chop. Needs a trend/HTF/volatility filter to be viable.
+//   Explore in TradingView before trusting it.
+//=============================
+
+//=============================
+// Inputs
+//=============================
+useBW        = input.bool(true,  "Bill Williams fractal (off = strict/regular)", group="Fractal")
+enableSL     = input.bool(true,  "Enable stop loss",                             group="Risk")
+slPts        = input.float(50.0, "Stop loss (pts from entry)", minval=0.5, step=0.5, group="Risk")
+enableTP     = input.bool(false, "Enable take profit",                           group="Risk")
+tpPts        = input.float(100.0,"Take profit (pts from entry)", minval=0.5, step=1.0, group="Risk")
+allowShorts  = input.bool(true,  "Allow shorts (off = long-only, flat on top fractal)", group="Direction")
+// Session filter (anchored to America/Chicago like the slope strategy; display-tz independent)
+blockLNOpen  = input.bool(false, "Block LN open (08:00–08:30 London / 02:00–02:30 CT)", group="Session Filter")
+blockPreNY   = input.bool(false, "Block CME pre-open + NY open (13:30–15:00 London / 07:30–09:00 CT)", group="Session Filter")
+enableEOD    = input.bool(true,  "Flatten at end of day",                        group="Session Filter")
+startDate    = input.time(timestamp("2000-01-01T00:00:00-06:00"), "Backtest Start", group="Backtest")
+endDate      = input.time(timestamp("2099-12-31T23:59:00-06:00"), "Backtest End",   group="Backtest")
+
+//=============================
+// Session timing (America/Chicago anchored; independent of chart display tz)
+//=============================
+ctMins      = hour(time, "America/Chicago") * 60 + minute(time, "America/Chicago")
+eodClose    = enableEOD and ctMins >= 900 and ctMins < 960   // 15:00–16:00 CT / 21:00–22:00 London
+lnOpenBlock = blockLNOpen and ctMins >= 120 and ctMins < 150
+preNYBlock  = blockPreNY  and ctMins >= 450 and ctMins < 540
+inBlock     = lnOpenBlock or preNYBlock
+
+//=============================
+// Fractal recognition (5-bar, confirmed at [2]) — from fractals.pine
+//   Bill Williams allows equal highs/lows at the pivot; regular is strict.
+//=============================
+isRegularTop = high[4] < high[3] and high[3] < high[2] and high[2] > high[1] and high[2] > high[0]
+isRegularBot = low[4]  > low[3]  and low[3]  > low[2]  and low[2]  < low[1]  and low[2]  < low[0]
+isBWTop      = high[4] < high[2] and high[3] <= high[2] and high[2] >= high[1] and high[2] > high[0]
+isBWBot      = low[4]  > low[2]  and low[3]  >= low[2]  and low[2]  <= low[1]  and low[2]  < low[0]
+
+topFractal = useBW ? isBWTop : isRegularTop   // swing HIGH confirmed → short signal
+botFractal = useBW ? isBWBot : isRegularBot   // swing LOW  confirmed → long signal
+
+//=============================
+// State
+//=============================
+var float entryPrice = na
+
+canAct = not inBlock and not eodClose and time >= startDate and time <= endDate
+
+//=============================
+// EOD flatten
+//=============================
+if eodClose and strategy.position_size != 0
+    strategy.close_all(comment="EOD")
+
+//=============================
+// Entries — flip on confirmed fractal
+//=============================
+goLong  = botFractal and canAct
+goShort = topFractal and canAct and allowShorts
+closeLongOnly = topFractal and canAct and not allowShorts  // long-only mode: flat on top fractal
+
+if goLong
+    _sl = enableSL ? close - slPts : na
+    _tp = enableTP ? close + tpPts : na
+    strategy.entry("Long", strategy.long, comment="F▲")
+    if enableSL or enableTP
+        strategy.exit("X-Long", "Long", stop=_sl, limit=_tp)
+    entryPrice := close
+    label.new(bar_index, low, text="F▲", style=label.style_label_up,
+              color=color.new(color.green, 10), textcolor=color.white, size=size.small)
+
+else if goShort
+    _sl = enableSL ? close + slPts : na
+    _tp = enableTP ? close - tpPts : na
+    strategy.entry("Short", strategy.short, comment="F▼")
+    if enableSL or enableTP
+        strategy.exit("X-Short", "Short", stop=_sl, limit=_tp)
+    entryPrice := close
+    label.new(bar_index, high, text="F▼", style=label.style_label_down,
+              color=color.new(color.red, 10), textcolor=color.white, size=size.small)
+
+else if closeLongOnly and strategy.position_size > 0
+    strategy.close("Long", comment="F▼x")
+
+//=============================
+// Markers for the confirming fractal (at the actual pivot bar, [2] back)
+//=============================
+plotshape(botFractal, title="Bottom fractal", style=shape.triangleup,   location=location.belowbar, color=color.new(color.lime, 0), offset=-2, size=size.tiny)
+plotshape(topFractal, title="Top fractal",    style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0),  offset=-2, size=size.tiny)
+
+//=============================
+// Status table
+//=============================
+var table t = table.new(position.bottom_right, 2, 2, bgcolor=color.new(color.black, 20),
+     border_width=1, border_color=color.new(color.gray, 50))
+if barstate.islast
+    table.cell(t, 0, 0, "Fractal Flip", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(t, 1, 0, useBW ? "BW" : "regular", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(t, 0, 1, "Position", text_color=color.white, text_size=size.small)
+    _pos = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "flat"
+    table.cell(t, 1, 1, _pos, text_color=color.rgb(150,220,255), text_size=size.small)
+
+//=============================
+// Alerts
+//=============================
+if goLong
+    alert('{"event":"entry","side":"long","price":' + str.tostring(close, "0.00") +
+          ',"symbol":"' + syminfo.ticker + '"' +
+          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London") + '"}',
+          alert.freq_once_per_bar)
+if goShort
+    alert('{"event":"entry","side":"short","price":' + str.tostring(close, "0.00") +
+          ',"symbol":"' + syminfo.ticker + '"' +
+          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London") + '"}',
+          alert.freq_once_per_bar)
