@@ -151,6 +151,8 @@ var float exitBestPrice       = na     // bestPrice snapshot at the moment of ex
 var int   deepLossBlockDir    = 0      // after deep loss: 1=last deep loss was LONG, -1=was SHORT. While set (opp-block mode), ALL entries blocked until an opposite deep signal fires.
 var int    tradeSeq    = 0     // monotonic trade counter (uniqueness seed)
 var string tradeId     = ""    // pseudo-GUID for the current trade — shared by its entry & exit alerts
+var string exitReason  = ""    // reason of the last exit — set at each exit site, read by the exit alert
+var int    exitedDir   = 0     // direction that was just exited (1=long,-1=short) — for the exit alert side
 
 // Deterministic per-trade id, guaranteed unique. Built from a scrambled hash of
 // the entry bar time + monotonic counter, rendered as hex. The seq term alone
@@ -242,6 +244,8 @@ if inAnyBlock and inTrade and strategy.position_size != 0
     strategy.cancel("Exit-Short")
     strategy.close_all(comment="BLK")
 if inAnyBlock and inTrade
+    exitReason  := "BLK"
+    exitedDir   := tradeDir
     tradeDir    := 0
     trailStop   := na
     bestPrice   := na
@@ -257,6 +261,9 @@ if eodClose and strategy.position_size != 0
     strategy.cancel("Exit-Short")
     strategy.close_all(comment="EOD")
 if eodClose
+    if inTrade
+        exitReason := "EOD"
+        exitedDir  := tradeDir
     tradeDir         := 0
     trailStop        := na
     bestPrice        := na
@@ -271,9 +278,14 @@ if eodClose
     deepLossBlockDir := 0
 
 //=============================
-// Sync on TP/SL close
+// Sync on TP/SL close — a broker order (the strategy.exit limit=TP, or the
+// stop) filled and flattened the position. hardSLHit above already handled the
+// SL case (set exitReason="SL" and tradeDir=0), so if we still see a live
+// tradeDir here the fill was the TP limit.
 //=============================
 if strategy.position_size == 0 and (inTrade or tradeDir != 0)
+    exitReason  := "TP"
+    exitedDir   := tradeDir
     tradeDir    := 0
     trailStop   := na
     bestPrice   := na
@@ -339,6 +351,8 @@ if inTrade and strategy.position_size != 0
         slEntryPrice := entryPrice
         barrierBuf   := activeSL
         barrierCool  := 0
+        exitReason   := "SL"
+        exitedDir    := tradeDir
         tradeDir     := 0
         trailStop    := na
         bestPrice    := na
@@ -361,6 +375,8 @@ if enableTExp and inTrade and strategy.position_size != 0 and barsInTrade >= tEx
         strategy.cancel("Exit-Short")
         strategy.close("Long",  comment="TEXP")
         strategy.close("Short", comment="TEXP")
+        exitReason  := "TEXP"
+        exitedDir   := tradeDir
         tradeDir    := 0
         trailStop   := na
         bestPrice   := na
@@ -393,6 +409,8 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
             cooldown            := 2          // 2-bar delay before reversal entry fires
         else
             cooldown := activeCooldown
+        exitReason  := "THRD"
+        exitedDir   := tradeDir
         tradeDir    := 0
         trailStop   := na
         bestPrice   := na
@@ -567,6 +585,8 @@ if tradeDir == 1 and strategy.position_size != 0
         trailFired := true
         strategy.cancel("Exit-Long")
         strategy.close("Long", comment="TRAIL")
+        exitReason := "TRAIL"
+        exitedDir  := 1
         tradeDir  := 0
         trailStop := na
         bestPrice := na
@@ -584,6 +604,8 @@ else if tradeDir == -1 and strategy.position_size != 0
         trailFired := true
         strategy.cancel("Exit-Short")
         strategy.close("Short", comment="TRAIL")
+        exitReason := "TRAIL"
+        exitedDir  := -1
         tradeDir  := 0
         trailStop := na
         bestPrice := na
@@ -729,7 +751,7 @@ var table statsTable = table.new(position.bottom_right, 2, 6,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "London v3",          text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Belfast",            text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
@@ -781,11 +803,16 @@ if tradeDir == -1 and tradeDir[1] == 0
           '}', alert.freq_once_per_bar)
 
 // Exit alerts — minimal payload, FastAPI uses this to close open orders
-if posClosed
-    _exitSide    = tradeDir[1] == 1 ? "long" : "short"
-    _exitComment = strategy.closedtrades.exit_comment(strategy.closedtrades - 1)
+// Exit alert — fire on OUR OWN state transition (tradeDir non-zero -> 0), NOT on
+// strategy.position_size. With calc_on_every_tick=false the entry fills next-bar-
+// open while the script sets tradeDir immediately; a fast enter+stop-out never
+// shows position_size!=0 at a bar close, so the old posClosed-based alert silently
+// missed those exits. Keying off tradeDir mirrors the entry alert and never misses.
+exitFired = tradeDir == 0 and tradeDir[1] != 0
+if exitFired
+    _exitSide = exitedDir == 1 ? "long" : "short"
     alert('{"event":"exit","side":"' + _exitSide + '","id":"' + tradeId + '"' +
-          ',"reason":"' + _exitComment + '"' +
+          ',"reason":"' + exitReason + '"' +
           ',"symbol":"' + syminfo.ticker + '"' +
           ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London") + '"' +
           '}', alert.freq_once_per_bar)
