@@ -242,3 +242,26 @@ Profitable in 4 of 6 years; the 2 losing years are small. A durable edge.
 3. Any new strategy/filter must show **profitability across most of the 6 years**
    before it's trusted — full-period PnL alone is not enough (2025-26 can carry
    a losing 2021-24).
+
+---
+
+## 9. Fukuoka optimization validated on 5 years (holds up)
+
+The 18-day Fukuoka tuning (slopeEntry 1.7->2.5, trailDist 10->8, tpPts 40->50,
+tExpBars 30->20) was re-tested on the full 5yr. It GENERALIZES — not overfit:
+
+| config | 5yr pnl | win | profitable yrs |
+|--------|---------|-----|-----|
+| pre-Fukuoka (1.7/10/40/30) | +13,464 | 55% | 4/6 |
+| **Fukuoka (2.5/8/50/20)**  | **+30,578** | **61%** | 4/6 |
+
+Per-parameter on 5yr:
+- slopeEntry: flat optimum (1.7-3.0 all ~+29-30.5k) — robust, not knife-edge; 2.5 near peak.
+- trailDist=8: monotonically best (8:+30.5k, 10:+23.9k, 12:+18.4k). Tighter wins, and 8 is fillable.
+- tpPts: nearly irrelevant (trail does the exiting).
+- tExpBars=20: beats 30 (+30.6k vs +24.7k, 61% vs 56% win).
+
+Conclusion: Fukuoka more than DOUBLED 5yr PnL vs pre-Fukuoka and every param
+checks out across regimes. The slope strategy + Fukuoka defaults is the
+validated, robust system. (Optional: slopeEntry 2.0 or 3.0 give 5/6 profitable
+years vs 4/6 for 2.5, at trivial PnL cost — 2021 is +/-0 either way.)
