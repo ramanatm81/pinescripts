@@ -23,7 +23,8 @@ thresholds are indicative. Windows in **ET** unless noted (NQ Globex opens
   when price ≥ 1×ATR from session VWAP, in an elevated-ATR regime, tight 20/5
   trail, drop 3 net-loser overnight hours. Realistic (1pt slippage) ≈ **1.5×**
   the slope baseline; a clean 2× was NOT achievable without unfillable sub-5pt
-  trails.
+  trai
+- ls.
 - **Combining slope-fade + VWAP did not help** — VWAP is the stronger signal;
   union/confluence/regime-route all diluted it.
 - **Sizing by signal magnitude would HURT** — verified: the most-extreme
@@ -199,3 +200,45 @@ on risk-adjusted return isn't worth the complexity.
 - Exit study (567k backtests) — kjtradingsystems.com (Kevin Davey)
 - U-shape volume/vol — Jain-Joh; tosindicators.com; volatilitybox.com
 - Session NQ point figures — volatilitybox, tosindicators, tradealgo (indicative)
+
+---
+
+## 8. 5-YEAR WALK-FORWARD VERDICT (the decisive test)
+
+Ran both strategies on the full 5-year MNQ continuous front-month (1.77M 1-min
+bars, 2021-06 → 2026-06), realistic 1pt slippage. This overturns the 18-day
+conclusions.
+
+**VWAP-reversion (my "2x challenge" strategy) = a 5-YEAR LOSER:**
+| year | pnl | win |
+|------|-----|-----|
+| 2021 | -6436 | 55% |
+| 2022 | -4358 | 60% |
+| 2023 | -7518 | 56% |
+| 2024 | -5730 | 58% |
+| 2025 | +4830 | 60% |
+| 2026 | +11184 | 63% |
+| **5yr** | **-8648** | 59%, PF 0.99 |
+Profitable in only 2 of 6 years. The 18-day sample (Jun-Jul 2026) was its ONE
+good regime → it was overfit to a favorable window.
+
+**Slope-fade (the existing strategy) = ROBUST:**
+| year | pnl | win |
+|------|-----|-----|
+| 2021 | -40 | 60% |
+| 2022 | +5924 | 60% |
+| 2023 | -1659 | 58% |
+| 2024 | +3095 | 61% |
+| 2025 | +11797 | 62% |
+| 2026 | +11479 | 62% |
+| **5yr** | **+30578** | 61% |
+Profitable in 4 of 6 years; the 2 losing years are small. A durable edge.
+
+**Lessons:**
+1. 18-day backtests are dangerous — both "edges" and "failures" can be regime
+   artifacts. ALWAYS validate on the 5-year data now.
+2. The slope-fade has a real, multi-regime edge; don't destabilize it chasing
+   marginal 18-day gains.
+3. Any new strategy/filter must show **profitability across most of the 6 years**
+   before it's trusted — full-period PnL alone is not enough (2025-26 can carry
+   a losing 2021-24).
