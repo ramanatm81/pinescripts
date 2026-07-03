@@ -26,3 +26,4 @@ input*.xlsx
 output*.xlsx
 positions.xlsx
 results.txt
+ohlcv/mnq_5yr.csv
