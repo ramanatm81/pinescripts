@@ -78,6 +78,11 @@ def run(bars, p):
     blockNYOpen     = p.get("blockNYOpen", False)
     blockLNOpen     = p.get("blockLNOpen", True)
     blockPreNY      = p.get("blockPreNY", True)
+    # breach-fade override (experimental). Requires smoothed S/R (smoothSRPct).
+    enableBreachFade= p.get("enableBreachFade", False)
+    breachFadeBars  = p.get("breachFadeBars", 5)
+    smoothSRPct     = p.get("smoothSRPct", 0.30)
+    breachFadeSL    = p.get("breachFadeSL", True)   # True = manage like normal (SMA stop + TP); False = no SL, exit only on opposite signal
 
     # --- state ---
     inTrade=False; tradeDir=0; entryPrice=None; entrySlope=None
@@ -91,6 +96,10 @@ def run(bars, p):
     closes=[]; highs=[]; lows=[]
     lastFractalHigh=None; lastFractalLow=None
     lastFractalHighBar=None; lastFractalLowBar=None
+    # breach-fade state
+    smHigh=None; smLow=None
+    barsSinceSup=None; barsSinceRes=None
+    breachTradeDir=0
 
     trades=[]  # (dir, entry, exit, pnl_pts, reason, deep)
     pos_size_prev=0  # for posClosed detection not needed; we track inline
@@ -130,6 +139,23 @@ def run(bars, p):
             left = lows[bi-2*w:center]; right = lows[center+1:bi+1]
             if all(cl < x for x in left) and all(cl < x for x in right):
                 lastFractalLow = cl; lastFractalLowBar = center
+            # smoothed S/R: hold flat until a new pivot differs by >= smoothSRPct% of price
+            if enableBreachFade:
+                _isPH = (lastFractalHighBar == center)
+                _isPL = (lastFractalLowBar == center)
+                if _isPH:
+                    _thr = smoothSRPct/100.0*c
+                    smHigh = ch if (smHigh is None or abs(ch-smHigh) >= _thr) else smHigh
+                if _isPL:
+                    _thr = smoothSRPct/100.0*c
+                    smLow = cl if (smLow is None or abs(cl-smLow) >= _thr) else smLow
+
+        # breach counters vs smoothed levels (only tracked when breach-fade is on)
+        if enableBreachFade:
+            if smLow is not None and l < smLow: barsSinceSup = 0
+            elif barsSinceSup is not None: barsSinceSup += 1
+            if smHigh is not None and h > smHigh: barsSinceRes = 0
+            elif barsSinceRes is not None: barsSinceRes += 1
 
         def valid_high():
             if lastFractalHigh is None: return False
@@ -169,7 +195,7 @@ def run(bars, p):
             nonlocal deepLossBlockDir, deepBlockDir, deepBestPrice
             pnl = (exit_price-entryPrice) if tradeDir==1 else (entryPrice-exit_price)
             wasLong = (tradeDir==1)
-            trades.append((tradeDir, entryPrice, exit_price, pnl, reason, entryWasDeep))
+            trades.append((tradeDir, entryPrice, exit_price, pnl, reason, entryWasDeep, dt))
             # pine posClosed bookkeeping: deep profit block / deep loss block
             if enableDeepBlock and entryWasDeep and pnl>0:
                 deepBlockDir = 1 if wasLong else -1
@@ -226,13 +252,27 @@ def run(bars, p):
         if inTrade: barsInTrade+=1
         else: barsInTrade=0
 
-        if enableTExp and inTrade and barsInTrade>=tExpBars:
+        # if a breach trade was just closed by SL/TP/session/EOD above, clear its flag
+        if breachTradeDir!=0 and not inTrade:
+            breachTradeDir=0
+
+        # breach trades: exit on OPPOSITE slope signal (in addition to the SL/TP above).
+        # SL/TP already ran, so this only fires if neither hit. Then skip TEXP/THRD/trail.
+        if enableBreachFade and inTrade and breachTradeDir!=0 and legSlope is not None:
+            oppLong  = legSlope < -slopeEntry
+            oppShort = legSlope >  slopeEntry
+            if (breachTradeDir==-1 and oppLong) or (breachTradeDir==1 and oppShort):
+                close_trade(c,"BF")
+                tradeDir=0; trailStop=None; bestPrice=None; inTrade=False; barsInTrade=0; cooldown=0
+                breachTradeDir=0
+
+        if enableTExp and inTrade and breachTradeDir==0 and barsInTrade>=tExpBars:
             isProfit = (tradeDir==1 and c>entryPrice) or (tradeDir==-1 and c<entryPrice)
             if isProfit:
                 close_trade(c,"TEXP")
                 tradeDir=0; trailStop=None; bestPrice=None; inTrade=False; barsInTrade=0; cooldown=activeCooldown
 
-        if enableTExpHard and inTrade and barsInTrade>=tExpHardBars and legSlope is not None:
+        if enableTExpHard and inTrade and breachTradeDir==0 and barsInTrade>=tExpHardBars and legSlope is not None:
             slopeAgainst = (tradeDir==1 and legSlope<=-tExpHardSlope) or (tradeDir==-1 and legSlope>=tExpHardSlope)
             if slopeAgainst:
                 thrdIsLoss = (tradeDir==1 and c<entryPrice) or (tradeDir==-1 and c>entryPrice)
@@ -279,10 +319,33 @@ def run(bars, p):
                 deepLossBlockLong = deepLossBlockDir==1 and not isDeepSignal
                 deepLossBlockShort= deepLossBlockDir==-1 and not isDeepSignal
 
-        bullEntry = (canTrade and bigEnough and not inFractalDrought and legSlope < -slopeEntry
+        # ===== breach-fade OVERRIDE entry (before normal entries) =====
+        breachActive = False
+        if enableBreachFade:
+            sessionOK = (not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and not ethOpenBlock)
+            shortDue = barsSinceSup is not None and barsSinceSup==breachFadeBars and sessionOK
+            longDue  = barsSinceRes is not None and barsSinceRes==breachFadeBars and sessionOK
+            _slAmt = (slBelowSma if (smaVal is not None and c<smaVal) else slAboveSma) if enableSmaSL else slPts
+            if shortDue and breachTradeDir!=-1:
+                if inTrade:  # reverse an open position first
+                    close_trade(c,"BF-rev")
+                tradeDir=-1; entryPrice=c; entrySlope=legSlope; inTrade=True; breachTradeDir=-1
+                activeSL = _slAmt if breachFadeSL else 1e9   # 1e9 = effectively no SL
+                trailStop=None; bestPrice=None; slExitDir=0; slEntryPrice=None; barrierBuf=None
+                entryWasDeep=False; barsInTrade=0
+            elif longDue and breachTradeDir!=1:
+                if inTrade:
+                    close_trade(c,"BF-rev")
+                tradeDir=1; entryPrice=c; entrySlope=legSlope; inTrade=True; breachTradeDir=1
+                activeSL = _slAmt if breachFadeSL else 1e9
+                trailStop=None; bestPrice=None; slExitDir=0; slEntryPrice=None; barrierBuf=None
+                entryWasDeep=False; barsInTrade=0
+            breachActive = breachTradeDir!=0 or shortDue or longDue
+
+        bullEntry = (canTrade and not breachActive and bigEnough and not inFractalDrought and legSlope < -slopeEntry
                      and slExitDir!=1 and not srBlock and (not inDeepBlock or isDeepSignal)
                      and not deepLossBlockLong)
-        bearEntry = (canTrade and bigEnough and not inFractalDrought and legSlope > slopeEntry
+        bearEntry = (canTrade and not breachActive and bigEnough and not inFractalDrought and legSlope > slopeEntry
                      and slExitDir!=-1 and not srBlock and (not inDeepBlock or isDeepSignal)
                      and not deepLossBlockShort)
 
@@ -299,8 +362,8 @@ def run(bars, p):
             slExitDir=0; slEntryPrice=None; barrierBuf=None
             entryWasDeep=isDeepSignal; deepBlockDir=0; deepLossBlockDir=0
 
-        # ===== trailing stop =====
-        if tradeDir==1 and inTrade:
+        # ===== trailing stop (skips breach-fade trades) =====
+        if tradeDir==1 and inTrade and breachTradeDir==0:
             bestPrice = h if bestPrice is None else max(bestPrice,h)
             exitBestPrice=bestPrice
             if bestPrice-entryPrice >= trailTrigger:
@@ -310,7 +373,7 @@ def run(bars, p):
             if trailStop is not None and l <= trailStop:
                 close_trade(trailStop,"TRAIL")
                 tradeDir=0; trailStop=None; bestPrice=None; inTrade=False; cooldown=activeCooldown
-        elif tradeDir==-1 and inTrade:
+        elif tradeDir==-1 and inTrade and breachTradeDir==0:
             bestPrice = l if bestPrice is None else min(bestPrice,l)
             exitBestPrice=bestPrice
             if entryPrice-bestPrice >= trailTrigger:

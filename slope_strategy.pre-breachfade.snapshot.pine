@@ -40,13 +40,6 @@ showZoneEscape   = input.bool(false, "Mark bars where price escapes the outer S/
 smoothSR         = input.bool(false, "Smooth S/R line — hold level until a pivot breaks threshold (display only)", group="S/R Filter")
 smoothSRPct      = input.float(0.30, "  Smoothing threshold (% of price)", minval=0.01, step=0.05,  group="S/R Filter")
 showRawVsSmooth  = input.bool(false, "  Compare: overlay RAW pivot line (dotted) vs smoothed",     group="S/R Filter")
-
-// --- Breach-fade OVERRIDE mode (experimental; requires smoothSR ON) ---
-// After smoothed SUPPORT is breached, enter SHORT exactly N bars later; after smoothed
-// RESISTANCE is breached, enter LONG N bars later. Exit = the next OPPOSITE slope signal.
-// No hard SL. While active this OVERRIDES all normal slope entries.
-enableBreachFade = input.bool(false, "Breach-fade override (short N bars after support breach; long after resistance)", group="Breach Fade")
-breachFadeBars   = input.int(5,      "  Bars after breach to enter", minval=1, maxval=200, group="Breach Fade")
 enableDroughtBlock = input.bool(false, "Block entry when no fractal for N bars (trending market)", group="S/R Filter")
 droughtBlockBars   = input.int(50,    "Drought threshold (bars without any fractal)",  minval=5, maxval=500, group="S/R Filter")
 blockNYOpen  = input.bool(false,"Block NY open first 30 min (14:30–15:00 London / 08:30–09:00 CT)",       group="Session Filter")
@@ -114,22 +107,6 @@ if fractalHigh
 if fractalLow
     _thrL = smoothSRPct / 100.0 * close
     smLow  := na(smLow) or math.abs(fractalLowVal - smLow) >= _thrL ? fractalLowVal : smLow
-
-// --- Breach-fade tracking: bars since price last breached the OUTER BAND of each level ---
-// Support LOWER band = smLow  - srZoneWidth ; resistance UPPER band = smHigh + srZoneWidth.
-// Breach = price wick pushes beyond that band (low below the lower band / high above the
-// upper band). Reset to 0 on each breach bar; count up otherwise. The entry logic below
-// also requires the breach to STILL hold at bar N (not just have happened N bars ago).
-smLowBand  = na(smLow)  ? na : smLow  - srZoneWidth   // lower support band
-smHighBand = na(smHigh) ? na : smHigh + srZoneWidth   // upper resistance band
-// Count CONSECUTIVE bars price has been breached beyond the band. Reset to 0 the moment
-// price recovers back inside. So "== breachFadeBars" means the breach has HELD for N bars.
-var int supBreachBars = 0   // consecutive bars low is below the lower support band
-var int resBreachBars = 0   // consecutive bars high is above the upper resistance band
-_supBreachNow = not na(smLowBand)  and low  < smLowBand
-_resBreachNow = not na(smHighBand) and high > smHighBand
-supBreachBars := _supBreachNow ? supBreachBars + 1 : 0
-resBreachBars := _resBreachNow ? resBreachBars + 1 : 0
 
 // S/R zone check — true if price is within srZoneWidth of a recent pivot
 _highAge   = na(lastFractalHighBar) ? na : bar_index - lastFractalHighBar
@@ -223,7 +200,6 @@ var float slEntryPrice = na   // entry price of bad trade — anchor for clear c
 var float barrierBuf   = na   // activeSL at time of bad exit
 var bool  thrdReversalPending = false  // true for one bar after THRD exit
 var int   thrdReversalDir     = 0      // direction to enter: 1=Long, -1=Short
-var int   breachTradeDir      = 0      // breach-fade mode: 1=in breach LONG, -1=in breach SHORT, 0=not in a breach trade
 var int    tradeSeq    = 0     // monotonic trade counter (uniqueness seed)
 var string tradeId     = ""    // pseudo-GUID for the current trade — shared by its entry & exit alerts
 var string exitReason  = ""    // reason of the last exit — set at each exit site, read by the exit alert
@@ -326,7 +302,6 @@ if inAnyBlock and inTrade
     bestPrice   := na
     inTrade     := false
     barsInTrade := 0
-    breachTradeDir := 0   // breach trade also flattened at a session block
     cooldown    := 0   // no cooldown — block window itself prevents re-entry
 
 //=============================
@@ -344,7 +319,6 @@ if eodClose
     trailStop        := na
     bestPrice        := na
     inTrade          := false
-    breachTradeDir   := 0   // breach trade also flattened at EOD
     cooldown         := 0
     barsInTrade      := 0
     slExitDir        := 0
@@ -368,7 +342,6 @@ if strategy.position_size == 0 and (inTrade or tradeDir != 0)
     trailStop   := na
     bestPrice   := na
     inTrade     := false
-    breachTradeDir := 0
     cooldown    := activeCooldown
     barsInTrade := 0
     // if it was a stop-out, arm the same barrier state the hard-SL block would have
@@ -435,7 +408,7 @@ if slExitDir != 0 and not inTrade
 // strategy.exit stop= handles the actual fill — don't call strategy.close here
 // or it double-fires and allows a re-entry on the same bar
 //=============================
-if inTrade and strategy.position_size != 0 and breachTradeDir == 0
+if inTrade and strategy.position_size != 0
     hardSLHit = (tradeDir == 1 and low <= entryPrice - activeSL) or (tradeDir == -1 and high >= entryPrice + activeSL)
     if hardSLHit
         slExitDir    := tradeDir
@@ -460,7 +433,7 @@ if inTrade and strategy.position_size != 0
 else if not inTrade
     barsInTrade := 0
 
-if enableTExp and inTrade and strategy.position_size != 0 and barsInTrade >= tExpBars and breachTradeDir == 0
+if enableTExp and inTrade and strategy.position_size != 0 and barsInTrade >= tExpBars
     isProfit = (tradeDir == 1 and close > entryPrice) or (tradeDir == -1 and close < entryPrice)
     if isProfit
         strategy.cancel("Exit-Long")
@@ -480,7 +453,7 @@ if enableTExp and inTrade and strategy.position_size != 0 and barsInTrade >= tEx
 // All slope inputs are absolute values, applied directionally:
 //   Long  entered on legSlope < -slopeEntry → mean reversion failed if slope STILL <= -tExpHardSlope (trend never reversed)
 //   Short entered on legSlope > +slopeEntry → mean reversion failed if slope STILL >= +tExpHardSlope (trend never reversed)
-if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >= tExpHardBars and not na(legSlope) and breachTradeDir == 0
+if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >= tExpHardBars and not na(legSlope)
     slopeAgainst = (tradeDir == 1 and legSlope <= -tExpHardSlope) or (tradeDir == -1 and legSlope >= tExpHardSlope)
     if slopeAgainst
         thrdIsLoss = (tradeDir == 1 and close < entryPrice) or (tradeDir == -1 and close > entryPrice)
@@ -557,74 +530,6 @@ if thrdReversalPending and not inTrade and cooldown == 0 and not eodClose and ti
         label.new(bar_index, high, text="T↓", style=label.style_label_down, color=color.new(color.teal, 10), textcolor=color.white, size=size.normal)
 
 //=============================
-// BREACH-FADE OVERRIDE (experimental; only when enableBreachFade AND smoothSR are ON).
-// - Enter SHORT exactly breachFadeBars after a support breach; LONG after a resistance breach.
-// - Exit = the next OPPOSITE normal slope signal (no hard SL).
-// - While a breach trade is active (or an entry is due this bar), it OVERRIDES all normal
-//   slope entries below.
-// Raw opposite-slope signals used only as the breach-trade exit trigger:
-//   breach SHORT closes on a LONG  slope reading (legSlope < -slopeEntry)
-//   breach LONG  closes on a SHORT slope reading (legSlope >  slopeEntry)
-//=============================
-breachOn = enableBreachFade and smoothSR
-_oppLongSig  = not na(legSlope) and legSlope < -slopeEntry   // long-side slope → exits a breach short
-_oppShortSig = not na(legSlope) and legSlope >  slopeEntry   // short-side slope → exits a breach long
-
-// Entry due when the breach has HELD for exactly breachFadeBars consecutive bars — i.e.
-// price breached the band AND is still breached N bars later (not just N bars ago).
-_sessionOK = not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and not ethOpenBlock and time >= startDate and time <= endDate
-breachShortDue = breachOn and supBreachBars == breachFadeBars and _sessionOK
-breachLongDue  = breachOn and resBreachBars == breachFadeBars and _sessionOK
-
-// 1) EXIT an active breach trade on the opposite slope signal
-if breachOn and breachTradeDir == -1 and _oppLongSig
-    strategy.close("Short", comment="BF-exit")
-    exitReason := "BF"
-    exitedDir  := -1
-    tradeDir   := 0
-    inTrade    := false
-    breachTradeDir := 0
-    cooldown   := 0
-    label.new(bar_index, low, text="BF✕", style=label.style_label_up, color=color.new(color.blue, 10), textcolor=color.white, size=size.small)
-else if breachOn and breachTradeDir == 1 and _oppShortSig
-    strategy.close("Long", comment="BF-exit")
-    exitReason := "BF"
-    exitedDir  := 1
-    tradeDir   := 0
-    inTrade    := false
-    breachTradeDir := 0
-    cooldown   := 0
-    label.new(bar_index, high, text="BF✕", style=label.style_label_down, color=color.new(color.blue, 10), textcolor=color.white, size=size.small)
-
-// 2) ENTER a breach trade on the Nth bar. Flip any opposite position first. LONG priority
-//    if both fire same bar (rare). Overrides normal entries via breachActive below.
-if breachShortDue and breachTradeDir != -1
-    strategy.entry("Short", strategy.short, comment="BF↓")   // reverses a long if one is open
-    tradeDir   := -1
-    entryPrice := close
-    inTrade    := true
-    barsInTrade := 0
-    breachTradeDir := -1
-    activeSL   := na          // no hard SL in breach-fade mode
-    tradeSeq += 1
-    tradeId := makeTradeId(tradeSeq)
-    label.new(bar_index, high, text="BF↓", style=label.style_label_down, color=color.new(color.maroon, 5), textcolor=color.white, size=size.normal)
-else if breachLongDue and breachTradeDir != 1
-    strategy.entry("Long", strategy.long, comment="BF↑")
-    tradeDir   := 1
-    entryPrice := close
-    inTrade    := true
-    barsInTrade := 0
-    breachTradeDir := 1
-    activeSL   := na
-    tradeSeq += 1
-    tradeId := makeTradeId(tradeSeq)
-    label.new(bar_index, low, text="BF↑", style=label.style_label_up, color=color.new(color.navy, 5), textcolor=color.white, size=size.normal)
-
-// While breach mode holds control, suppress all normal slope entries this bar.
-breachActive = breachOn and (breachTradeDir != 0 or breachShortDue or breachLongDue)
-
-//=============================
 // Entry signals
 // legSlope < -slopeEntry → downtrend → enter LONG (mean reversion / reversal)
 // legSlope >  slopeEntry → uptrend   → enter SHORT
@@ -632,8 +537,8 @@ breachActive = breachOn and (breachTradeDir != 0 or breachShortDue or breachLong
 canTrade  = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and not ethOpenBlock and time >= startDate and time <= endDate and not na(legSlope)
 bigEnough = not enableBodyFilter or (math.abs(close - open) >= minBodyPts)
 
-bullEntry = canTrade and bigEnough and not inFractalDrought and legSlope < -slopeEntry and slExitDir != 1  and not srBlockLong  and not breachActive
-bearEntry = canTrade and bigEnough and not inFractalDrought and legSlope >  slopeEntry and slExitDir != -1 and not srBlockShort and not breachActive
+bullEntry = canTrade and bigEnough and not inFractalDrought and legSlope < -slopeEntry and slExitDir != 1  and not srBlockLong
+bearEntry = canTrade and bigEnough and not inFractalDrought and legSlope >  slopeEntry and slExitDir != -1 and not srBlockShort
 
 if bullEntry
     tp  = close + tpPts * tpMult
@@ -651,7 +556,6 @@ if bullEntry
     trailStop   := na
     bestPrice   := na
     inTrade     := true
-    barsInTrade := 0          // fresh trade — reset even when flipping straight from a BF trade
     activeSL    := enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
     _isDeep     = math.abs(legSlope) >= deepSlope
     tradeSeq += 1
@@ -679,7 +583,6 @@ else if bearEntry
     trailStop  := na
     bestPrice  := na
     inTrade    := true
-    barsInTrade := 0          // fresh trade — reset even when flipping straight from a BF trade
     activeSL   := enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
     _isDeep    = math.abs(legSlope) >= deepSlope
     tradeSeq += 1
@@ -697,7 +600,7 @@ else if bearEntry
 var bool trailFired = false
 trailFired := false
 
-if tradeDir == 1 and strategy.position_size != 0 and breachTradeDir == 0
+if tradeDir == 1 and strategy.position_size != 0
     bestPrice := na(bestPrice) ? high : math.max(bestPrice, high)
     if bestPrice - entryPrice >= trailTrigger
         // wider trail when slope still strongly in favour (continuing down = still mean-reverting up)
@@ -715,7 +618,7 @@ if tradeDir == 1 and strategy.position_size != 0 and breachTradeDir == 0
         inTrade   := false
         cooldown  := activeCooldown
 
-else if tradeDir == -1 and strategy.position_size != 0 and breachTradeDir == 0
+else if tradeDir == -1 and strategy.position_size != 0
     bestPrice := na(bestPrice) ? low : math.min(bestPrice, low)
     if entryPrice - bestPrice >= trailTrigger
         // wider trail when slope strongly confirms short direction (deeply negative = price falling)
@@ -824,11 +727,6 @@ if posClosed
 plot(legSlope,                          "legSlope",      color=color.rgb(100,180,255), display=display.data_window)
 plot(tradeLegSlope,                     "tradeLegSlope", color=color.rgb(255,200,80),  display=display.data_window)
 plot(activeSL,                          "activeSL",      color=color.rgb(255,160,80),  display=display.data_window)
-plot(supBreachBars,                     "supBreachBars",   color=color.rgb(120,200,255), display=display.data_window)
-plot(resBreachBars,                     "resBreachBars",   color=color.rgb(120,200,255), display=display.data_window)
-plot(smLowBand,                         "smLowBand",       color=color.rgb(120,200,255), display=display.data_window)
-plot(smHighBand,                        "smHighBand",      color=color.rgb(120,200,255), display=display.data_window)
-plot(breachTradeDir,                    "breachTradeDir",     color=color.rgb(200,120,255), display=display.data_window)
 plot(smaVal,                            "SMA",           color=color.rgb(255,220,100), display=display.data_window)
 plot(inTrade  ? 1 : 0,                 "inTrade",       color=color.purple,           display=display.data_window)
 plot(tradeDir,                          "tradeDir",      color=color.white,            display=display.data_window)
@@ -869,7 +767,7 @@ var table statsTable = table.new(position.bottom_right, 2, 6,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Galway",             text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Cork",               text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
