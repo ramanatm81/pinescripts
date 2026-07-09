@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "ohlc-data-server": {
+      "command": "/Users/maheshk81/.local/bin/uv",
+      "args": ["run", "--no-project", "/Users/maheshk81/pinescripts/ohlc_mcp_server.py"],
+      "env": {}
+    }
+  }
+}

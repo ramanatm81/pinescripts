@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime, time, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -49,7 +50,6 @@ REQUIRED_COLS = [
     "Price USD",
     "Size (qty)",
     "Net P&L USD",
-    "Net P&L %",
     "Favorable excursion USD",
     "Adverse excursion USD",
 ]
@@ -58,14 +58,12 @@ REQUIRED_COLS = [
 CSV_COL_MAP = {
     "Trade number":            "Trade #",
     "Net PnL USD":             "Net P&L USD",
-    "Net PnL %":               "Net P&L %",
     "Favorable excursion USD": "Favorable excursion USD",
     "Adverse excursion USD":   "Adverse excursion USD",
 }
 
 MONEY_FMT = '$#,##0.00;($#,##0.00);-'
 PCT_FMT = '0.0%;(0.0%);-'
-PCT_TV_FMT = '0.00"%";(0.00"%");-'  # TV stores % as "percentage points" already
 DT_FMT = 'yyyy-mm-dd hh:mm'
 
 
@@ -92,6 +90,38 @@ def load_trades(input_path: Path) -> pd.DataFrame:
             f"Expected a TradingView strategy export (.xlsx or .csv)."
         )
     return df
+
+
+# NQ/MNQ globex session: previous day 23:30 -> 21:00 today.
+SESSION_START = time(23, 30)   # on the day BEFORE the anchor date
+SESSION_END = time(21, 0)      # on the anchor date
+
+
+def current_day_window(anchor_date) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """Return [start, end) timestamps for the business-day session ending on
+    anchor_date: previous calendar day 23:30 through anchor_date 21:00."""
+    start = pd.Timestamp(datetime.combine(anchor_date - timedelta(days=1), SESSION_START))
+    end = pd.Timestamp(datetime.combine(anchor_date, SESSION_END))
+    return start, end
+
+
+def filter_current_day(df: pd.DataFrame, anchor_date) -> pd.DataFrame:
+    """Keep only trade rows whose 'Date and time' falls in the current
+    business-day session window [prev-day 23:30, anchor_date 21:00).
+
+    Filters on the raw trade timestamps before position aggregation. Because
+    a position's entry defines its window membership and pyramid adds/exits
+    follow the entry within the same session, restricting to entries in the
+    window (and their matching Trade #s) keeps positions intact.
+    """
+    start, end = current_day_window(anchor_date)
+    dt = pd.to_datetime(df["Date and time"])
+    in_window = (dt >= start) & (dt < end)
+
+    entries = df["Type"].str.startswith("Entry")
+    # Trade #s whose ENTRY leg lands in the window
+    keep_ids = set(df.loc[in_window & entries, "Trade #"].unique())
+    return df[df["Trade #"].isin(keep_ids)].copy()
 
 
 def aggregate_positions(df: pd.DataFrame) -> tuple[pd.DataFrame, list[list[dict]]]:
@@ -170,7 +200,6 @@ def aggregate_positions(df: pd.DataFrame) -> tuple[pd.DataFrame, list[list[dict]
         # Trade #; summing entries gives the position's realized P&L
         # without double-counting.
         total_pnl = entries_df["Net P&L USD"].sum()
-        total_pnl_pct = entries_df["Net P&L %"].sum()
         duration_min = (exit_time - entry_time).total_seconds() / 60
 
         initial_signal = entries_df.sort_values("Date and time").iloc[0]["Signal"]
@@ -193,7 +222,6 @@ def aggregate_positions(df: pd.DataFrame) -> tuple[pd.DataFrame, list[list[dict]
             "Qty": total_qty,
             "# Entries": len(entries_df),
             "Net P&L USD": round(total_pnl, 2),
-            "Net P&L %": round(total_pnl_pct, 4),
             "MFE USD": round(mfe, 2),
             "MAE USD": round(mae, 2),
             "Duration (min)": round(duration_min, 1),
@@ -219,7 +247,6 @@ def aggregate_positions(df: pd.DataFrame) -> tuple[pd.DataFrame, list[list[dict]
                 "Qty": int(ent["Size (qty)"]),
                 "# Entries": "",
                 "Net P&L USD": round(ent["Net P&L USD"], 2),
-                "Net P&L %": round(ent["Net P&L %"], 4),
                 "MFE USD": round(ent["Favorable excursion USD"], 2),
                 "MAE USD": round(ent["Adverse excursion USD"], 2),
                 "Duration (min)": round(child_dur, 1),
@@ -256,7 +283,6 @@ POS_HEADERS = [
     "Qty",
     "# Entries",
     "Net P&L USD",
-    "Net P&L %",
     "MFE USD",
     "MAE USD",
     "Duration (min)",
@@ -277,7 +303,6 @@ WIDTHS = {
     "Qty": 7,
     "# Entries": 11,
     "Net P&L USD": 13,
-    "Net P&L %": 11,
     "MFE USD": 12,
     "MAE USD": 12,
     "Duration (min)": 13,
@@ -295,7 +320,6 @@ NUM_FMTS = {
     "Qty": "0",
     "# Entries": "0",
     "Net P&L USD": MONEY_FMT,
-    "Net P&L %": PCT_TV_FMT,
     "MFE USD": MONEY_FMT,
     "MAE USD": MONEY_FMT,
     "Duration (min)": "0",
@@ -639,6 +663,13 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Print a text summary of positions to stdout",
     )
+    parser.add_argument(
+        "--current-day",
+        action="store_true",
+        help="Only report the current business day's session: previous day "
+             "23:30 through 21:00 today (NQ/MNQ globex window, by system clock). "
+             "Filters on entry time.",
+    )
     args = parser.parse_args(argv)
 
     if not args.input.is_absolute():
@@ -651,13 +682,26 @@ def main(argv: list[str] | None = None) -> int:
     if args.output:
         output = args.output
     else:
-        from datetime import datetime
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         output = args.input.with_name(f"positions_{ts}.xlsx")
 
     print(f"Reading: {args.input}")
     trades_df = load_trades(args.input)
     print(f"  {len(trades_df)} trade rows ({trades_df['Trade #'].nunique()} trades)")
+
+    if args.current_day:
+        anchor = datetime.now().date()
+        start, end = current_day_window(anchor)
+        trades_df = filter_current_day(trades_df, anchor)
+        print(
+            f"  --current-day: {start:%Y-%m-%d %H:%M} -> {end:%Y-%m-%d %H:%M}  "
+            f"-> {len(trades_df)} trade rows "
+            f"({trades_df['Trade #'].nunique()} trades)"
+        )
+        if trades_df.empty:
+            print("No trades in the current business-day window — nothing to write.",
+                  file=sys.stderr)
+            return 1
 
     pos_df, children = aggregate_positions(trades_df)
     print(f"  Aggregated into {len(pos_df)} positions")
