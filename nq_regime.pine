@@ -1,0 +1,192 @@
+//@version=6
+// ============================================================================
+//  NQ REGIME (MTF) — directional vs mean-reversion classifier for NQ / MNQ
+// ----------------------------------------------------------------------------
+//  Judges the regime on a HIGHER timeframe (default 1-hour) and displays it on
+//  your execution chart (1m / 5m). Binary by design — NEVER flat: the market is
+//  always DIRECTIONAL (trends run → favour the trend / Distance account) or
+//  MEAN-REVERSION (chop/range → favour the fade side). Also flags WHEN it changed.
+//
+//  WHY HIGHER TIMEFRAME (arxiv research — see docs/regime_detection_research.md):
+//    On 1-min, index futures are statistically indistinguishable from a random
+//    walk (Hurst ≈ 0.5) — regime is undetectable. Detectability rises with bar
+//    size; the trending regime lives ~1 hour to months (Safari-Schmidhuber 2025,
+//    arXiv:2501.16772). So judge the STATE on the 1h bar, execute on your ladder.
+//
+//  METHOD (all causal, Pine-computable, no matrices/EM/ML):
+//    • Rolling regression R² + slope (on the HTF) — the current-state axis.
+//        R² has a calibrated significance table (N=20 → R²>0.20 = real trend),
+//        which the Efficiency Ratio lacks (and ER's textbook direction backtests
+//        inverted). High R² + slope sign = clean directional; low R² = chop.
+//        ref: tradingpedia R² critical values.
+//    • Volatility Switch (McEwan/LazyBear) — a second orthogonal vote: falling
+//        vol → trend mode, rising vol → mean-reversion mode. threshold 0.5.
+//    • CUSUM on standardized HTF returns — the CHANGE-POINT timer ("when did it
+//        change"), tunable lag/false-alarm via k (slack) and h (interval).
+//        ref: NIST CUSUM handbook; Page-Hinkley (River).
+//    • Hysteresis (N-bar debounce + min-dwell) so the label doesn't flip-flop.
+//
+//  MTF SAFETY: HTF values are read from the CONFIRMED prior HTF bar
+//    (request.security(..., lookahead=off) + [1]) so nothing repaints.
+//
+//  HONEST NOTE (arxiv 2605.11423; setup4alpha found 11/12 regime filters LOST
+//    money vs buy-and-hold; this repo's fade-filters-hurt finding): regime tools
+//    help drawdown/win-rate more than net P&L, and rarely give a standalone edge.
+//    Use as CONTEXT (which account to run) — validate removed-trade W/L before
+//    trusting it to gate real trades.
+// ============================================================================
+indicator("NQ Regime (MTF)", overlay=true, max_labels_count=500)
+
+//=============================
+// Inputs
+//=============================
+regimeTF   = input.timeframe("60", "Regime timeframe (judge on this)", group="Timeframe")
+
+// R² trend axis — significance thresholds are N-dependent (verified table):
+//   N=10→0.40, 14→0.27, 20→0.20, 30→0.13, 50→0.08. Pick N, then set r2Trend to match.
+r2Len      = input.int(20,   "R² / regression length (HTF bars)", minval=5, maxval=200, group="Signals")
+r2Trend    = input.float(0.20,"R² ≥ this = directional (else mean-reversion)", minval=0.01, maxval=0.99, step=0.01, group="Signals")
+
+// Volatility Switch — normalized realized-vol rank in [0,1]; >0.5 rising vol (fade), <0.5 falling (trend).
+volLen     = input.int(21,   "Volatility Switch lookback (HTF bars)", minval=5, maxval=100, group="Signals")
+useVolVote = input.bool(true, "Require vol-switch to confirm the regime", group="Signals")
+
+// CUSUM change-point on standardized HTF returns.
+cusumLen   = input.int(100,  "CUSUM baseline window (HTF bars)", minval=20, maxval=500, group="Change-point")
+cusumK     = input.float(0.5,"CUSUM slack k (σ units — shift to detect)", minval=0.1, step=0.1, group="Change-point")
+cusumH     = input.float(5.0,"CUSUM interval h (higher = fewer false alarms)", minval=1.0, step=0.5, group="Change-point")
+
+// Hysteresis on the final label.
+confirmBars= input.int(3,   "Confirm bars (state must persist)", minval=1, maxval=50, group="Regime")
+minDwell   = input.int(6,   "Min HTF-bars to hold a regime", minval=0, maxval=200, group="Regime")
+
+showBg     = input.bool(true, "Shade background by regime", group="Display")
+showLabels = input.bool(true, "Mark regime changes on chart", group="Display")
+
+//=============================
+// HTF SERIES — computed on the regime timeframe, pulled in with no lookahead.
+// We compute the raw regime STATE (+1/-1) and the change-point flag on the HTF
+// itself inside a function, then request the CONFIRMED prior HTF bar's values.
+//=============================
+regimeHTF() =>
+    // --- R² of a linear fit of close vs bar index, + slope sign ---
+    _r     = math.log(close / close[1])
+    _r2    = math.pow(ta.correlation(close, bar_index, r2Len), 2)
+    _slope = ta.linreg(close, r2Len, 0) - ta.linreg(close, r2Len, 1)   // 1-bar change of the fit = slope sign
+    // --- Volatility Switch: rank of |return| vs its own recent window (0..1) ---
+    _absr  = math.abs(_r)
+    _volRank = ta.percentrank(_absr, volLen) / 100.0   // 0..1; >0.5 = elevated (rising) vol
+    _volTrendMode = _volRank < 0.5                     // falling vol → trend-friendly
+    // --- raw state: directional if R² high AND (optionally) vol confirms ---
+    _r2Dir = _r2 >= r2Trend
+    _rawDir = useVolVote ? (_r2Dir and _volTrendMode) : _r2Dir
+    _state = _rawDir ? 1 : -1
+    // --- CUSUM change-point on standardized returns ---
+    _mean = ta.sma(_r, cusumLen)
+    _sd   = ta.stdev(_r, cusumLen)
+    _z    = _sd > 0 ? (_r - _mean) / _sd : 0.0
+    var float _sPos = 0.0
+    var float _sNeg = 0.0
+    _sPos := math.max(0.0, _sPos + _z - cusumK)
+    _sNeg := math.max(0.0, _sNeg - _z - cusumK)
+    _cp = _sPos > cusumH or _sNeg > cusumH
+    if _cp
+        _sPos := 0.0
+        _sNeg := 0.0
+    [_state, _r2, _slope, _volRank, _cp]
+
+[htfState, htfR2, htfSlope, htfVolRank, htfCP] =
+     request.security(syminfo.tickerid, regimeTF, regimeHTF(), lookahead=barmerge.lookahead_off)
+
+// Use the CONFIRMED prior HTF bar to avoid repaint on the still-forming HTF bar.
+rawState = htfState[1]
+r2Now    = htfR2[1]
+slopeNow = htfSlope[1]
+volRank  = htfVolRank[1]
+cpFlag   = htfCP[1]
+
+//=============================
+// Final label with hysteresis (deadband via confirmBars + min-dwell).
+// Binary: regime is always +1 (DIRECTIONAL) or -1 (MEAN-REVERSION), never 0.
+// A CUSUM change-point flag SHORTCUTS the dwell (a real break can flip early).
+//=============================
+var int regime     = 1
+var int barsInReg  = 0
+var int dirStreak  = 0
+var int revStreak  = 0
+var int lastChgBar = na
+
+barsInReg := barsInReg + 1
+dirStreak := rawState == 1  ? dirStreak + 1 : 0
+revStreak := rawState == -1 ? revStreak + 1 : 0
+
+_dwellOK   = barsInReg >= minDwell or cpFlag        // change-point can bypass the dwell
+regimeChanged = false
+if _dwellOK
+    if regime != 1 and dirStreak >= confirmBars
+        regime := 1
+        barsInReg := 0
+        lastChgBar := bar_index
+        regimeChanged := true
+    else if regime != -1 and revStreak >= confirmBars
+        regime := -1
+        barsInReg := 0
+        lastChgBar := bar_index
+        regimeChanged := true
+
+isDir = regime == 1
+
+//=============================
+// Visuals
+//=============================
+bgcolor(showBg ? (isDir ? color.new(color.teal, 90) : color.new(color.orange, 90)) : na)
+
+if showLabels and regimeChanged
+    label.new(bar_index, isDir ? low : high,
+         text  = isDir ? "▲ DIRECTIONAL" : "▼ MEAN-REVERSION",
+         style = isDir ? label.style_label_up : label.style_label_down,
+         color = isDir ? color.new(color.teal, 10) : color.new(color.orange, 10),
+         textcolor = color.white, size = size.small)
+
+// optional small tick where the HTF CUSUM fired (change-point evidence)
+plotshape(cpFlag and not regimeChanged, "CUSUM break", shape.xcross, location.abovebar,
+     color=color.new(color.gray, 40), size=size.tiny)
+
+//=============================
+// Status table — bottom-right
+//=============================
+var table t = table.new(position.bottom_right, 2, 6,
+     bgcolor=color.new(color.black, 15), border_width=1, border_color=color.new(color.gray, 60))
+if barstate.islast
+    _regTxt = isDir ? "DIRECTIONAL" : "MEAN-REVERSION"
+    _regCol = isDir ? color.teal : color.orange
+    table.cell(t, 0, 0, "NQ REGIME " + regimeTF, text_color=color.yellow, text_size=size.normal, bgcolor=color.new(color.navy, 10))
+    table.cell(t, 1, 0, _regTxt, text_color=_regCol, text_size=size.normal, bgcolor=color.new(color.navy, 10))
+    table.cell(t, 0, 1, "Held (bars)", text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 1, str.tostring(barsInReg), text_color=color.new(color.white, 0), text_size=size.small)
+    table.cell(t, 0, 2, "Changed at", text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 2, na(lastChgBar) ? "—" : str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London"), text_color=color.new(color.white,0), text_size=size.small)
+    table.cell(t, 0, 3, "R² (trend)", text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 3, str.tostring(r2Now, "#.###") + (slopeNow >= 0 ? " ↑" : " ↓"), text_color=r2Now >= r2Trend ? color.teal : color.orange, text_size=size.small)
+    table.cell(t, 0, 4, "Vol rank", text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 4, str.tostring(volRank, "#.##") + (volRank < 0.5 ? " (trend)" : " (fade)"), text_color=color.new(color.white,0), text_size=size.small)
+    table.cell(t, 0, 5, "CUSUM break", text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 5, cpFlag ? "● now" : "—", text_color=cpFlag ? color.red : color.new(color.white,0), text_size=size.small)
+
+//=============================
+// Alerts — fire once per bar on a regime flip
+//=============================
+if regimeChanged
+    alert("NQ regime → " + (isDir ? "DIRECTIONAL" : "MEAN-REVERSION") +
+          " @ " + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London"), alert.freq_once_per_bar)
+alertcondition(regimeChanged and isDir,     "→ DIRECTIONAL",     "NQ regime changed to DIRECTIONAL")
+alertcondition(regimeChanged and not isDir,  "→ MEAN-REVERSION",  "NQ regime changed to MEAN-REVERSION")
+
+//=============================
+// Data-window debug
+//=============================
+plot(regime,   "regime",   color=color.white,  display=display.data_window)
+plot(r2Now,    "r2",       color=color.aqua,   display=display.data_window)
+plot(slopeNow, "slope",    color=color.lime,   display=display.data_window)
+plot(volRank,  "volRank",  color=color.orange, display=display.data_window)
+plot(cpFlag ? 1 : 0, "cusumBreak", color=color.red, display=display.data_window)

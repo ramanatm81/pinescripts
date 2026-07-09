@@ -2,7 +2,7 @@
 name = "pinescripts-tooling"
 version = "0.1.0"
 description = "Python tooling for the pinescripts trading project: backtest harness, TradingView export processing, OHLC MCP server, and market-data ETL."
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 
 # Runtime dependencies actually imported by the project's Python modules.
 dependencies = [

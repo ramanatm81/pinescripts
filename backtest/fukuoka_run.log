@@ -1,0 +1,27 @@
+=== Fukuoka slope defaults validated on 5yr (was tuned on 18 days) ===
+
+-- slopeEntry (Fukuoka=2.5, pre-Fukuoka=1.7) --
+slopeEntry=1.7         full=   29752 win61% n17704 | 5/6 yrs | [235, 7532, -1383, 2276, 11257, 9779]
+slopeEntry=2.0         full=   29414 win61% n16535 | 5/6 yrs | [125, 7736, -1650, 2593, 10945, 9672]
+slopeEntry=2.5         full=   30578 win61% n14469 | 4/6 yrs | [-40, 5924, -1659, 3095, 11797, 11479]
+slopeEntry=3.0         full=   29034 win61% n12550 | 5/6 yrs | [1594, 5471, -1452, 1648, 12300, 9526]
+
+-- trailDist (Fukuoka=8, pre=10) --
+trailDist=8            full=   30578 win61% n14469 | 4/6 yrs | [-40, 5924, -1659, 3095, 11797, 11479]
+trailDist=10           full=   23911 win61% n14467 | 4/6 yrs | [-243, 4283, -2124, 2130, 10002, 9881]
+trailDist=12           full=   18392 win61% n14456 | 4/6 yrs | [-416, 2847, -2340, 1288, 8478, 8553]
+
+-- tpPts (Fukuoka=50, pre=40) --
+tpPts=40               full=   30428 win61% n14469 | 4/6 yrs | [-40, 5924, -1659, 3065, 11707, 11449]
+tpPts=50               full=   30578 win61% n14469 | 4/6 yrs | [-40, 5924, -1659, 3095, 11797, 11479]
+tpPts=60               full=   30596 win61% n14469 | 4/6 yrs | [-40, 5924, -1659, 3074, 11836, 11478]
+
+-- tExpBars (Fukuoka=20, pre=30) --
+tExpBars=20            full=   30578 win61% n14469 | 4/6 yrs | [-40, 5924, -1659, 3095, 11797, 11479]
+tExpBars=30            full=   24738 win56% n15604 | 4/6 yrs | [-396, 4668, -1083, 1930, 9606, 10013]
+
+-- pre-Fukuoka vs Fukuoka head-to-head --
+PRE-Fukuoka(1.7)       full=   13464 win55% n19148 | 4/6 yrs | [-436, 2341, -2616, 650, 6952, 6645]
+FUKUOKA(2.5)           full=   30578 win61% n14469 | 4/6 yrs | [-40, 5924, -1659, 3095, 11797, 11479]
+
+wrote fukuoka_5yr_results.txt

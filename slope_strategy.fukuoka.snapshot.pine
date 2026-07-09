@@ -23,12 +23,12 @@ enableTExpHard   = input.bool(true, "Enable hard time expiry (exit even if loss,
 tExpHardBars     = input.int(20,    "Hard max bars (exit if slope against trade)",                minval=1,  maxval=500, group="Time Expiry")
 tExpHardSlope    = input.float(1.0, "Slope 'against' threshold for hard exit",                   minval=0.1, step=0.1,  group="Time Expiry")
 enableThrdReversal = input.bool(true,  "On THRD exit, immediately enter opposite direction",     group="Time Expiry")
+enableDeepBlock    = input.bool(false, "After profitable deep trade, block shallow entries until price revisits best price", group="R² Filter")
 dojiPct      = input.float(10.0,"Doji body % of range (excluded from R²)", minval=1.0, maxval=49.0, step=1.0, group="R² Filter")
 cooldownBars    = input.int(10, "Cooldown bars after exit — ETH (0 = none)", minval=0,  maxval=50,           group="R² Filter")
 cooldownBarsRTH = input.int(10, "Cooldown bars after exit — RTH (0 = none)", minval=0,  maxval=50,           group="R² Filter")
 deepSlope    = input.float(3.0, "Deep slope threshold (D↑/D↓ label)",              minval=0.5, step=0.1,    group="R² Filter")
-barrierNeedsSlopeFlip = input.bool(true, "Barrier clears only if slope also flipped toward the trade (not just price recovery)", group="R² Filter")
-barrierFlipSlope      = input.float(0.0, "  Slope-flip threshold for barrier clear", step=0.1, group="R² Filter")
+enableDeepLossOppBlock = input.bool(false, "After deep loss, block ALL trades until an opposite-direction deep signal fires", group="R² Filter")
 enableBodyFilter = input.bool(false, "Block entry if signal bar body < min size",                          group="R² Filter")
 minBodyPts       = input.float(10.0, "Min body size (pts)",               minval=0.5, step=0.5,            group="R² Filter")
 enableSRFilter   = input.bool(true,  "Block entries near S/R pivots",                            group="S/R Filter")
@@ -36,17 +36,6 @@ srHalfWidth      = input.int(10,     "Fractal half-width (bars each side, 10=21-
 srZoneWidth      = input.float(25.0, "Zone width (pts either side of pivot)", minval=1.0, step=0.5, group="S/R Filter")
 srLookback       = input.int(0,     "Pivot lookback (bars, 0=all)",   minval=0,   maxval=500,    group="S/R Filter")
 showSRZones      = input.bool(false, "Draw S/R zones on chart (±zone band around active pivots)",  group="S/R Filter")
-showZoneEscape   = input.bool(false, "Mark bars where price escapes the outer S/R zone",           group="S/R Filter")
-smoothSR         = input.bool(false, "Smooth S/R line — hold level until a pivot breaks threshold (display only)", group="S/R Filter")
-smoothSRPct      = input.float(0.30, "  Smoothing threshold (% of price)", minval=0.01, step=0.05,  group="S/R Filter")
-showRawVsSmooth  = input.bool(false, "  Compare: overlay RAW pivot line (dotted) vs smoothed",     group="S/R Filter")
-
-// --- Breach-fade OVERRIDE mode (experimental; requires smoothSR ON) ---
-// After smoothed SUPPORT is breached, enter SHORT exactly N bars later; after smoothed
-// RESISTANCE is breached, enter LONG N bars later. Exit = the next OPPOSITE slope signal.
-// No hard SL. While active this OVERRIDES all normal slope entries.
-enableBreachFade = input.bool(false, "Breach-fade override (short N bars after support breach; long after resistance)", group="Breach Fade")
-breachFadeBars   = input.int(5,      "  Bars after breach to enter", minval=1, maxval=200, group="Breach Fade")
 enableDroughtBlock = input.bool(false, "Block entry when no fractal for N bars (trending market)", group="S/R Filter")
 droughtBlockBars   = input.int(50,    "Drought threshold (bars without any fractal)",  minval=5, maxval=500, group="S/R Filter")
 blockNYOpen  = input.bool(false,"Block NY open first 30 min (14:30–15:00 London / 08:30–09:00 CT)",       group="Session Filter")
@@ -102,35 +91,6 @@ if fractalLow
     lastFractalLow     := fractalLowVal
     lastFractalLowBar  := bar_index - srHalfWidth
 
-// ---- Smoothed S/R levels (DISPLAY ONLY — does not touch the entry filter) ----
-// Hold the current level exactly until a new pivot differs by >= threshold, then snap
-// to it. Threshold is a % of price so 'flatness' is consistent as NQ price scales over
-// years. Small pivot wobble reads as an absolutely flat line; only outliers step it.
-var float smHigh = na
-var float smLow  = na
-if fractalHigh
-    _thrH = smoothSRPct / 100.0 * close
-    smHigh := na(smHigh) or math.abs(fractalHighVal - smHigh) >= _thrH ? fractalHighVal : smHigh
-if fractalLow
-    _thrL = smoothSRPct / 100.0 * close
-    smLow  := na(smLow) or math.abs(fractalLowVal - smLow) >= _thrL ? fractalLowVal : smLow
-
-// --- Breach-fade tracking: bars since price last breached the OUTER BAND of each level ---
-// Support LOWER band = smLow  - srZoneWidth ; resistance UPPER band = smHigh + srZoneWidth.
-// Breach = price wick pushes beyond that band (low below the lower band / high above the
-// upper band). Reset to 0 on each breach bar; count up otherwise. The entry logic below
-// also requires the breach to STILL hold at bar N (not just have happened N bars ago).
-smLowBand  = na(smLow)  ? na : smLow  - srZoneWidth   // lower support band
-smHighBand = na(smHigh) ? na : smHigh + srZoneWidth   // upper resistance band
-// Count CONSECUTIVE bars price has been breached beyond the band. Reset to 0 the moment
-// price recovers back inside. So "== breachFadeBars" means the breach has HELD for N bars.
-var int supBreachBars = 0   // consecutive bars low is below the lower support band
-var int resBreachBars = 0   // consecutive bars high is above the upper resistance band
-_supBreachNow = not na(smLowBand)  and low  < smLowBand
-_resBreachNow = not na(smHighBand) and high > smHighBand
-supBreachBars := _supBreachNow ? supBreachBars + 1 : 0
-resBreachBars := _resBreachNow ? resBreachBars + 1 : 0
-
 // S/R zone check — true if price is within srZoneWidth of a recent pivot
 _highAge   = na(lastFractalHighBar) ? na : bar_index - lastFractalHighBar
 _lowAge    = na(lastFractalLowBar)  ? na : bar_index - lastFractalLowBar
@@ -146,55 +106,16 @@ inSRZone      = srBlockLong or srBlockShort
 
 // ---- S/R zone visualization (chart) — shaded ±srZoneWidth band around active pivots ----
 // Only drawn when showSRZones is on and the pivot is valid; na hides the line otherwise.
-// When smoothSR is on, the plotted level/band use the held (smoothed) value; the entry
-// filter above still uses the raw lastFractalHigh/Low, so trade behavior is unchanged.
-_srHplot = smoothSR ? smHigh : lastFractalHigh
-_srLplot = smoothSR ? smLow  : lastFractalLow
-// Show the level line when zones OR smoothing is on; show the shaded band only with zones.
-_lineH = (showSRZones or smoothSR) and _highValid ? _srHplot : na
-_lineL = (showSRZones or smoothSR) and _lowValid  ? _srLplot : na
-_shH   = showSRZones and _highValid ? _srHplot : na
-_shL   = showSRZones and _lowValid  ? _srLplot : na
+_shH   = showSRZones and _highValid ? lastFractalHigh : na
+_shL   = showSRZones and _lowValid  ? lastFractalLow  : na
 _pHiTop = plot(na(_shH) ? na : _shH + srZoneWidth, "srHi zone top", color=na, display=display.all)
 _pHiBot = plot(na(_shH) ? na : _shH - srZoneWidth, "srHi zone bot", color=na, display=display.all)
 _pLoTop = plot(na(_shL) ? na : _shL + srZoneWidth, "srLo zone top", color=na, display=display.all)
 _pLoBot = plot(na(_shL) ? na : _shL - srZoneWidth, "srLo zone bot", color=na, display=display.all)
-plot(_lineH, "srHi pivot", color=na(_lineH) ? na : color.new(color.red, 0),   linewidth=1, display=display.all)
-plot(_lineL, "srLo pivot", color=na(_lineL) ? na : color.new(color.green, 0), linewidth=1, display=display.all)
+plot(_shH, "srHi pivot", color=na(_shH) ? na : color.new(color.red, 0),   linewidth=1, display=display.all)
+plot(_shL, "srLo pivot", color=na(_shL) ? na : color.new(color.green, 0), linewidth=1, display=display.all)
 fill(_pHiTop, _pHiBot, color=na(_shH) ? na : color.new(color.red, 88),   title="srHi band")
 fill(_pLoTop, _pLoBot, color=na(_shL) ? na : color.new(color.green, 88), title="srLo band")
-
-// ---- Compare overlay: RAW pivot line (dotted, dimmed) drawn under the smoothed line ----
-// Only meaningful when smoothing is on — shows exactly which pivots got absorbed (line
-// stays flat) vs which broke the threshold (line steps). Raw = where the line WOULD be
-// without smoothing; the gap between the two IS the smoothing.
-_rawH = showRawVsSmooth and smoothSR and _highValid ? lastFractalHigh : na
-_rawL = showRawVsSmooth and smoothSR and _lowValid  ? lastFractalLow  : na
-plot(_rawH, "raw srHi", color=na(_rawH) ? na : color.new(color.red, 55),   linewidth=1, style=plot.style_circles, display=display.all)
-plot(_rawL, "raw srLo", color=na(_rawL) ? na : color.new(color.green, 55), linewidth=1, style=plot.style_circles, display=display.all)
-
-// ---- Zone-escape markers ----
-// Flag bars where price pushes BEYOND the outer S/R band, measured wick-side:
-//   support escape   : bar LOW  drops below (pivot low  - srZoneWidth)  → lower wick escapes
-//   resistance escape: bar HIGH pushes above (pivot high + srZoneWidth)  → upper wick escapes
-// The label text shows how many points past the outer band the wick reached — this
-// visualizes the excursion. Note it stays small/rare because the pivot re-anchors to the
-// new extreme ~srHalfWidth bars later, so the band chases price down/up.
-_supOuter = _lowValid  ? lastFractalLow  - srZoneWidth : na
-_resOuter = _highValid ? lastFractalHigh + srZoneWidth : na
-supEscape = showZoneEscape and not na(_supOuter) and low  < _supOuter
-resEscape = showZoneEscape and not na(_resOuter) and high > _resOuter
-supEscapePts = supEscape ? _supOuter - low  : na   // how far the low wick is below the band
-resEscapePts = resEscape ? high - _resOuter : na   // how far the high wick is above the band
-
-if supEscape
-    label.new(bar_index, low, text="▼" + str.tostring(math.round(supEscapePts)), yloc=yloc.belowbar,
-              style=label.style_label_up, color=color.new(color.aqua, 20),
-              textcolor=color.black, size=size.tiny)
-if resEscape
-    label.new(bar_index, high, text="▲" + str.tostring(math.round(resEscapePts)), yloc=yloc.abovebar,
-              style=label.style_label_down, color=color.new(color.fuchsia, 20),
-              textcolor=color.white, size=size.tiny)
 
 // Fractal drought — bars since any fractal (high or low) was confirmed
 _lastAnyFractalBar = na(lastFractalHighBar) and na(lastFractalLowBar) ? na :
@@ -223,7 +144,11 @@ var float slEntryPrice = na   // entry price of bad trade — anchor for clear c
 var float barrierBuf   = na   // activeSL at time of bad exit
 var bool  thrdReversalPending = false  // true for one bar after THRD exit
 var int   thrdReversalDir     = 0      // direction to enter: 1=Long, -1=Short
-var int   breachTradeDir      = 0      // breach-fade mode: 1=in breach LONG, -1=in breach SHORT, 0=not in a breach trade
+var float deepBestPrice       = na     // best price reached in last profitable deep trade
+var int   deepBlockDir        = 0      // 1=Long deep exited profit (wait for high), -1=Short deep exited profit (wait for low)
+var bool  entryWasDeep        = false  // true if current/last trade was a deep entry
+var float exitBestPrice       = na     // bestPrice snapshot at the moment of exit
+var int   deepLossBlockDir    = 0      // after deep loss: 1=last deep loss was LONG, -1=was SHORT. While set (opp-block mode), ALL entries blocked until an opposite deep signal fires.
 var int    tradeSeq    = 0     // monotonic trade counter (uniqueness seed)
 var string tradeId     = ""    // pseudo-GUID for the current trade — shared by its entry & exit alerts
 var string exitReason  = ""    // reason of the last exit — set at each exit site, read by the exit alert
@@ -326,7 +251,6 @@ if inAnyBlock and inTrade
     bestPrice   := na
     inTrade     := false
     barsInTrade := 0
-    breachTradeDir := 0   // breach trade also flattened at a session block
     cooldown    := 0   // no cooldown — block window itself prevents re-entry
 
 //=============================
@@ -344,7 +268,6 @@ if eodClose
     trailStop        := na
     bestPrice        := na
     inTrade          := false
-    breachTradeDir   := 0   // breach trade also flattened at EOD
     cooldown         := 0
     barsInTrade      := 0
     slExitDir        := 0
@@ -352,31 +275,23 @@ if eodClose
     slEntryPrice     := na
     barrierBuf       := na
     barrierCool      := 0
+    deepLossBlockDir := 0
 
 //=============================
-// Sync on broker close — a strategy.exit order (the limit=TP OR the stop=SL) filled
-// and flattened the position. This block can run on the SAME bar the broker fills the
-// STOP, BEFORE the hard-SL detector below — so it must NOT blindly assume TP, or a
-// stop-out gets mislabeled "TP" in the exit alert. Discriminate by realized P&L of the
-// just-closed trade: a TP limit fill is a gain, an SL stop fill is a loss.
+// Sync on TP/SL close — a broker order (the strategy.exit limit=TP, or the
+// stop) filled and flattened the position. hardSLHit above already handled the
+// SL case (set exitReason="SL" and tradeDir=0), so if we still see a live
+// tradeDir here the fill was the TP limit.
 //=============================
 if strategy.position_size == 0 and (inTrade or tradeDir != 0)
-    _lastProfit = strategy.closedtrades > 0 ? strategy.closedtrades.profit(strategy.closedtrades - 1) : 0.0
-    exitReason  := _lastProfit >= 0 ? "TP" : "SL"
+    exitReason  := "TP"
     exitedDir   := tradeDir
     tradeDir    := 0
     trailStop   := na
     bestPrice   := na
     inTrade     := false
-    breachTradeDir := 0
     cooldown    := activeCooldown
     barsInTrade := 0
-    // if it was a stop-out, arm the same barrier state the hard-SL block would have
-    if _lastProfit < 0 and not na(entryPrice)
-        slExitDir    := exitedDir
-        slEntryPrice := entryPrice
-        barrierBuf   := activeSL
-        barrierCool  := 0
 
 //=============================
 // Cooldown countdown
@@ -387,13 +302,9 @@ if cooldown > 0 and not inTrade
 //=============================
 // slExitDir — entry price barrier
 // Anchor = entry price of bad trade. Buffer = activeSL.
-// Clear requires PRICE RECOVERY, and (if barrierNeedsSlopeFlip) the SLOPE to have
-// flipped back toward the trade too — so a single bounce-bar close mid-crash no longer
-// lifts the barrier while the down-move is still running:
+// Clear when price proves it moved SL distance in correct direction from entry:
 //   slExitDir=1  (Long bad exit) → clear when close > slEntryPrice + barrierBuf
-//                                  AND (slope flip: legSlope > barrierFlipSlope)
 //   slExitDir=-1 (Short bad exit) → clear when close < slEntryPrice - barrierBuf
-//                                  AND (slope flip: legSlope < -barrierFlipSlope)
 // slBarrier checkpoints every cooldownBars for display only.
 //=============================
 if slExitDir != 0 and not inTrade
@@ -404,9 +315,6 @@ if slExitDir != 0 and not inTrade
         if barrierCool == 0
             slBarrier   := close
             barrierCool := activeCooldown
-    // slope-flip gate (only meaningful when we have a slope reading)
-    _slopeFlipLong  = not barrierNeedsSlopeFlip or (not na(legSlope) and legSlope >  barrierFlipSlope)
-    _slopeFlipShort = not barrierNeedsSlopeFlip or (not na(legSlope) and legSlope < -barrierFlipSlope)
     // clear condition checked every bar (including during cooldown)
     // so price crossing barrier during cooldown still unblocks
     if na(slEntryPrice) or na(barrierBuf)
@@ -416,14 +324,14 @@ if slExitDir != 0 and not inTrade
         barrierBuf   := na
         barrierCool  := 0
     else if slExitDir == 1
-        if close > slEntryPrice + barrierBuf and _slopeFlipLong
+        if close > slEntryPrice + barrierBuf
             slExitDir    := 0
             slBarrier    := na
             slEntryPrice := na
             barrierBuf   := na
             barrierCool  := 0
     else
-        if close < slEntryPrice - barrierBuf and _slopeFlipShort
+        if close < slEntryPrice - barrierBuf
             slExitDir    := 0
             slBarrier    := na
             slEntryPrice := na
@@ -435,7 +343,7 @@ if slExitDir != 0 and not inTrade
 // strategy.exit stop= handles the actual fill — don't call strategy.close here
 // or it double-fires and allows a re-entry on the same bar
 //=============================
-if inTrade and strategy.position_size != 0 and breachTradeDir == 0
+if inTrade and strategy.position_size != 0
     hardSLHit = (tradeDir == 1 and low <= entryPrice - activeSL) or (tradeDir == -1 and high >= entryPrice + activeSL)
     if hardSLHit
         slExitDir    := tradeDir
@@ -460,7 +368,7 @@ if inTrade and strategy.position_size != 0
 else if not inTrade
     barsInTrade := 0
 
-if enableTExp and inTrade and strategy.position_size != 0 and barsInTrade >= tExpBars and breachTradeDir == 0
+if enableTExp and inTrade and strategy.position_size != 0 and barsInTrade >= tExpBars
     isProfit = (tradeDir == 1 and close > entryPrice) or (tradeDir == -1 and close < entryPrice)
     if isProfit
         strategy.cancel("Exit-Long")
@@ -480,7 +388,7 @@ if enableTExp and inTrade and strategy.position_size != 0 and barsInTrade >= tEx
 // All slope inputs are absolute values, applied directionally:
 //   Long  entered on legSlope < -slopeEntry → mean reversion failed if slope STILL <= -tExpHardSlope (trend never reversed)
 //   Short entered on legSlope > +slopeEntry → mean reversion failed if slope STILL >= +tExpHardSlope (trend never reversed)
-if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >= tExpHardBars and not na(legSlope) and breachTradeDir == 0
+if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >= tExpHardBars and not na(legSlope)
     slopeAgainst = (tradeDir == 1 and legSlope <= -tExpHardSlope) or (tradeDir == -1 and legSlope >= tExpHardSlope)
     if slopeAgainst
         thrdIsLoss = (tradeDir == 1 and close < entryPrice) or (tradeDir == -1 and close > entryPrice)
@@ -514,6 +422,8 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
 //=============================
 if thrdReversalPending and not inTrade and cooldown == 0 and not eodClose and time >= startDate and time <= endDate
     thrdReversalPending := false
+    deepBlockDir        := 0  // THRD reversal clears deep block
+    entryWasDeep        := false
     _slAmt = enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
     if thrdReversalDir == 1
         _tp      = close + tpPts * tpMult
@@ -557,72 +467,17 @@ if thrdReversalPending and not inTrade and cooldown == 0 and not eodClose and ti
         label.new(bar_index, high, text="T↓", style=label.style_label_down, color=color.new(color.teal, 10), textcolor=color.white, size=size.normal)
 
 //=============================
-// BREACH-FADE OVERRIDE (experimental; only when enableBreachFade AND smoothSR are ON).
-// - Enter SHORT exactly breachFadeBars after a support breach; LONG after a resistance breach.
-// - Exit = the next OPPOSITE normal slope signal (no hard SL).
-// - While a breach trade is active (or an entry is due this bar), it OVERRIDES all normal
-//   slope entries below.
-// Raw opposite-slope signals used only as the breach-trade exit trigger:
-//   breach SHORT closes on a LONG  slope reading (legSlope < -slopeEntry)
-//   breach LONG  closes on a SHORT slope reading (legSlope >  slopeEntry)
+// Deep block — after a profitable deep trade, clear block when price revisits best price
 //=============================
-breachOn = enableBreachFade and smoothSR
-_oppLongSig  = not na(legSlope) and legSlope < -slopeEntry   // long-side slope → exits a breach short
-_oppShortSig = not na(legSlope) and legSlope >  slopeEntry   // short-side slope → exits a breach long
+if enableDeepBlock and deepBlockDir != 0 and not na(deepBestPrice)
+    // Long deep profit: wait for price to rise back to the high reached
+    // Short deep profit: wait for price to fall back to the low reached
+    if (deepBlockDir == 1 and high >= deepBestPrice) or (deepBlockDir == -1 and low <= deepBestPrice)
+        deepBlockDir  := 0
+        deepBestPrice := na
 
-// Entry due when the breach has HELD for exactly breachFadeBars consecutive bars — i.e.
-// price breached the band AND is still breached N bars later (not just N bars ago).
-_sessionOK = not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and not ethOpenBlock and time >= startDate and time <= endDate
-breachShortDue = breachOn and supBreachBars == breachFadeBars and _sessionOK
-breachLongDue  = breachOn and resBreachBars == breachFadeBars and _sessionOK
-
-// 1) EXIT an active breach trade on the opposite slope signal
-if breachOn and breachTradeDir == -1 and _oppLongSig
-    strategy.close("Short", comment="BF-exit")
-    exitReason := "BF"
-    exitedDir  := -1
-    tradeDir   := 0
-    inTrade    := false
-    breachTradeDir := 0
-    cooldown   := 0
-    label.new(bar_index, low, text="BF✕", style=label.style_label_up, color=color.new(color.blue, 10), textcolor=color.white, size=size.small)
-else if breachOn and breachTradeDir == 1 and _oppShortSig
-    strategy.close("Long", comment="BF-exit")
-    exitReason := "BF"
-    exitedDir  := 1
-    tradeDir   := 0
-    inTrade    := false
-    breachTradeDir := 0
-    cooldown   := 0
-    label.new(bar_index, high, text="BF✕", style=label.style_label_down, color=color.new(color.blue, 10), textcolor=color.white, size=size.small)
-
-// 2) ENTER a breach trade on the Nth bar. Flip any opposite position first. LONG priority
-//    if both fire same bar (rare). Overrides normal entries via breachActive below.
-if breachShortDue and breachTradeDir != -1
-    strategy.entry("Short", strategy.short, comment="BF↓")   // reverses a long if one is open
-    tradeDir   := -1
-    entryPrice := close
-    inTrade    := true
-    barsInTrade := 0
-    breachTradeDir := -1
-    activeSL   := na          // no hard SL in breach-fade mode
-    tradeSeq += 1
-    tradeId := makeTradeId(tradeSeq)
-    label.new(bar_index, high, text="BF↓", style=label.style_label_down, color=color.new(color.maroon, 5), textcolor=color.white, size=size.normal)
-else if breachLongDue and breachTradeDir != 1
-    strategy.entry("Long", strategy.long, comment="BF↑")
-    tradeDir   := 1
-    entryPrice := close
-    inTrade    := true
-    barsInTrade := 0
-    breachTradeDir := 1
-    activeSL   := na
-    tradeSeq += 1
-    tradeId := makeTradeId(tradeSeq)
-    label.new(bar_index, low, text="BF↑", style=label.style_label_up, color=color.new(color.navy, 5), textcolor=color.white, size=size.normal)
-
-// While breach mode holds control, suppress all normal slope entries this bar.
-breachActive = breachOn and (breachTradeDir != 0 or breachShortDue or breachLongDue)
+// shallow entries blocked while deep block is active
+inDeepBlock = enableDeepBlock and deepBlockDir != 0
 
 //=============================
 // Entry signals
@@ -631,9 +486,27 @@ breachActive = breachOn and (breachTradeDir != 0 or breachShortDue or breachLong
 //=============================
 canTrade  = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and not ethOpenBlock and time >= startDate and time <= endDate and not na(legSlope)
 bigEnough = not enableBodyFilter or (math.abs(close - open) >= minBodyPts)
+isDeepSignal = math.abs(legSlope) >= deepSlope
 
-bullEntry = canTrade and bigEnough and not inFractalDrought and legSlope < -slopeEntry and slExitDir != 1  and not srBlockLong  and not breachActive
-bearEntry = canTrade and bigEnough and not inFractalDrought and legSlope >  slopeEntry and slExitDir != -1 and not srBlockShort and not breachActive
+// After a deep loss, gate re-entry. Two modes via enableDeepLossOppBlock:
+//   ON  → block ALL entries until an OPPOSITE-direction deep signal fires.
+//         deep LONG loss (dir=1)  → only a deep SHORT signal trades & unlocks
+//         deep SHORT loss (dir=-1)→ only a deep LONG signal trades & unlocks
+//   OFF → original: block only shallow same-direction re-entries (deep signals pass).
+deepLossBlockLong  = false
+deepLossBlockShort = false
+if deepLossBlockDir != 0
+    if enableDeepLossOppBlock
+        // dir=1 (deep long loss): block longs entirely; allow only deep shorts
+        // dir=-1 (deep short loss): block shorts entirely; allow only deep longs
+        deepLossBlockLong  := deepLossBlockDir == 1 or (deepLossBlockDir == -1 and not isDeepSignal)
+        deepLossBlockShort := deepLossBlockDir == -1 or (deepLossBlockDir == 1 and not isDeepSignal)
+    else
+        deepLossBlockLong  := deepLossBlockDir == 1  and not isDeepSignal
+        deepLossBlockShort := deepLossBlockDir == -1 and not isDeepSignal
+
+bullEntry = canTrade and bigEnough and not inFractalDrought and legSlope < -slopeEntry and slExitDir != 1  and not srBlockLong  and (not inDeepBlock or isDeepSignal) and not deepLossBlockLong
+bearEntry = canTrade and bigEnough and not inFractalDrought and legSlope >  slopeEntry and slExitDir != -1 and not srBlockShort and (not inDeepBlock or isDeepSignal) and not deepLossBlockShort
 
 if bullEntry
     tp  = close + tpPts * tpMult
@@ -651,9 +524,11 @@ if bullEntry
     trailStop   := na
     bestPrice   := na
     inTrade     := true
-    barsInTrade := 0          // fresh trade — reset even when flipping straight from a BF trade
     activeSL    := enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
     _isDeep     = math.abs(legSlope) >= deepSlope
+    entryWasDeep := _isDeep
+    deepBlockDir     := 0  // new trade clears any prior deep block
+    deepLossBlockDir := 0  // new trade clears deep-loss block
     tradeSeq += 1
     tradeId := makeTradeId(tradeSeq)
     label.new(bar_index, low,
@@ -679,9 +554,11 @@ else if bearEntry
     trailStop  := na
     bestPrice  := na
     inTrade    := true
-    barsInTrade := 0          // fresh trade — reset even when flipping straight from a BF trade
     activeSL   := enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
     _isDeep    = math.abs(legSlope) >= deepSlope
+    entryWasDeep := _isDeep
+    deepBlockDir     := 0  // new trade clears any prior deep block
+    deepLossBlockDir := 0  // new trade clears deep-loss block
     tradeSeq += 1
     tradeId := makeTradeId(tradeSeq)
     label.new(bar_index, high,
@@ -697,8 +574,9 @@ else if bearEntry
 var bool trailFired = false
 trailFired := false
 
-if tradeDir == 1 and strategy.position_size != 0 and breachTradeDir == 0
+if tradeDir == 1 and strategy.position_size != 0
     bestPrice := na(bestPrice) ? high : math.max(bestPrice, high)
+    exitBestPrice := bestPrice  // keep snapshot current while in trade
     if bestPrice - entryPrice >= trailTrigger
         // wider trail when slope still strongly in favour (continuing down = still mean-reverting up)
         _activeDist = (not na(legSlope) and legSlope <= -deepSlope) ? trailDistStrong : trailDist
@@ -715,8 +593,9 @@ if tradeDir == 1 and strategy.position_size != 0 and breachTradeDir == 0
         inTrade   := false
         cooldown  := activeCooldown
 
-else if tradeDir == -1 and strategy.position_size != 0 and breachTradeDir == 0
+else if tradeDir == -1 and strategy.position_size != 0
     bestPrice := na(bestPrice) ? low : math.min(bestPrice, low)
+    exitBestPrice := bestPrice  // keep snapshot current while in trade
     if entryPrice - bestPrice >= trailTrigger
         // wider trail when slope strongly confirms short direction (deeply negative = price falling)
         _activeDist = (not na(legSlope) and legSlope <= -deepSlope) ? trailDistStrong : trailDist
@@ -751,6 +630,17 @@ if posClosed
     isTP    = not isTrail and not isTExp and not isTHrd and not isBlk and not isEOD and strategy.netprofit > strategy.netprofit[1]
     isSL    = not isTrail and not isTExp and not isTHrd and not isBlk and not isEOD and not isTP
     wasLong = tradeDir[1] == 1
+
+    // Set deep block when a deep trade exits with profit (any exit type — trail, TP, texp)
+    _lastTradeProfit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if enableDeepBlock and entryWasDeep and _lastTradeProfit > 0
+        deepBlockDir  := wasLong ? 1 : -1
+        deepBestPrice := exitBestPrice[1]  // best price from previous bar (last bar of the trade)
+
+    // After deep loss: record the direction. In opp-block mode this blocks ALL
+    // entries until an opposite deep signal fires; cleared when any new trade opens.
+    if entryWasDeep and _lastTradeProfit <= 0
+        deepLossBlockDir := wasLong ? 1 : -1
 
     if isEOD
         label.new(bar_index, wasLong ? low : high,
@@ -824,11 +714,6 @@ if posClosed
 plot(legSlope,                          "legSlope",      color=color.rgb(100,180,255), display=display.data_window)
 plot(tradeLegSlope,                     "tradeLegSlope", color=color.rgb(255,200,80),  display=display.data_window)
 plot(activeSL,                          "activeSL",      color=color.rgb(255,160,80),  display=display.data_window)
-plot(supBreachBars,                     "supBreachBars",   color=color.rgb(120,200,255), display=display.data_window)
-plot(resBreachBars,                     "resBreachBars",   color=color.rgb(120,200,255), display=display.data_window)
-plot(smLowBand,                         "smLowBand",       color=color.rgb(120,200,255), display=display.data_window)
-plot(smHighBand,                        "smHighBand",      color=color.rgb(120,200,255), display=display.data_window)
-plot(breachTradeDir,                    "breachTradeDir",     color=color.rgb(200,120,255), display=display.data_window)
 plot(smaVal,                            "SMA",           color=color.rgb(255,220,100), display=display.data_window)
 plot(inTrade  ? 1 : 0,                 "inTrade",       color=color.purple,           display=display.data_window)
 plot(tradeDir,                          "tradeDir",      color=color.white,            display=display.data_window)
@@ -841,9 +726,6 @@ plot(_lowValid  ? lastFractalLow  : na,             "srLowPrice",    color=color
 plot(_highValid ? bar_index - lastFractalHighBar : na, "srHighBarsAgo", color=color.rgb(255,150,150), display=display.data_window)
 plot(_lowValid  ? bar_index - lastFractalLowBar  : na, "srLowBarsAgo",  color=color.rgb(150,255,150), display=display.data_window)
 plot(inSRZone    ? 1 : 0,                         "inSRZone",      color=color.rgb(255,165,0),   display=display.data_window)
-// Zone-escape distances (pts past the OUTER band, wick-side). na when price is inside.
-plot(_lowValid  and low  < _supOuter ? _supOuter - low  : na, "supEscapePts", color=color.aqua,    display=display.data_window)
-plot(_highValid and high > _resOuter ? high - _resOuter : na, "resEscapePts", color=color.fuchsia, display=display.data_window)
 plot(srZoneWidth,                                 "cfg_srZoneWidth",  color=color.gray,             display=display.data_window)
 plot(srLookback,                                  "cfg_srLookback",  color=color.gray,             display=display.data_window)
 plot(srHalfWidth,                                 "cfg_srHalfWidth", color=color.gray,             display=display.data_window)
@@ -869,7 +751,7 @@ var table statsTable = table.new(position.bottom_right, 2, 6,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Galway",             text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Belfast",            text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),

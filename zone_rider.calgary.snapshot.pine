@@ -1,0 +1,318 @@
+//@version=6
+// ============================================================================
+//  ZONE RIDER — support/resistance zone mean-reversion strategy
+// ----------------------------------------------------------------------------
+//  Concept:
+//    • Detect swing pivots (ta.pivothigh/low), then SMOOTH them: support/resistance
+//      HOLD flat until a new pivot differs by >= smoothSRPct (% of price), then STEP.
+//      So the level is flat except on real breaks; the step IS the swing signal.
+//    • Wrap each active (smoothed) level in a ±zoneWidth band (default 25 pts).
+//    • ENTRY on a break of the outer ZONE edge: high > resistance+zoneWidth → LONG,
+//      low < support-zoneWidth → SHORT (follow the break, wick-based).
+//    • EXIT when the channel converges: |resistance − support| ≤ gapClosePts (default 70).
+//      Hard SL (default 200 pts) is the backstop. Then IDLE cooldownBars.
+//    • The swing structure is drawn as a continuous zig-zag line through the
+//      confirmed pivots (H → L → H …) — smoother than a stepped plot().
+//
+//  Build label shown in the status table (bottom-right): city name per repo
+//  convention. Big/behavioural changes get a new city; small tweaks bump vN.
+// ============================================================================
+strategy("Zone Rider", overlay=true, max_labels_count=500, max_lines_count=500,
+         default_qty_type=strategy.fixed, default_qty_value=1, calc_on_every_tick=false)
+
+//=============================
+// Inputs
+//=============================
+pivotLen    = input.int(10,   "Pivot half-width (bars each side)", minval=1, maxval=50, group="Pivots")
+zoneWidth   = input.float(25.0,"Zone width (pts either side of pivot)", minval=0.5, step=0.5, group="Pivots")
+maxPivotAge = input.int(0,    "Max pivot age (bars, 0 = never expire)", minval=0, maxval=2000, group="Pivots")
+smoothSRPct = input.float(1.00,"S/R step threshold (% of price) — level holds flat until a pivot breaks this", minval=0.01, step=0.05, group="Pivots")
+
+enableLong  = input.bool(true, "Enable LONG entries (break above resistance)",       group="Trade")
+enableShort = input.bool(true, "Enable SHORT entries (break below support)",         group="Trade")
+gapClosePts = input.float(70.0,"Close trade when |resistance − support| ≤ this (pts)", minval=1.0, step=1.0, group="Trade")
+cooldownBars= input.int(20,   "Idle bars after exit before next entry", minval=0, maxval=500, group="Trade")
+useHardSL   = input.bool(true, "Hard stop-loss (backstop)",                          group="Trade")
+slPts       = input.float(200.0,"Stop-loss (pts from entry)", minval=1.0, step=1.0, group="Trade")
+
+// Session windows anchored to America/Chicago (real US market hours), independent
+// of the chart's display timezone. Block windows mirror slope_strategy.pine.
+blockEOD    = input.bool(true, "Flatten at end of RTH (15:00–16:00 CT)", group="Session")
+blockNYOpen = input.bool(false,"Block NY open first 30 min (08:30–09:00 CT)",           group="Session")
+blockLNOpen = input.bool(true, "Block LN open first 30 min (02:00–02:30 CT)",           group="Session")
+blockPreNY  = input.bool(true, "Block CME pre-open + NY open (07:30–09:00 CT)",         group="Session")
+
+startDate   = input.time(timestamp("2000-01-01T00:00:00-06:00"), "Backtest Start", group="Backtest")
+endDate     = input.time(timestamp("2099-12-31T23:59:00-06:00"), "Backtest End",   group="Backtest")
+
+// Line graph appearance
+showZigZag  = input.bool(true,  "Draw pivot zig-zag line",                  group="Display")
+zzUpColor   = input.color(color.new(color.lime, 0),  "Zig-zag rising leg",  group="Display")
+zzDnColor   = input.color(color.new(color.red, 0),   "Zig-zag falling leg", group="Display")
+showZones   = input.bool(true,  "Shade support/resistance zones",           group="Display")
+
+//=============================
+// Session metrics (America/Chicago)
+//=============================
+ctMins   = hour(time, "America/Chicago") * 60 + minute(time, "America/Chicago")
+eodClose = ctMins >= 900 and ctMins < 960          // 15:00–16:00 CT
+inWindow = time >= startDate and time <= endDate
+
+// Block windows — same as slope_strategy.pine (CT minutes-since-midnight).
+nyOpenBlock  = blockNYOpen and ctMins >= 510 and ctMins < 540   // 08:30–09:00 CT
+lnOpenBlock  = blockLNOpen and ctMins >= 120 and ctMins < 150   // 02:00–02:30 CT
+preNYBlock   = blockPreNY  and ctMins >= 450 and ctMins < 540   // 07:30–09:00 CT
+ethOpenBlock = ctMins >= 1020 and ctMins < 1050                 // 17:00–17:30 CT (hardcoded on, as in slope)
+inAnyBlock   = nyOpenBlock or lnOpenBlock or preNYBlock or ethOpenBlock
+
+//=============================
+// Pivot detection
+//   ta.pivothigh/low return the pivot price when confirmed (pivotLen bars later),
+//   na otherwise. The pivot itself sits pivotLen bars back.
+//=============================
+phVal = ta.pivothigh(high, pivotLen, pivotLen)
+plVal = ta.pivotlow(low,  pivotLen, pivotLen)
+newPH = not na(phVal)
+newPL = not na(plVal)
+
+var float resistance = na   // last confirmed pivot HIGH  → resistance level
+var float support    = na   // last confirmed pivot LOW   → support level
+var int   resBar     = na   // bar_index of the resistance pivot
+var int   supBar     = na   // bar_index of the support pivot
+
+// Swing signals — one-bar pulses fired when the SMOOTHED level actually STEPS:
+//   swingUpSignal  : resistance stepped UP   (pivot broke the % threshold, higher)
+//   swingDownSignal: support    stepped DOWN (pivot broke the % threshold, lower)
+bool swingDownSignal = false
+bool swingUpSignal   = false
+
+// support / resistance ARE the smoothed levels: on a new pivot, HOLD the current level
+// unless the pivot differs by >= threshold (% of price), then SNAP to it. So the level
+// steps only on a real break and is otherwise flat. The level change IS the swing signal:
+//   resistance steps UP   → swingUpSignal
+//   support    steps DOWN → swingDownSignal
+if newPH
+    _prevResistance = resistance
+    _thrR = smoothSRPct / 100.0 * close
+    if na(resistance) or math.abs(phVal - resistance) >= _thrR
+        resistance := phVal
+        resBar     := bar_index - pivotLen
+        if not na(_prevResistance) and phVal > _prevResistance
+            swingUpSignal := true
+if newPL
+    _prevSupport = support
+    _thrS = smoothSRPct / 100.0 * close
+    if na(support) or math.abs(plVal - support) >= _thrS
+        support := plVal
+        supBar  := bar_index - pivotLen
+        if not na(_prevSupport) and plVal < _prevSupport
+            swingDownSignal := true
+
+// Optional pivot expiry — treat a stale pivot as invalid so we don't act on a
+// level the market left behind long ago.
+resAge = na(resBar) ? na : bar_index - resBar
+supAge = na(supBar) ? na : bar_index - supBar
+resValid = not na(resistance) and (maxPivotAge == 0 or (not na(resAge) and resAge <= maxPivotAge))
+supValid = not na(support)    and (maxPivotAge == 0 or (not na(supAge) and supAge <= maxPivotAge))
+
+// Zone boundaries — built from the (smoothed) support/resistance. resZoneTop / supZoneBot
+// are the exit triggers; the full bands are also shaded on the chart.
+supZoneTop = supValid ? support    + zoneWidth : na
+supZoneBot = supValid ? support    - zoneWidth : na
+resZoneTop = resValid ? resistance + zoneWidth : na
+resZoneBot = resValid ? resistance - zoneWidth : na
+
+//=============================
+// Zig-zag swing line — connect consecutive confirmed pivots.
+// Each time a new pivot confirms we draw ONE line from the previous pivot
+// point to this one. Alternating H/L pivots produce a continuous zig-zag.
+//=============================
+var float lastPivotPrice = na
+var int   lastPivotBar   = na
+var int   lastPivotType  = 0    // 1 = last pivot was a HIGH, -1 = a LOW
+
+drawLeg(fromBar, fromPrice, toBar, toPrice, col) =>
+    line.new(fromBar, fromPrice, toBar, toPrice, xloc=xloc.bar_index,
+             color=col, width=2)
+
+if showZigZag and newPH
+    _pBar = bar_index - pivotLen
+    if not na(lastPivotBar) and lastPivotType != 1
+        // rising leg: previous LOW → this HIGH
+        drawLeg(lastPivotBar, lastPivotPrice, _pBar, phVal, zzUpColor)
+    lastPivotPrice := phVal
+    lastPivotBar   := _pBar
+    lastPivotType  := 1
+
+if showZigZag and newPL
+    _pBar = bar_index - pivotLen
+    if not na(lastPivotBar) and lastPivotType != -1
+        // falling leg: previous HIGH → this LOW
+        drawLeg(lastPivotBar, lastPivotPrice, _pBar, plVal, zzDnColor)
+    lastPivotPrice := plVal
+    lastPivotBar   := _pBar
+    lastPivotType  := -1
+
+//=============================
+// Zone visualization — shaded bands around the (smoothed) support/resistance.
+//=============================
+_supTop = plot(showZones ? supZoneTop : na, "supZoneTop", color=na, display=display.all)
+_supBot = plot(showZones ? supZoneBot : na, "supZoneBot", color=na, display=display.all)
+_resTop = plot(showZones ? resZoneTop : na, "resZoneTop", color=na, display=display.all)
+_resBot = plot(showZones ? resZoneBot : na, "resZoneBot", color=na, display=display.all)
+fill(_supTop, _supBot, color=showZones and supValid ? color.new(color.green, 85) : na, title="Support zone")
+fill(_resTop, _resBot, color=showZones and resValid ? color.new(color.red,   85) : na, title="Resistance zone")
+plot(showZones and supValid ? support    : na, "support",    color=showZones and supValid ? color.new(color.green, 30) : na, linewidth=1)
+plot(showZones and resValid ? resistance : na, "resistance", color=showZones and resValid ? color.new(color.red,   30) : na, linewidth=1)
+
+//=============================
+// State
+//=============================
+var bool  inTrade    = false
+var int   tradeDir   = 0     // 1 = long, -1 = short, 0 = flat
+var float entryPrice = na
+var int   tradeSeq   = 0
+var int   cooldown   = 0     // idle-bar countdown after an exit; entries blocked while > 0
+
+//=============================
+// EOD flatten
+//=============================
+if blockEOD and eodClose and strategy.position_size != 0
+    strategy.close_all(comment="EOD")
+if blockEOD and eodClose
+    inTrade    := false
+    tradeDir   := 0
+    entryPrice := na
+
+//=============================
+// Session block — on entering a blocked window, flatten any open trade (same as
+// slope_strategy.pine). No cooldown set: the block window itself keeps entries
+// out until it ends. Entries are also gated below via `not inAnyBlock`.
+//=============================
+if inAnyBlock and strategy.position_size != 0
+    strategy.close_all(comment="BLK")
+if inAnyBlock and inTrade
+    inTrade    := false
+    tradeDir   := 0
+    entryPrice := na
+    cooldown   := 0
+
+//=============================
+// Sync on broker close (SL fill flattened us). Guard with position_size[1]!=0 so
+// this fires only when a LIVE position just went flat — not on the bar right
+// after entry, where the order hasn't filled yet (calc_on_every_tick=false fills
+// next-bar-open). Start the idle cooldown on this exit too.
+//=============================
+if strategy.position_size == 0 and strategy.position_size[1] != 0 and inTrade and not eodClose
+    inTrade    := false
+    tradeDir   := 0
+    entryPrice := na
+    cooldown   := cooldownBars
+
+//=============================
+// Cooldown countdown — tick down each idle bar until we're eligible again.
+//=============================
+if cooldown > 0 and not inTrade
+    cooldown -= 1
+
+//=============================
+// ENTRY — break of the OUTER ZONE edge, follow the break:
+//   price breaks ABOVE upper resistance zone (high > resZoneTop = resistance+width) → LONG
+//   price breaks BELOW lower support    zone (low  < supZoneBot = support-width)    → SHORT
+// Wick-based (uses high/low). One position at a time; respects cooldown/session/window.
+// If both break on the same bar (rare, wide bar), LONG takes priority.
+//=============================
+// Channel width between the (smoothed) levels — drives both the entry gate and the exit.
+srGap = (resValid and supValid) ? math.abs(resistance - support) : na
+wideEnough = not na(srGap) and srGap > gapClosePts   // don't enter a channel already at exit width
+canEnter = not inTrade and strategy.position_size == 0 and inWindow and not eodClose and not inAnyBlock and cooldown == 0 and wideEnough
+
+breakUp   = resValid and high > resZoneTop   // broke above the UPPER resistance zone → long
+breakDown = supValid and low  < supZoneBot   // broke below the LOWER support zone    → short
+
+goLong  = canEnter and enableLong  and breakUp
+goShort = canEnter and enableShort and breakDown
+
+if goLong
+    entryPrice := close
+    inTrade    := true
+    tradeDir   := 1
+    tradeSeq   += 1
+    strategy.entry("Long", strategy.long, comment="ZR↑")
+    if useHardSL
+        strategy.exit("SL-Long", "Long", stop=close - slPts)   // SL BELOW entry for a long
+    label.new(bar_index, low, text="BUY", style=label.style_label_up,
+              color=color.new(color.green, 10), textcolor=color.white, size=size.small)
+else if goShort
+    entryPrice := close
+    inTrade    := true
+    tradeDir   := -1
+    tradeSeq   += 1
+    strategy.entry("Short", strategy.short, comment="ZR↓")
+    if useHardSL
+        strategy.exit("SL-Short", "Short", stop=close + slPts)  // SL ABOVE entry for a short
+    label.new(bar_index, high, text="SELL", style=label.style_label_down,
+              color=color.new(color.red, 10), textcolor=color.white, size=size.small)
+
+//=============================
+// EXIT — close when the support/resistance channel narrows to <= gapClosePts, i.e.
+// the levels converged: |resistance − support| <= gapClosePts. Fires on ANY bar the
+// gap is within threshold, regardless of P&L. The hard SL (set at entry) is the backstop.
+//=============================
+gapClose = inTrade and strategy.position_size != 0 and not na(srGap) and srGap <= gapClosePts
+
+if gapClose
+    strategy.cancel("SL-Long")
+    strategy.cancel("SL-Short")
+    strategy.close("Long",  comment="GAP")
+    strategy.close("Short", comment="GAP")
+    _wasLong = tradeDir == 1
+    inTrade    := false
+    tradeDir   := 0
+    entryPrice := na
+    cooldown   := cooldownBars
+    label.new(bar_index, _wasLong ? high : low,
+              text      = _wasLong ? "SELL" : "COVER",
+              style     = _wasLong ? label.style_label_down : label.style_label_up,
+              color     = _wasLong ? color.new(color.red, 10) : color.new(color.green, 10),
+              textcolor = color.white, size=size.small)
+
+//=============================
+// Status table — bottom-right. Cell (0,0) = build label (city).
+//=============================
+var table statsTable = table.new(position.bottom_right, 2, 5,
+     bgcolor      = color.new(color.black, 20),
+     border_width = 1,
+     border_color = color.new(color.gray, 50))
+
+if barstate.islast
+    table.cell(statsTable, 0, 0, "Calgary", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 1, 0, "Zone Rider", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 1, "Support", text_color=color.white, text_size=size.small)
+    table.cell(statsTable, 1, 1, supValid ? str.tostring(support, "#.##") : "—", text_color=color.new(color.green, 0), text_size=size.small)
+    table.cell(statsTable, 0, 2, "Resistance", text_color=color.white, text_size=size.small)
+    table.cell(statsTable, 1, 2, resValid ? str.tostring(resistance, "#.##") : "—", text_color=color.new(color.red, 0), text_size=size.small)
+    // row 3: cooldown, else the ACTIVE target for the open trade (or "—" when flat)
+    _tgtLabel = cooldown > 0 ? "Cooldown (bars left)" : tradeDir == 1 ? "Long tgt (res+w)" : tradeDir == -1 ? "Short tgt (sup-w)" : "Flat"
+    _tgtVal   = cooldown > 0 ? str.tostring(cooldown) :
+                 tradeDir == 1  ? (resValid ? str.tostring(resZoneTop, "#.##") : "—") :
+                 tradeDir == -1 ? (supValid ? str.tostring(supZoneBot, "#.##") : "—") : "—"
+    table.cell(statsTable, 0, 3, _tgtLabel, text_color=color.white, text_size=size.small)
+    table.cell(statsTable, 1, 3, _tgtVal, text_color=color.rgb(150,220,255), text_size=size.small)
+    table.cell(statsTable, 0, 4, inTrade ? (tradeDir == 1 ? "LONG @" : "SHORT @") : "Trades", text_color=color.white, text_size=size.small)
+    table.cell(statsTable, 1, 4, inTrade ? str.tostring(entryPrice, "#.##") : str.tostring(tradeSeq), text_color=color.rgb(180,180,255), text_size=size.small)
+
+//=============================
+// Debug plots (data window)
+//=============================
+plot(support,     "support",     color=color.green, display=display.data_window)
+plot(resistance,  "resistance",  color=color.red,   display=display.data_window)
+plot(srGap,       "srGap",       color=color.orange,display=display.data_window)  // exit when <= gapClosePts
+plot(gapClosePts, "cfg_gapClose",color=color.gray,  display=display.data_window)
+plot(inTrade ? 1 : 0, "inTrade", color=color.purple,display=display.data_window)
+plot(tradeDir,    "tradeDir",    color=color.white, display=display.data_window)
+plot(tradeSeq,    "tradeSeq",    color=color.white, display=display.data_window)
+plot(swingDownSignal ? 1 : 0, "swingDownSignal", color=color.lime,   display=display.data_window)
+plot(swingUpSignal   ? 1 : 0, "swingUpSignal",   color=color.red,    display=display.data_window)
+plot(cooldown,    "cooldown",    color=color.gray, display=display.data_window)
+plot(inAnyBlock ? 1 : 0, "inAnyBlock", color=color.orange, display=display.data_window)
