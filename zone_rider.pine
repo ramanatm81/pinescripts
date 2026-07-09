@@ -10,10 +10,16 @@
 //    • ENTRY (trend-follow): price breaches the outer band and HOLDS it for breachBars
 //      (default 5) consecutive bars, then enter WITH the break — high > resistance+width
 //      held → LONG ; low < support-width held → SHORT.
-//    • EXIT (trailing floor): LONG exits when price falls to support+width (the upper
-//      support band, which trails UP with the trend); SHORT exits at resistance-width.
-//      Hard SL (default 200 pts) is the backstop. No TP, no gap exit. Then IDLE cooldownBars.
-//    • 5yr port result: +101k pts, pf 1.85, 6/6 profitable years (Python sim, 1pt slip).
+//    • EXIT — three exits, first to hit wins (priority SL → MFE trail → floor):
+//        1. Hard SL (default 200 pts) — rarely-hit backstop.
+//        2. MFE trailing stop (default ON): once the trade runs mfeTrigPts (100) in our
+//           favor, exit if price retraces mfeTrailPts (80) from the peak. Locks gains in
+//           chop where the floor is too loose. Toggle off for the raw Denver behavior.
+//        3. Trailing floor: LONG exits when price falls to support+width (the upper
+//           support band, which trails UP with the trend); SHORT exits at resistance-width.
+//      No TP, no gap exit. After any exit, IDLE cooldownBars.
+//    • 5yr port result: Denver (no MFE trail) +101k pf 1.85 6/6 yrs; Boulder (MFE 100/80)
+//      +98.3k pf 1.86 win 60.4% maxDD 1886 — ~2.7k less PnL for ~10% lower drawdown.
 //    • The swing structure is drawn as a continuous zig-zag line through the
 //      confirmed pivots (H → L → H …) — smoother than a stepped plot().
 //
@@ -47,6 +53,7 @@ strategy("Zone Rider", overlay=true, max_labels_count=500, max_lines_count=500,
 //=============================
 // Inputs
 //=============================
+stratName   = input.string("zone_rider", "Strategy name (carried in webhook alerts)", group="Alerts")
 pivotLen    = input.int(10,   "Pivot half-width (bars each side)", minval=1, maxval=50, group="Pivots")
 zoneWidth   = input.float(25.0,"Zone width (pts either side of pivot)", minval=0.5, step=0.5, group="Pivots")
 maxPivotAge = input.int(0,    "Max pivot age (bars, 0 = never expire)", minval=0, maxval=2000, group="Pivots")
@@ -60,6 +67,9 @@ breachDistPts = input.float(20.0, "  Distance mode: pts BEYOND the outer band to
 cooldownBars= input.int(20,   "Idle bars after exit before next entry", minval=0, maxval=500, group="Trade")
 useHardSL   = input.bool(true, "Hard stop-loss (backstop)",                          group="Trade")
 slPts       = input.float(200.0,"Stop-loss (pts from entry)", minval=1.0, step=1.0, group="Trade")
+useMfeTrail = input.bool(true, "MFE trailing stop (lock gains once trend has paid)", group="Trade")
+mfeTrigPts  = input.float(100.0,"  MFE trigger (pts of favorable excursion to arm)", minval=1.0, step=5.0, group="Trade")
+mfeTrailPts = input.float(80.0, "  MFE trail (pts of retrace from peak to exit)",    minval=1.0, step=5.0, group="Trade")
 
 // Session windows anchored to America/Chicago (real US market hours), independent
 // of the chart's display timezone. Block windows mirror slope_strategy.pine.
@@ -208,6 +218,28 @@ var int   tradeDir   = 0     // 1 = long, -1 = short, 0 = flat
 var float entryPrice = na
 var int   tradeSeq   = 0
 var int   cooldown   = 0     // idle-bar countdown after an exit; entries blocked while > 0
+var string tradeId   = ""    // pseudo-GUID per trade — shared by its entry & exit alerts
+var string exitReason= ""    // reason of the last exit — set at each exit site, read by the exit alert
+var int   exitedDir  = 0     // direction that was just exited (1=long,-1=short) — for the exit alert side
+var float mfe        = 0.0   // max favorable excursion of the open trade (pts) — arms the MFE trail
+var float peakPx     = na    // best price reached since entry (high for long, low for short)
+
+// Deterministic per-trade id, guaranteed unique (mirrors slope_strategy.pine).
+makeTradeId(seq) =>
+    _t  = int(time / 1000) % 1000000
+    _px = int(close * 100) % 100000
+    _h  = (_t * 131 + seq * 7919 + _px * 31) % 16777216
+    _h := (_h * 2654435761) % 16777216
+    _h := (_h + seq * 11400714819323) % 16777216
+    _h := int(_h % 16777216)
+    _hex = ""
+    _digits = "0123456789abcdef"
+    _v = _h
+    for _i = 0 to 5
+        _nib = int(_v % 16)
+        _hex := str.substring(_digits, _nib, _nib + 1) + _hex
+        _v := math.floor(_v / 16)
+    _hex + "-" + str.tostring(seq)
 
 //=============================
 // EOD flatten
@@ -215,9 +247,14 @@ var int   cooldown   = 0     // idle-bar countdown after an exit; entries blocke
 if blockEOD and eodClose and strategy.position_size != 0
     strategy.close_all(comment="EOD")
 if blockEOD and eodClose
+    if inTrade
+        exitReason := "EOD"
+        exitedDir  := tradeDir
     inTrade    := false
     tradeDir   := 0
     entryPrice := na
+    mfe        := 0.0
+    peakPx     := na
 
 //=============================
 // Session block — on entering a blocked window, flatten any open trade (same as
@@ -227,9 +264,13 @@ if blockEOD and eodClose
 if inAnyBlock and strategy.position_size != 0
     strategy.close_all(comment="BLK")
 if inAnyBlock and inTrade
+    exitReason := "BLK"
+    exitedDir  := tradeDir
     inTrade    := false
     tradeDir   := 0
     entryPrice := na
+    mfe        := 0.0
+    peakPx     := na
     cooldown   := 0
 
 //=============================
@@ -239,9 +280,13 @@ if inAnyBlock and inTrade
 // next-bar-open). Start the idle cooldown on this exit too.
 //=============================
 if strategy.position_size == 0 and strategy.position_size[1] != 0 and inTrade and not eodClose
+    exitReason := "SL"
+    exitedDir  := tradeDir
     inTrade    := false
     tradeDir   := 0
     entryPrice := na
+    mfe        := 0.0
+    peakPx     := na
     cooldown   := cooldownBars
 
 //=============================
@@ -257,26 +302,80 @@ if cooldown > 0 and not inTrade
 //   SHORT exits when price rises back to the LOWER RESISTANCE band: high >= resZoneBot
 //         (resistance trails DOWN, so this ceiling drops onto a winning short)
 // The hard SL (set at entry via strategy.exit) is the backstop. No TP, no gap exit.
+//
+// MFE trailing stop (priority: SL → MFE-trail → floor). Once the trade has run
+// mfeTrigPts in our favor, we arm a trail: exit if price retraces mfeTrailPts
+// from the peak. This locks a big chunk of the move in choppy stretches where the
+// trailing floor is too loose. Validated on 5yr MNQ: trig100/trail80 =
+// +98.3k PF 1.86 win 60.4% maxDD 1886 (vs Denver baseline +101k PF 1.85 win 56.8%
+// maxDD 2103) — costs ~2.7k PnL for ~10% lower drawdown + higher win rate.
 //=============================
+// Track MFE / peak price while a trade is open (before checking exits this bar)
+if inTrade
+    if tradeDir == 1
+        mfe    := math.max(mfe, high - entryPrice)
+        peakPx := na(peakPx) ? high : math.max(peakPx, high)
+    else if tradeDir == -1
+        mfe    := math.max(mfe, entryPrice - low)
+        peakPx := na(peakPx) ? low  : math.min(peakPx, low)
+
+mfeLongExit  = useMfeTrail and inTrade and tradeDir == 1  and mfe >= mfeTrigPts and low  <= peakPx - mfeTrailPts
+mfeShortExit = useMfeTrail and inTrade and tradeDir == -1 and mfe >= mfeTrigPts and high >= peakPx + mfeTrailPts
+
+if mfeLongExit
+    strategy.cancel("SL-Long")
+    strategy.close("Long", comment="MFE")
+    exitReason := "MFE"
+    exitedDir  := 1
+    inTrade    := false
+    tradeDir   := 0
+    entryPrice := na
+    cooldown   := cooldownBars
+    mfe        := 0.0
+    peakPx     := na
+    label.new(bar_index, high, text="SELL", style=label.style_label_down,
+              color=color.new(color.orange, 10), textcolor=color.white, size=size.small)
+else if mfeShortExit
+    strategy.cancel("SL-Short")
+    strategy.close("Short", comment="MFE")
+    exitReason := "MFE"
+    exitedDir  := -1
+    inTrade    := false
+    tradeDir   := 0
+    entryPrice := na
+    cooldown   := cooldownBars
+    mfe        := 0.0
+    peakPx     := na
+    label.new(bar_index, low, text="COVER", style=label.style_label_up,
+              color=color.new(color.orange, 10), textcolor=color.white, size=size.small)
+
 longExitHit  = inTrade and tradeDir == 1  and supValid and low  <= supZoneTop
 shortExitHit = inTrade and tradeDir == -1 and resValid and high >= resZoneBot
 
 if longExitHit
     strategy.cancel("SL-Long")
     strategy.close("Long", comment="FLR")
+    exitReason := "FLR"
+    exitedDir  := 1
     inTrade    := false
     tradeDir   := 0
     entryPrice := na
     cooldown   := cooldownBars
+    mfe        := 0.0
+    peakPx     := na
     label.new(bar_index, high, text="SELL", style=label.style_label_down,
               color=color.new(color.red, 10), textcolor=color.white, size=size.small)
 else if shortExitHit
     strategy.cancel("SL-Short")
     strategy.close("Short", comment="FLR")
+    exitReason := "FLR"
+    exitedDir  := -1
     inTrade    := false
     tradeDir   := 0
     entryPrice := na
     cooldown   := cooldownBars
+    mfe        := 0.0
+    peakPx     := na
     label.new(bar_index, low, text="COVER", style=label.style_label_up,
               color=color.new(color.green, 10), textcolor=color.white, size=size.small)
 
@@ -304,7 +403,10 @@ if goLong
     entryPrice := close
     inTrade    := true
     tradeDir   := 1
+    mfe        := 0.0
+    peakPx     := close
     tradeSeq   += 1
+    tradeId := makeTradeId(tradeSeq)
     strategy.entry("Long", strategy.long, comment="ZR↑")
     if useHardSL
         strategy.exit("SL-Long", "Long", stop=close - slPts)   // SL BELOW entry for a long
@@ -314,7 +416,10 @@ else if goShort
     entryPrice := close
     inTrade    := true
     tradeDir   := -1
+    mfe        := 0.0
+    peakPx     := close
     tradeSeq   += 1
+    tradeId := makeTradeId(tradeSeq)
     strategy.entry("Short", strategy.short, comment="ZR↓")
     if useHardSL
         strategy.exit("SL-Short", "Short", stop=close + slPts)  // SL ABOVE entry for a short
@@ -330,7 +435,7 @@ var table statsTable = table.new(position.bottom_right, 2, 5,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Denver", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Boulder", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "Zone Rider", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "Support", text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, supValid ? str.tostring(support, "#.##") : "—", text_color=color.new(color.green, 0), text_size=size.small)
@@ -362,3 +467,39 @@ plot(swingDownSignal ? 1 : 0, "swingDownSignal", color=color.lime,   display=dis
 plot(swingUpSignal   ? 1 : 0, "swingUpSignal",   color=color.red,    display=display.data_window)
 plot(cooldown,    "cooldown",    color=color.gray, display=display.data_window)
 plot(inAnyBlock ? 1 : 0, "inAnyBlock", color=color.orange, display=display.data_window)
+
+//=============================
+// Webhook alerts — same JSON shape as slope_strategy.pine, PLUS a "strategy" field
+// so a shared webhook can tell which strategy fired. Entry/exit keyed off our own
+// tradeDir transition (mirrors slope: fires immediately, never missed on fast round-trips).
+//=============================
+// Entry — long
+if tradeDir == 1 and tradeDir[1] == 0
+    alert('{"strategy":"' + stratName + '","event":"entry","side":"long","id":"' + tradeId + '","price":' + str.tostring(close, "0.00") +
+          ',"sl":' + str.tostring(entryPrice - slPts, "0.00") +
+          ',"sl_pts":' + str.tostring(slPts, "0.00") +
+          ',"support":' + (supValid ? str.tostring(support, "0.00") : "null") +
+          ',"resistance":' + (resValid ? str.tostring(resistance, "0.00") : "null") +
+          ',"symbol":"' + syminfo.ticker + '"' +
+          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London") + '"' +
+          '}', alert.freq_once_per_bar)
+// Entry — short
+if tradeDir == -1 and tradeDir[1] == 0
+    alert('{"strategy":"' + stratName + '","event":"entry","side":"short","id":"' + tradeId + '","price":' + str.tostring(close, "0.00") +
+          ',"sl":' + str.tostring(entryPrice + slPts, "0.00") +
+          ',"sl_pts":' + str.tostring(slPts, "0.00") +
+          ',"support":' + (supValid ? str.tostring(support, "0.00") : "null") +
+          ',"resistance":' + (resValid ? str.tostring(resistance, "0.00") : "null") +
+          ',"symbol":"' + syminfo.ticker + '"' +
+          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London") + '"' +
+          '}', alert.freq_once_per_bar)
+// Exit — fires on our own state transition (tradeDir non-zero -> 0)
+zrExitFired = tradeDir == 0 and tradeDir[1] != 0
+if zrExitFired
+    _exitSide = exitedDir == 1 ? "long" : "short"
+    alert('{"strategy":"' + stratName + '","event":"exit","side":"' + _exitSide + '","id":"' + tradeId + '"' +
+          ',"reason":"' + exitReason + '"' +
+          ',"price":' + str.tostring(close, "0.00") +
+          ',"symbol":"' + syminfo.ticker + '"' +
+          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London") + '"' +
+          '}', alert.freq_once_per_bar)
