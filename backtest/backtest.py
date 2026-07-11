@@ -43,6 +43,20 @@ POINT_VALUE = 1.0  # PnL reported in points; * contract value externally if need
 
 def run(bars, p):
     # --- params (dict p) with defaults matching the pine inputs ---
+    # Optional per-bar entry block (VWAP-zone proximity filter etc.): a list/array the same
+    # length as bars; when vwap_block[bi] is truthy, NEW normal entries are suppressed on
+    # that bar (open-trade management unaffected). None = no filter.
+    vwap_block      = p.get("vwap_block", None)
+    # Extreme-slope SL override: when abs(entry slope) >= extremeSlope, use extremeSL pts
+    # instead of the SMA-based 50/30 (strong momentum needs room). 0/None = off.
+    extremeSlope    = p.get("extremeSlope", 0.0) or 0.0
+    extremeSL       = p.get("extremeSL", 0.0) or 0.0
+    # Delayed entry for extreme-slope ABOVE-SMA signals: when close>SMA and |slope|>=
+    # delayExtremeSlope at a would-be entry, DON'T enter now — wait delayBars, then enter
+    # same direction ONLY IF the slope signal is still valid (same side, beyond slopeEntry).
+    # 0 = off.
+    delayExtremeSlope = p.get("delayExtremeSlope", 0.0) or 0.0
+    delayBars         = p.get("delayBars", 0) or 0
     lookback        = p.get("lookback", 10)
     slopeEntry      = p["slopeEntry"]
     slPts           = p.get("slPts", 50.0)
@@ -87,6 +101,7 @@ def run(bars, p):
     # --- state ---
     inTrade=False; tradeDir=0; entryPrice=None; entrySlope=None
     bestPrice=None; trailStop=None; cooldown=0; barsInTrade=0; activeSL=None
+    delayPending=0; delayDir=0   # delayed extreme-above-SMA entry: bars left, direction
     slExitDir=0; slEntryPrice=None; barrierBuf=None; barrierCool=0; slBarrier=None
     thrdRevPending=False; thrdRevDir=0
     deepBestPrice=None; deepBlockDir=0; entryWasDeep=False; exitBestPrice=None
@@ -342,25 +357,61 @@ def run(bars, p):
                 entryWasDeep=False; barsInTrade=0
             breachActive = breachTradeDir!=0 or shortDue or longDue
 
+        vwapBlock = (vwap_block is not None and bi < len(vwap_block) and vwap_block[bi])
         bullEntry = (canTrade and not breachActive and bigEnough and not inFractalDrought and legSlope < -slopeEntry
                      and slExitDir!=1 and not srBlock and (not inDeepBlock or isDeepSignal)
-                     and not deepLossBlockLong)
+                     and not deepLossBlockLong and not vwapBlock)
         bearEntry = (canTrade and not breachActive and bigEnough and not inFractalDrought and legSlope > slopeEntry
                      and slExitDir!=-1 and not srBlock and (not inDeepBlock or isDeepSignal)
-                     and not deepLossBlockShort)
+                     and not deepLossBlockShort and not vwapBlock)
+
+        # Delayed-entry interception: extreme slope while price is ABOVE the SMA -> don't
+        # enter now; arm a delay and re-confirm the slope after delayBars bars.
+        _delayOn = delayExtremeSlope>0 and delayBars>0 and smaVal is not None and c>smaVal \
+                   and legSlope is not None and abs(legSlope)>=delayExtremeSlope
+        if (bullEntry or bearEntry) and _delayOn and delayPending==0:
+            delayPending = delayBars
+            delayDir     = 1 if bullEntry else -1
+            bullEntry=False; bearEntry=False   # suppress the immediate entry
 
         if bullEntry:
             slAmt = (slBelowSma if (smaVal is not None and c<smaVal) else slAboveSma) if enableSmaSL else slPts
+            if extremeSlope>0 and extremeSL>0 and legSlope is not None and abs(legSlope)>=extremeSlope:
+                slAmt = extremeSL
             tradeDir=1; entryPrice=c; entrySlope=legSlope; inTrade=True; activeSL=slAmt
             trailStop=None; bestPrice=None
             slExitDir=0; slEntryPrice=None; barrierBuf=None
             entryWasDeep=isDeepSignal; deepBlockDir=0; deepLossBlockDir=0
         elif bearEntry:
             slAmt = (slBelowSma if (smaVal is not None and c<smaVal) else slAboveSma) if enableSmaSL else slPts
+            if extremeSlope>0 and extremeSL>0 and legSlope is not None and abs(legSlope)>=extremeSlope:
+                slAmt = extremeSL
             tradeDir=-1; entryPrice=c; entrySlope=legSlope; inTrade=True; activeSL=slAmt
             trailStop=None; bestPrice=None
             slExitDir=0; slEntryPrice=None; barrierBuf=None
             entryWasDeep=isDeepSignal; deepBlockDir=0; deepLossBlockDir=0
+
+        # ===== delayed extreme-above-SMA entry resolution =====
+        # Count down; when it reaches 0 enter same dir IF slope still valid (same side,
+        # beyond slopeEntry) and we can trade. If it fizzled, drop it (no trade).
+        if delayPending>0 and inTrade:
+            delayPending=0; delayDir=0   # a trade opened elsewhere -> drop the pending delay
+        elif delayPending>0 and not (bullEntry or bearEntry):
+            delayPending -= 1
+            if delayPending==0:
+                stillValid = (legSlope is not None and
+                              ((delayDir==1 and legSlope < -slopeEntry) or
+                               (delayDir==-1 and legSlope > slopeEntry)))
+                if stillValid and canTrade and not inTrade and not vwapBlock and bigEnough \
+                   and not inFractalDrought:
+                    slAmt = (slBelowSma if (smaVal is not None and c<smaVal) else slAboveSma) if enableSmaSL else slPts
+                    if extremeSlope>0 and extremeSL>0 and abs(legSlope)>=extremeSlope:
+                        slAmt = extremeSL
+                    tradeDir=delayDir; entryPrice=c; entrySlope=legSlope; inTrade=True; activeSL=slAmt
+                    trailStop=None; bestPrice=None
+                    slExitDir=0; slEntryPrice=None; barrierBuf=None
+                    entryWasDeep=isDeepSignal; deepBlockDir=0; deepLossBlockDir=0
+                delayDir=0
 
         # ===== trailing stop (skips breach-fade trades) =====
         if tradeDir==1 and inTrade and breachTradeDir==0:

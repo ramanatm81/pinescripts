@@ -22,7 +22,6 @@ tExpBars     = input.int(20,    "Max bars in trade (exit if profitable)",  minva
 enableTExpHard   = input.bool(true, "Enable hard time expiry (exit even if loss, slope against)", group="Time Expiry")
 tExpHardBars     = input.int(20,    "Hard max bars (exit if slope against trade)",                minval=1,  maxval=500, group="Time Expiry")
 tExpHardSlope    = input.float(1.0, "Slope 'against' threshold for hard exit",                   minval=0.1, step=0.1,  group="Time Expiry")
-enableThrdReversal = input.bool(true,  "On THRD exit, immediately enter opposite direction",     group="Time Expiry")
 dojiPct      = input.float(10.0,"Doji body % of range (excluded from R²)", minval=1.0, maxval=49.0, step=1.0, group="R² Filter")
 cooldownBars    = input.int(10, "Cooldown bars after exit — ETH (0 = none)", minval=0,  maxval=50,           group="R² Filter")
 cooldownBarsRTH = input.int(10, "Cooldown bars after exit — RTH (0 = none)", minval=0,  maxval=50,           group="R² Filter")
@@ -40,6 +39,8 @@ showZoneEscape   = input.bool(false, "Mark bars where price escapes the outer S/
 smoothSR         = input.bool(false, "Smooth S/R line — hold level until a pivot breaks threshold (display only)", group="S/R Filter")
 smoothSRPct      = input.float(0.30, "  Smoothing threshold (% of price)", minval=0.01, step=0.05,  group="S/R Filter")
 showRawVsSmooth  = input.bool(false, "  Compare: overlay RAW pivot line (dotted) vs smoothed",     group="S/R Filter")
+showVwapSR       = input.bool(true,  "Draw VWAP ±2σ S/R lines (daily-anchored, display only)",     group="S/R Filter")
+vwapProximity    = input.float(15.0, "Block entries within X pts of a VWAP ±2σ band (0 = off)", minval=0.0, step=1.0, group="S/R Filter")
 enableDroughtBlock = input.bool(false, "Block entry when no fractal for N bars (trending market)", group="S/R Filter")
 droughtBlockBars   = input.int(50,    "Drought threshold (bars without any fractal)",  minval=5, maxval=500, group="S/R Filter")
 blockNYOpen  = input.bool(false,"Block NY open first 30 min (14:30–15:00 London / 08:30–09:00 CT)",       group="Session Filter")
@@ -150,6 +151,23 @@ _rawL = showRawVsSmooth and smoothSR and _lowValid  ? lastFractalLow  : na
 plot(_rawH, "raw srHi", color=na(_rawH) ? na : color.new(color.red, 55),   linewidth=1, style=plot.style_circles, display=display.all)
 plot(_rawL, "raw srLo", color=na(_rawL) ? na : color.new(color.green, 55), linewidth=1, style=plot.style_circles, display=display.all)
 
+// ---- VWAP ±2σ S/R lines (daily-anchored) — DISPLAY ONLY ----
+// Volume-weighted mean ± 2 standard deviations, reset each trading day. Guaranteed ordered
+// (lower ≤ VWAP ≤ upper by construction — cannot invert), volatility-adaptive. Does NOT
+// affect this strategy's exits; only blocks NEW entries via the proximity filter below.
+[_vwapVal, _vwapUp, _vwapLo] = ta.vwap(hlc3, timeframe.change("D"), 2.0)
+plot(showVwapSR ? _vwapUp  : na, "VWAP +2σ (resistance)", color=showVwapSR ? color.new(color.red,   0)  : na, linewidth=2, display=display.all)
+plot(showVwapSR ? _vwapVal : na, "VWAP (mean)",           color=showVwapSR ? color.new(color.gray,  20) : na, linewidth=1, display=display.all)
+plot(showVwapSR ? _vwapLo  : na, "VWAP −σ (support)",    color=showVwapSR ? color.new(color.green, 0)  : na, linewidth=2, display=display.all)
+
+// VWAP-ZONE PROXIMITY FILTER — block NEW entries when close is within vwapProximity pts of
+// EITHER ±2σ band (price at a statistical extreme → poor spot to open a fresh slope trade).
+// Skipped when bands aren't formed (σ≈0 early session, width < 1pt). Sweep-validated ±15pt:
+// +33,457→+34,192 (0 slip) / +21,151→+23,058 (1pt), ~1,200 fewer trades, 4/6→5/6 yrs.
+_vwapBandWidth = (not na(_vwapUp) and not na(_vwapLo)) ? _vwapUp - _vwapLo : na
+_vwapBandsFormed = not na(_vwapBandWidth) and _vwapBandWidth >= 1.0
+vwapZoneBlock = vwapProximity > 0 and _vwapBandsFormed and (math.abs(close - _vwapUp) <= vwapProximity or math.abs(close - _vwapLo) <= vwapProximity)
+
 // ---- Zone-escape markers ----
 // Flag bars where price pushes BEYOND the outer S/R band, measured wick-side:
 //   support escape   : bar LOW  drops below (pivot low  - srZoneWidth)  → lower wick escapes
@@ -198,8 +216,6 @@ var float slBarrier    = na   // checkpoint close — updated every cooldownBars
 var int   barrierCool  = 0    // countdown between checkpoint updates
 var float slEntryPrice = na   // entry price of bad trade — anchor for clear condition
 var float barrierBuf   = na   // activeSL at time of bad exit
-var bool  thrdReversalPending = false  // true for one bar after THRD exit
-var int   thrdReversalDir     = 0      // direction to enter: 1=Long, -1=Short
 var int    tradeSeq    = 0     // monotonic trade counter (uniqueness seed)
 var string tradeId     = ""    // pseudo-GUID for the current trade — shared by its entry & exit alerts
 var string exitReason  = ""    // reason of the last exit — set at each exit site, read by the exit alert
@@ -467,13 +483,7 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
             slEntryPrice := entryPrice
             barrierBuf   := activeSL
             barrierCool  := 0
-        if enableThrdReversal
-            // slope is against tradeDir → enter opposite direction after 2 bars
-            thrdReversalPending := true
-            thrdReversalDir     := -tradeDir  // Long was losing to downslope → go Short; Short losing to upslope → go Long
-            cooldown            := 2          // 2-bar delay before reversal entry fires
-        else
-            cooldown := activeCooldown
+        cooldown := activeCooldown
         exitReason  := "THRD"
         exitedDir   := tradeDir
         tradeDir    := 0
@@ -483,53 +493,6 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
         barsInTrade := 0
 
 //=============================
-// THRD reversal entry — fires two bars after THRD exit (cooldown 2→1→0), bypasses all normal filters
-//=============================
-if thrdReversalPending and not inTrade and cooldown == 0 and not eodClose and time >= startDate and time <= endDate
-    thrdReversalPending := false
-    _slAmt = enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts
-    if thrdReversalDir == 1
-        _tp      = close + tpPts * tpMult
-        _slPrice = close - _slAmt
-        strategy.entry("Long",  strategy.long,  comment="T↑")
-        strategy.exit("Exit-Long",  "Long",  stop=_slPrice, limit=_tp)
-        slExitDir    := 0
-        slBarrier    := na
-        slEntryPrice := na
-        barrierBuf   := na
-        barrierCool  := 0
-        tradeDir     := 1
-        entryPrice   := close
-        entrySlope   := legSlope
-        trailStop    := na
-        bestPrice    := na
-        inTrade      := true
-        activeSL     := _slAmt
-        tradeSeq += 1
-        tradeId := makeTradeId(tradeSeq)
-        label.new(bar_index, low,  text="T↑", style=label.style_label_up,   color=color.new(color.teal, 10), textcolor=color.white, size=size.normal)
-    else if thrdReversalDir == -1
-        _tp      = close - tpPts * tpMult
-        _slPrice = close + _slAmt
-        strategy.entry("Short", strategy.short, comment="T↓")
-        strategy.exit("Exit-Short", "Short", stop=_slPrice, limit=_tp)
-        slExitDir    := 0
-        slBarrier    := na
-        slEntryPrice := na
-        barrierBuf   := na
-        barrierCool  := 0
-        tradeDir     := -1
-        entryPrice   := close
-        entrySlope   := legSlope
-        trailStop    := na
-        bestPrice    := na
-        inTrade      := true
-        activeSL     := _slAmt
-        tradeSeq += 1
-        tradeId := makeTradeId(tradeSeq)
-        label.new(bar_index, high, text="T↓", style=label.style_label_down, color=color.new(color.teal, 10), textcolor=color.white, size=size.normal)
-
-//=============================
 // Entry signals
 // legSlope < -slopeEntry → downtrend → enter LONG (mean reversion / reversal)
 // legSlope >  slopeEntry → uptrend   → enter SHORT
@@ -537,8 +500,8 @@ if thrdReversalPending and not inTrade and cooldown == 0 and not eodClose and ti
 canTrade  = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and not ethOpenBlock and time >= startDate and time <= endDate and not na(legSlope)
 bigEnough = not enableBodyFilter or (math.abs(close - open) >= minBodyPts)
 
-bullEntry = canTrade and bigEnough and not inFractalDrought and legSlope < -slopeEntry and slExitDir != 1  and not srBlockLong
-bearEntry = canTrade and bigEnough and not inFractalDrought and legSlope >  slopeEntry and slExitDir != -1 and not srBlockShort
+bullEntry = canTrade and bigEnough and not inFractalDrought and legSlope < -slopeEntry and slExitDir != 1  and not srBlockLong  and not vwapZoneBlock
+bearEntry = canTrade and bigEnough and not inFractalDrought and legSlope >  slopeEntry and slExitDir != -1 and not srBlockShort and not vwapZoneBlock
 
 if bullEntry
     tp  = close + tpPts * tpMult
@@ -759,6 +722,7 @@ plot(slBarrier,                          "slBarrier",    color=color.rgb(255,180
 plot(slEntryPrice,                       "slEntryPrice", color=color.rgb(255,80,80),   display=display.data_window)
 plot(barrierBuf,                         "barrierBuf",  color=color.rgb(255,140,0),   display=display.data_window)
 plot(barrierCool > 0 ? barrierCool : na, "barrierCool", color=color.rgb(200,100,255), display=display.data_window)
+plot(vwapZoneBlock ? 1 : 0,              "vwapZoneBlock", color=color.aqua,            display=display.data_window)  // 1 = entry blocked near a VWAP ±2σ band
 
 // No-traction stats table — bottom-right corner of chart
 var table statsTable = table.new(position.bottom_right, 2, 6,
