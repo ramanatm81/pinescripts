@@ -57,6 +57,14 @@ def run(bars, p):
     # 0 = off.
     delayExtremeSlope = p.get("delayExtremeSlope", 0.0) or 0.0
     delayBars         = p.get("delayBars", 0) or 0
+    # Big-loss-above-SMA block: after a loss >= bigLossPts taken while close>SMA, block
+    # ALL new entries (both directions) for bigLossCool bars. 0 = off.
+    bigLossPts        = p.get("bigLossPts", 0.0) or 0.0
+    bigLossCool       = p.get("bigLossCool", 0) or 0
+    # Break-even stop: once the trade runs beArm pts in our favor (peak), move the stop to
+    # entry + beOffset so the trade can no longer become a loss. 0 = off.
+    beArm             = p.get("beArm", 0.0) or 0.0
+    beOffset          = p.get("beOffset", 0.0) or 0.0
     lookback        = p.get("lookback", 10)
     slopeEntry      = p["slopeEntry"]
     slPts           = p.get("slPts", 50.0)
@@ -102,6 +110,8 @@ def run(bars, p):
     inTrade=False; tradeDir=0; entryPrice=None; entrySlope=None
     bestPrice=None; trailStop=None; cooldown=0; barsInTrade=0; activeSL=None
     delayPending=0; delayDir=0   # delayed extreme-above-SMA entry: bars left, direction
+    bigLossBlock=0               # bars left of the all-directions block after a big loss above SMA
+    beArmed=False                # break-even stop armed (trade ran beArm favorable)
     slExitDir=0; slEntryPrice=None; barrierBuf=None; barrierCool=0; slBarrier=None
     thrdRevPending=False; thrdRevDir=0
     deepBestPrice=None; deepBlockDir=0; entryWasDeep=False; exitBestPrice=None
@@ -207,7 +217,8 @@ def run(bars, p):
             legSlope = round((n*sxy-sx*sy)/denom,2) if denom!=0 else 0.0
 
         def close_trade(exit_price, reason):
-            nonlocal deepLossBlockDir, deepBlockDir, deepBestPrice
+            nonlocal deepLossBlockDir, deepBlockDir, deepBestPrice, bigLossBlock, beArmed
+            beArmed=False
             pnl = (exit_price-entryPrice) if tradeDir==1 else (entryPrice-exit_price)
             wasLong = (tradeDir==1)
             trades.append((tradeDir, entryPrice, exit_price, pnl, reason, entryWasDeep, dt))
@@ -217,6 +228,10 @@ def run(bars, p):
                 deepBestPrice = exitBestPrice
             if entryWasDeep and pnl<=0:
                 deepLossBlockDir = 1 if wasLong else -1
+            # big-loss-above-SMA: block ALL new entries for bigLossCool bars
+            if bigLossPts>0 and bigLossCool>0 and pnl <= -bigLossPts \
+               and smaVal is not None and c > smaVal:
+                bigLossBlock = bigLossCool
 
         # ===== session block exits =====
         inAnyBlock = nyOpenBlock or lnOpenBlock or preNYBlock or ethOpenBlock
@@ -234,6 +249,7 @@ def run(bars, p):
 
         # ===== cooldown countdown =====
         if cooldown>0 and not inTrade: cooldown-=1
+        if bigLossBlock>0 and not inTrade: bigLossBlock-=1
 
         # ===== slExitDir barrier clear =====
         if slExitDir!=0 and not inTrade:
@@ -244,6 +260,19 @@ def run(bars, p):
             else:
                 if c < slEntryPrice-barrierBuf: slExitDir=0; slEntryPrice=None; barrierBuf=None
 
+        # ===== break-even stop (checked BEFORE hard SL; once armed, the trade can't lose) =====
+        # Arm when peak favorable >= beArm; then exit at entry+beOffset (long) / entry-beOffset (short).
+        if inTrade and beArm>0:
+            favPeak = (h-entryPrice) if tradeDir==1 else (entryPrice-l)
+            if favPeak >= beArm:
+                beArmed=True
+            if beArmed:
+                beStop = entryPrice+beOffset if tradeDir==1 else entryPrice-beOffset
+                beHit  = (tradeDir==1 and l <= beStop) or (tradeDir==-1 and h >= beStop)
+                if beHit:
+                    close_trade(beStop, "BE")
+                    tradeDir=0; trailStop=None; bestPrice=None; inTrade=False; cooldown=activeCooldown; beArmed=False
+
         # ===== hard SL =====
         if inTrade:
             hardSLHit = (tradeDir==1 and l <= entryPrice-activeSL) or (tradeDir==-1 and h >= entryPrice+activeSL)
@@ -251,7 +280,7 @@ def run(bars, p):
                 fill = entryPrice-activeSL if tradeDir==1 else entryPrice+activeSL
                 close_trade(fill, "SL")
                 slExitDir=tradeDir; slEntryPrice=entryPrice; barrierBuf=activeSL; barrierCool=0
-                tradeDir=0; trailStop=None; bestPrice=None; inTrade=False; cooldown=activeCooldown
+                tradeDir=0; trailStop=None; bestPrice=None; inTrade=False; cooldown=activeCooldown; beArmed=False
 
         # ===== TP check (limit) — strategy.exit limit fills if price reaches TP =====
         # Pine's strategy.exit handles both stop and limit on the same bar; we already
@@ -358,12 +387,13 @@ def run(bars, p):
             breachActive = breachTradeDir!=0 or shortDue or longDue
 
         vwapBlock = (vwap_block is not None and bi < len(vwap_block) and vwap_block[bi])
+        bigBlk = bigLossBlock>0
         bullEntry = (canTrade and not breachActive and bigEnough and not inFractalDrought and legSlope < -slopeEntry
                      and slExitDir!=1 and not srBlock and (not inDeepBlock or isDeepSignal)
-                     and not deepLossBlockLong and not vwapBlock)
+                     and not deepLossBlockLong and not vwapBlock and not bigBlk)
         bearEntry = (canTrade and not breachActive and bigEnough and not inFractalDrought and legSlope > slopeEntry
                      and slExitDir!=-1 and not srBlock and (not inDeepBlock or isDeepSignal)
-                     and not deepLossBlockShort and not vwapBlock)
+                     and not deepLossBlockShort and not vwapBlock and not bigBlk)
 
         # Delayed-entry interception: extreme slope while price is ABOVE the SMA -> don't
         # enter now; arm a delay and re-confirm the slope after delayBars bars.

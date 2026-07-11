@@ -40,7 +40,8 @@ smoothSR         = input.bool(false, "Smooth S/R line — hold level until a piv
 smoothSRPct      = input.float(0.30, "  Smoothing threshold (% of price)", minval=0.01, step=0.05,  group="S/R Filter")
 showRawVsSmooth  = input.bool(false, "  Compare: overlay RAW pivot line (dotted) vs smoothed",     group="S/R Filter")
 showVwapSR       = input.bool(true,  "Draw VWAP ±2σ S/R lines (daily-anchored, display only)",     group="S/R Filter")
-vwapProximity    = input.float(15.0, "Block entries within X pts of a VWAP ±2σ band (0 = off)", minval=0.0, step=1.0, group="S/R Filter")
+enableVwapProximity = input.bool(true, "Block entries near VWAP ±2σ bands", group="S/R Filter")
+vwapProximity    = input.float(15.0, "  Proximity distance (pts from either band)", minval=0.0, step=1.0, group="S/R Filter")
 enableDroughtBlock = input.bool(false, "Block entry when no fractal for N bars (trending market)", group="S/R Filter")
 droughtBlockBars   = input.int(50,    "Drought threshold (bars without any fractal)",  minval=5, maxval=500, group="S/R Filter")
 blockNYOpen  = input.bool(false,"Block NY open first 30 min (14:30–15:00 London / 08:30–09:00 CT)",       group="Session Filter")
@@ -158,7 +159,7 @@ plot(_rawL, "raw srLo", color=na(_rawL) ? na : color.new(color.green, 55), linew
 [_vwapVal, _vwapUp, _vwapLo] = ta.vwap(hlc3, timeframe.change("D"), 2.0)
 plot(showVwapSR ? _vwapUp  : na, "VWAP +2σ (resistance)", color=showVwapSR ? color.new(color.red,   0)  : na, linewidth=2, display=display.all)
 plot(showVwapSR ? _vwapVal : na, "VWAP (mean)",           color=showVwapSR ? color.new(color.gray,  20) : na, linewidth=1, display=display.all)
-plot(showVwapSR ? _vwapLo  : na, "VWAP −σ (support)",    color=showVwapSR ? color.new(color.green, 0)  : na, linewidth=2, display=display.all)
+plot(showVwapSR ? _vwapLo  : na, "VWAP −2σ (support)",    color=showVwapSR ? color.new(color.green, 0)  : na, linewidth=2, display=display.all)
 
 // VWAP-ZONE PROXIMITY FILTER — block NEW entries when close is within vwapProximity pts of
 // EITHER ±2σ band (price at a statistical extreme → poor spot to open a fresh slope trade).
@@ -166,7 +167,7 @@ plot(showVwapSR ? _vwapLo  : na, "VWAP −σ (support)",    color=showVwapSR ? c
 // +33,457→+34,192 (0 slip) / +21,151→+23,058 (1pt), ~1,200 fewer trades, 4/6→5/6 yrs.
 _vwapBandWidth = (not na(_vwapUp) and not na(_vwapLo)) ? _vwapUp - _vwapLo : na
 _vwapBandsFormed = not na(_vwapBandWidth) and _vwapBandWidth >= 1.0
-vwapZoneBlock = vwapProximity > 0 and _vwapBandsFormed and (math.abs(close - _vwapUp) <= vwapProximity or math.abs(close - _vwapLo) <= vwapProximity)
+vwapZoneBlock = enableVwapProximity and vwapProximity > 0 and _vwapBandsFormed and (math.abs(close - _vwapUp) <= vwapProximity or math.abs(close - _vwapLo) <= vwapProximity)
 
 // ---- Zone-escape markers ----
 // Flag bars where price pushes BEYOND the outer S/R band, measured wick-side:
