@@ -6,8 +6,9 @@
 # ]
 # ///
 """
-Watch ~/Downloads for any file starting with "CME".
-When one arrives, delete ~/Downloads/data.csv (if present) and rename the CME file to data.csv.
+Watch ~/Downloads and route TradingView exports to the files the tooling reads:
+  • files starting with "CME"                          -> data.csv   (OHLC bars)
+  • "Slope_Strategy*.csv" / "Cluster_Breakdown*.csv"   -> input.csv  (List of Trades export)
 
 Run:
   uv run --no-project watch_downloads.py
@@ -41,7 +42,7 @@ def handle_cme_file(src: Path) -> None:
     log.info("Renamed %s -> data.csv", src.name)
 
 
-def handle_slope_file(src: Path) -> None:
+def handle_strategy_file(src: Path) -> None:
     if INPUT_CSV.exists():
         INPUT_CSV.unlink()
         log.info("Deleted existing input.csv")
@@ -65,12 +66,12 @@ class DownloadsHandler(FileSystemEventHandler):
                 handle_cme_file(p)
             except Exception as exc:
                 log.error("Failed to rename %s: %s", p.name, exc)
-        elif p.name.startswith("Slope_Strategy") and p.suffix == ".csv" and p.name != "input.csv":
+        elif p.name.startswith(("Slope_Strategy", "Cluster_Breakdown")) and p.suffix == ".csv" and p.name != "input.csv":
             if not p.exists():
                 return
-            log.info("Detected Slope Strategy file: %s", p.name)
+            log.info("Detected strategy export: %s", p.name)
             try:
-                handle_slope_file(p)
+                handle_strategy_file(p)
             except Exception as exc:
                 log.error("Failed to rename %s: %s", p.name, exc)
 

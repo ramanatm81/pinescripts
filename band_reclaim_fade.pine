@@ -1,0 +1,289 @@
+//@version=6
+// =====================================================================================
+// CLUSTER BREAKDOWN / REVERSAL  —  one premise, two directions (for eyeballing).
+//
+// PREMISE: a CLUSTER of pierces below the VWAP −2σ floor means the statistical support is
+// under sustained attack (not a single stab). What happens next picks the trade:
+//     • price keeps FALLING  → SHORT — the breakdown continues
+//     • price reclaims −2σ and slope turns UP → LONG — the breakdown FAILED (V-reversal)
+// Same cluster, resolved in opposite directions. No fractal S/R — the −2σ band and the
+// cluster ARE the reference. (Fractal pivots were redundant once both trades key off the
+// cluster: price is already below all structure by construction, and an S/R filter would
+// block the very reversal path the long wants to catch.)
+//
+// Reuses the slope-strategy CORE: continuous rolling OLS slope (doji/EOD-aware, lookback 10).
+// VWAP ±2σ bands are daily-anchored (chart-day boundary → resets at your London midnight).
+//
+// CLUSTER (shared by both trades): low < −2σ on ≥ clNeeded of the last clWindow bars.
+//
+// SHORT (breakdown continues) — SETUP (4 criteria, NO slope) = breakdown (cluster) AND
+//   support falling (−2σ < −2σ[lbBand]) AND support below pivots (−2σ < pivotLow − zoneW)
+//   AND price below support (close < −2σ):
+//   Enter when the setup becomes true; hold ONE position while it stays true. Cover when the
+//   SETUP BREAKS (any of the 4 fails — symmetric with entry) OR hard SL (clSlPts) OR the wide
+//   armed trail OR EOD.
+//
+// LONG (breakdown fails, V-reversal):
+//   cluster formed AND price reclaims the band (close > −2σ) AND slope turning UP
+//   (legSlope ≥ +revSlope). Flat on hard SL (slPts) OR the wide armed trail OR EOD.
+//
+// WIDE TRAILING STOP (both dirs): hard SL is the initial risk; once open profit ≥ trailArm,
+//   a wide trailing stop arms and trails trailGap behind the best price, ratcheting only in
+//   our favor. Suits the volatile breakdown regime — room to run, but locks the fat profit.
+//
+// VISUAL tool to judge entries/exits; not a shipped edge (unbacktested — eyeball first).
+// =====================================================================================
+strategy("Cluster Breakdown / Reversal", overlay=true, max_labels_count=500, max_bars_back=5000,
+         default_qty_type=strategy.fixed, default_qty_value=1, calc_on_every_tick=false)
+
+//=============================
+// Inputs
+//=============================
+lookback     = 10  // fixed rolling window for slope (matches base)
+dojiPct      = input.float(10.0,"Doji body % of range (excluded from slope)", minval=1.0, maxval=49.0, step=1.0, group="Slope")
+
+// --- Cluster (shared regime signal) ---
+clWindow    = input.int(10,  "Cluster window (look back this many bars)",             minval=2, maxval=100, group="Cluster")
+clNeeded    = input.int(6,   "Cluster trigger (≥ this many pierced bars in window)",  minval=2, maxval=100, group="Cluster")
+
+// --- Support structure (used by SHORT entry: support falling + support below pivots) ---
+lbBand      = input.int(10,   "Support-falling lookback (−2σ must be lower than N bars ago)", minval=1, maxval=100, group="Support")
+srHalfWidth = input.int(10,   "Fractal half-width (10 = 21-bar pivot)",              minval=1, maxval=20, group="Support")
+srZoneWidth = input.float(25.0,"Pivot zone width (pts either side of pivot)",         minval=1.0, step=0.5, group="Support")
+
+// --- SHORT (breakdown continues) ---
+// Entry = pierces (cluster) + support falling + support below pivots + price below support.
+// NO slope, NO srBlock. (Pivots are computed & drawable, but only used for the
+// support-below-pivots gate — never to block entries near a zone.)
+enableShort = input.bool(true, "Enable breakdown SHORT",                             group="Short")
+clSlPts     = input.float(70.0,"SHORT Stop Loss (pts) — wider, breakdowns run",       minval=1.0, step=1.0, group="Short")
+
+// --- LONG (breakdown fails → V-reversal) ---
+enableLong  = input.bool(true, "Enable failed-breakdown LONG",                        group="Long")
+revSlope    = input.float(2.0, "LONG: slope must be ≥ +this (turning up)",            minval=0.1, step=0.1, group="Long")
+slPts       = input.float(70.0,"LONG Stop Loss (pts) — wide; V-reversal is still whippy post-flush", minval=1.0, step=1.0, group="Long")
+
+// --- Wide trailing stop (both directions) ---
+// Hard SL protects initially. Once the trade runs trailArm pts in profit, a WIDE trailing
+// stop arms and trails trailGap pts behind the best price, ratcheting only in our favor.
+// Wide gaps suit this volatile breakdown/reversal regime — give the move room, but never
+// give back more than trailGap of an open profit once armed.
+enableTrail = input.bool(true,  "Enable wide trailing stop (arms after profit)",     group="Trailing")
+trailArm    = input.float(80.0, "Arm trail after this much profit (pts, on close)",   minval=1.0, step=1.0, group="Trailing")
+trailGap    = input.float(40.0, "Trail gap behind best close (pts) — above close-to-close noise (~8), below a real reversal (~30)", minval=1.0, step=1.0, group="Trailing")
+
+cooldownBars = input.int(10, "Cooldown bars after an exit",                           minval=0, maxval=200, group="Exit")
+
+showVwapSR   = input.bool(true, "Draw VWAP ±2σ bands",                                group="Display")
+showPivots   = input.bool(true, "Draw fractal pivot levels (display only)",           group="Display")
+markPierce   = input.bool(true, "Mark pierced bars (× below the −2σ band)",           group="Display")
+
+startDate = input.time(timestamp("2019-01-01 00:00"), "Backtest start", group="Window")
+endDate   = input.time(timestamp("2030-01-01 00:00"), "Backtest end",   group="Window")
+
+//=============================
+// Session (CT minutes-since-midnight; RTH 08:30–15:00, EOD 15:00–16:00) — display-tz independent
+//=============================
+ctMins   = hour(time, "America/Chicago") * 60 + minute(time, "America/Chicago")
+inRTH    = ctMins >= 510 and ctMins < 900
+eodClose = ctMins >= 900 and ctMins < 960
+
+//=============================
+// Doji + continuous rolling slope (identical to base)
+//=============================
+_range   = high - low
+_bodyPct = _range > 0.0 ? (math.abs(close - open) / _range) * 100.0 : 0.0
+isDoji   = _bodyPct < dojiPct
+
+var float[] slopeBuf = array.new_float(0)
+var float   legSlope = na
+legSlope := na
+if not eodClose and not isDoji
+    array.push(slopeBuf, close)
+    if array.size(slopeBuf) > lookback
+        array.shift(slopeBuf)
+if array.size(slopeBuf) == lookback
+    n = lookback
+    sumX = 0.0
+    sumY = 0.0
+    sumXY = 0.0
+    sumX2 = 0.0
+    for i = 0 to n - 1
+        x = float(i)
+        y = array.get(slopeBuf, i)
+        sumX += x
+        sumY += y
+        sumXY += x * y
+        sumX2 += x * x
+    denom = n * sumX2 - sumX * sumX
+    legSlope := denom != 0.0 ? math.round((n * sumXY - sumX * sumY) / denom, 2) : 0.0
+
+//=============================
+// VWAP ±2σ bands (daily-anchored)
+//=============================
+[_vwapVal, _vwapUp, _vwapLo] = ta.vwap(hlc3, timeframe.change("D"), 2.0)
+plot(showVwapSR ? _vwapUp  : na, "VWAP +2σ", color=showVwapSR ? color.new(color.red,   0)  : na, linewidth=2)
+plot(showVwapSR ? _vwapVal : na, "VWAP",     color=showVwapSR ? color.new(color.gray,  40) : na, linewidth=1)
+plot(showVwapSR ? _vwapLo  : na, "VWAP −2σ", color=showVwapSR ? color.new(color.green, 0)  : na, linewidth=2)
+
+_bandWidth   = (not na(_vwapUp) and not na(_vwapLo)) ? _vwapUp - _vwapLo : na
+_bandsFormed = not na(_bandWidth) and _bandWidth >= 1.0
+
+// Support falling: −2σ is lower than it was lbBand bars ago.
+_loPrev     = _vwapLo[lbBand]
+bandFalling = _bandsFormed and not na(_loPrev) and _vwapLo < _loPrev
+
+//=============================
+// Fractal pivots (S/R) — COMPUTED & DRAWABLE, used ONLY for the support-below-pivots gate.
+// NOT used to block entries (no srBlock). Kept because we may need the levels again later.
+//=============================
+_fractalHigh = ta.pivothigh(high, srHalfWidth, srHalfWidth)
+_fractalLow  = ta.pivotlow(low,  srHalfWidth, srHalfWidth)
+var float lastFractalHigh = na
+var float lastFractalLow  = na
+if not na(_fractalHigh)
+    lastFractalHigh := _fractalHigh
+if not na(_fractalLow)
+    lastFractalLow  := _fractalLow
+// draw the pivot levels (display only; controlled by showVwapSR-style toggle below)
+plot(showPivots and not na(lastFractalHigh) ? lastFractalHigh : na, "pivot high", color=showPivots ? color.new(color.red,   40) : na, linewidth=1, style=plot.style_linebr)
+plot(showPivots and not na(lastFractalLow)  ? lastFractalLow  : na, "pivot low",  color=showPivots ? color.new(color.green, 40) : na, linewidth=1, style=plot.style_linebr)
+// Support below pivots: −2σ sits below the BOTTOM of the lower pivot zone (below all structure).
+supBelowPivots = (not na(lastFractalLow)) and (not na(lastFractalHigh)) and _bandsFormed and (_vwapLo < lastFractalLow - srZoneWidth)
+
+//=============================
+// Cluster detection (shared regime signal)
+//=============================
+// pierced = the bar's LOW dipped below −2σ (any depth — persistence, not depth). Count over
+// the last clWindow bars; ≥ clNeeded → the floor is under sustained attack = breakdown.
+_pierceBar   = _bandsFormed and low < _vwapLo
+_pierceCount = math.sum(_pierceBar ? 1.0 : 0.0, clWindow)
+breakdown    = _bandsFormed and _pierceCount >= clNeeded
+
+//=============================
+// Trade management
+//=============================
+var int cooldown = 0
+if cooldown > 0 and strategy.position_size == 0
+    cooldown -= 1
+
+// EOD flat
+if eodClose and strategy.position_size != 0
+    strategy.close_all("EOD")
+
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+
+//=============================
+// ENTRY — same cluster, two directions
+//=============================
+canEnter = strategy.position_size == 0 and cooldown == 0 and inRTH and _bandsFormed and time >= startDate and time <= endDate and not na(legSlope)
+
+// SHORT setup = the cluster/support short condition (shared by ENTRY and the breakdown EXIT).
+// Valid ONLY while ALL FOUR hold (NO slope):
+//   1. breakdown        — cluster of pierces (≥ clNeeded in window)
+//   2. bandFalling      — support (−2σ) still falling vs lbBand bars ago
+//   3. supBelowPivots   — support line below the pivots (below all structure)
+//   4. close < −2σ      — price below support
+// Entry fires when it becomes true; the breakdown-exit covers when it stops being true
+// (symmetric — we don't exit while the entry setup is still intact).
+shortSetup  = breakdown and bandFalling and supBelowPivots and close < _vwapLo
+shortSignal = enableShort and canEnter and shortSetup
+
+// LONG: a cluster formed recently, but price has now RECLAIMED the band (close > −2σ) and
+// slope is turning UP — the breakdown failed. We require the cluster to have been present
+// on any of the last clWindow bars (the attack happened), then the reclaim + up-slope.
+_recentCluster = breakdown or (ta.highest(breakdown ? 1 : 0, clWindow) > 0)
+longSignal = enableLong and canEnter and _recentCluster and close > _vwapLo and legSlope >= revSlope
+
+// Fire the entries. NOTE: shortSignal/longSignal stay true for MANY bars during a breakdown,
+// but strategy.entry is a no-op once we're already in the position (pyramiding off).
+if shortSignal
+    strategy.entry("Short", strategy.short)
+if longSignal
+    strategy.entry("Long", strategy.long)
+
+// Track best price per trade for the wide trailing stop, measured on the bar CLOSE (not the
+// intrabar wick) so a single wide-range bar cannot arm the trail and stop it on the SAME bar.
+// bestPrice = most favorable CLOSE since entry: highest close (long) / lowest close (short).
+// Resets ONLY on a genuine NEW entry (flat → in-position), NOT every bar the signal re-fires.
+var float bestPrice = na
+_justEnteredLong  = inLong  and strategy.position_size[1] <= 0
+_justEnteredShort = inShort and strategy.position_size[1] >= 0
+if _justEnteredLong
+    bestPrice := close
+else if _justEnteredShort
+    bestPrice := close
+else if inLong
+    bestPrice := na(bestPrice) ? close : math.max(bestPrice, close)
+else if inShort
+    bestPrice := na(bestPrice) ? close : math.min(bestPrice, close)
+if strategy.position_size == 0
+    bestPrice := na
+
+//=============================
+// EXITS
+//=============================
+// Two independent exit layers:
+//   • HARD SL — a real intrabar stop order (fills on the wick). Catches a violent reversal.
+//   • WIDE TRAIL — evaluated on the CLOSE. Once profit (measured on close) ≥ trailArm, the
+//     trail sits trailGap behind bestPrice (close-based). We cover with a market order when
+//     the CLOSE crosses back through the trail — so a single wide wick can't stop us out on
+//     the same bar it armed. Size trailGap off CLOSE-TO-CLOSE moves (this data: noise ~8pts,
+//     a real reversal close ~30pts), NOT the high-low bar range — the close-based trail never
+//     sees wicks. ~40 rides the noise and exits on a genuine reversal.
+_entry      = strategy.position_avg_price
+_longArmed  = inLong  and not na(bestPrice) and (bestPrice - _entry) >= trailArm
+_shortArmed = inShort and not na(bestPrice) and (_entry - bestPrice) >= trailArm
+_longTrail  = (enableTrail and _longArmed)  ? bestPrice - trailGap : na
+_shortTrail = (enableTrail and _shortArmed) ? bestPrice + trailGap : na
+_longTrailHit  = not na(_longTrail)  and close <= _longTrail
+_shortTrailHit = not na(_shortTrail) and close >= _shortTrail
+
+// SHORT: hold as ONE position while the SHORT SETUP still holds (the same 4 criteria as
+// entry: breakdown + support falling + support below pivots + price below support; NO slope).
+// Cover on: setup breaks (any of 4 fails) OR the armed trail closes against us (market) OR
+// the hard SL (intrabar stop) OR EOD.
+_setupBroke = inShort and not shortSetup
+if inShort and _setupBroke
+    strategy.close("Short", comment="setup broke")
+else if inShort and _shortTrailHit
+    strategy.close("Short", comment="trail")
+else if inShort
+    strategy.exit("ExitS", from_entry="Short", stop=_entry + clSlPts)
+
+// LONG: let the winner run. Cover on: armed trail closes against us (market) OR hard SL
+// (intrabar stop) OR EOD. No fixed target.
+if inLong and _longTrailHit
+    strategy.close("Long", comment="trail")
+else if inLong
+    strategy.exit("ExitL", from_entry="Long", stop=_entry - slPts)
+
+// Reset cooldown when we go flat after holding a position.
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    cooldown := cooldownBars
+
+//=============================
+// Visual markers
+//=============================
+// × under every bar whose low pierced −2σ (watch the cluster build).
+plotchar(markPierce and _pierceBar ? low : na, "pierced −2σ", "×", location.belowbar,
+         color=color.new(color.orange, 0), size=size.tiny)
+// Shade the breakdown region (cluster active).
+bgcolor(breakdown ? color.new(color.red, 90) : na, title="breakdown active")
+// Entry triangles.
+plotshape(shortSignal, "Breakdown short", shape.triangledown, location.abovebar,
+          color=color.new(color.red, 0),  size=size.small, text="BRK")
+plotshape(longSignal,  "Reversal long",   shape.triangleup,   location.belowbar,
+          color=color.new(color.lime, 0), size=size.small, text="REV")
+// Active trailing stop line (only drawn once armed) — aqua = long trail, fuchsia = short.
+_trailPlot = not na(_longTrail) ? _longTrail : (not na(_shortTrail) ? _shortTrail : na)
+plot(_trailPlot, "wide trail stop", color=na(_trailPlot) ? na : color.new(color.aqua, 0),
+     linewidth=2, style=plot.style_linebr)
+// Diagnostics
+plot(legSlope,      "legSlope",             color=na, display=display.data_window)
+plot(_bandWidth,    "−2σ..+2σ width",       color=na, display=display.data_window)
+plot(_pierceCount,  "pierce count (window)",color=na, display=display.data_window)
+plot(bestPrice,     "best price (trade)",   color=na, display=display.data_window)
+plotchar(breakdown, "breakdown active", "", location.top, color=na, display=display.data_window)
+plotchar(_longArmed or _shortArmed, "trail armed", "", location.top, color=na, display=display.data_window)
