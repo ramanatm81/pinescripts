@@ -106,33 +106,61 @@ Of pierce days:
 
 "Still extended at 15:00" is a **momentum-persistence (trend) signal**, NOT a coiled spring. The quick reverters already turned before 15:00; what's left standing keeps going.
 
+## 9. Return-to-open — the clean number
+
+Of pierce days, price returns to TOUCH the 14:30 open at some point AFTER the pierce, until EOD (21:00):
+- **All pierce days: 76%**
+- resistance: 75% · support: 78%
+
+(Earlier loose "70%" figures came from arbitrary window cutoffs. 76% is the correct all-days-after-pierce measure. Touch WITHIN the window before 15:00 is ~100% and useless — price starts at the open.)
+
+**The catch (survivorship):** the 76% that return to the open are the WEAK days. On days that pull back to the open, the rest-of-day move to EOD is ~0 (mean −1.6, median +1.8). The ~24% that NEVER return are the strong RUNAWAY days that carry the directional drift. So "wait for pullback to open" as an entry systematically selects the flat days and skips the runaways.
+
+## 10. Buy-at-open / hold-EOD drift (theoretical, entry-locked)
+
+`EOD close − open`, in the pierce direction:
+- **All resistance days: mean +44.8, median +60.5, 64% close up** (428 days).
+- winners-only subset (closed above open): median +123.8 / mean +150.7 (272 days) — CONDITIONAL, do not use as a target.
+- losers-only: median −83.2 / mean −139.9 (156 days).
+- Blind buy-open/hold-EOD on ALL 1,289 days (no filter): 54% up, mean +4.7, median +17 → the resistance pierce filter is what lifts 54%→64% and +4.7→+44.8.
+
+**Entry-locked:** the +44.8 assumes buying at the 14:30 open, but direction is only known AFTER the pierce (median min 2), by which point price has left the open (~33 pts up at the band). Buying the pullback to open → the flat ~0 days (§9). So the drift is real but hard to capture cleanly.
+
+## 11. What separates RUNAWAY days from reverters (early, observable features)
+
+Resistance-pierce days, n=428, baseline revert-to-open rate **74%** (~26% runaways). Lower revert rate in a bucket = flags runaways.
+
+**SLOPE at pierce — WORKS (monotonic):**
+| slope at pierce | revert rate |
+|---|---|
+| negative | 89% (fade) |
+| 0–5 | 77% |
+| 5–10 | 63% |
+| 10–20 | 58% |
+| 20+ | 33% (runaway) |
+→ Steep up-slope at pierce ≈ doubles the runaway rate (26%→42%). Strong-momentum pierce = genuine trend; flat/negative slope = exhaustion spike that reverts.
+
+**PIERCE SPEED — works INVERSELY (flags reverters, not runaways):**
+| min to pierce | revert rate |
+|---|---|
+| <1 (fast/violent) | 88% |
+| 10–30 (slow grind) | 64% |
+→ Fast tag of +2σ = overreaction that snaps back. Use to find FADE candidates, not runaways.
+
+**OVERSHOOT past band — USELESS:** no monotonic pattern (68–84%, noise). Drop it.
+
+**Implication:** slope at pierce may route each day to the right trade — fade the low/negative-slope pierces (reversion-prone), continue/hold the high-slope pierces (runaway-prone). This is the natural split to test next.
+
 ---
 
-## Backtest results so far
+## Key takeaways
 
-**A. Fade at the band, intrabar, target = open, EOD flat, buffer 0, SL 30, 1pt slip:**
-**+3,790 pts / 5yr, 742 trades, 57% win, 6/6 positive years. LONG +1,464 / SHORT +2,327.**
-- Buffer HURTS (0 best; 15/30/50 progressively worse — waiting for overshoot = fewer, worse-priced entries).
-- Tighter SL better on PnL (30 > 50 > 70). Fade → tight stop.
-- BOTH directions profitable; short (fade resistance) is the bigger winner. Unusual vs prior strategies where short lost.
-- This works because it enters EARLY (median min 2) and catches the fast 85% reverter majority; the profit target grabs the fleeting dip before the day resumes.
-
-**B. Enter at 15:00 IF still beyond band, target = open, EOD flat:**
-**LOSES at every SL (−477 to −1,380), only 119 trades, 2/6 years.**
-- Selection trap (§8): filters for the 42%-revert trend days, discards the 75%-revert quick reverters.
-- Target is huge (~118 pts) because entry is late/extended. Do NOT use this filter.
-
----
-
-## Key takeaways for next steps
-
-1. **The edge is intraday mean-reversion WITH a profit target — NOT hold-to-EOD** (§7: 60–64% close on the pierced side).
-2. **Enter early (at/near the band, intrabar), not at 15:00** (§6 timing, §8 selection trap).
-3. **Buffer beyond band hurts; tight SL helps** (backtest A).
-4. Open-conditions to still verify on the winning version: honest fills, per-year robustness, target choice (open vs VWAP vs partial), then add trail.
+1. **The reversion (return-to-open) is a fast intraday DIP, not a trend reversal** (§7): 60–64% close back on the pierced side. Fade with a target, don't hold-to-EOD blindly.
+2. **The signal (pierce) is knowable early** (median min 2, §6) but **entry-locked** — you can't buy at the open, and waiting for the pullback selects the flat days (§9, §10).
+3. **Slope at pierce separates runaways (steep) from reverters (flat/negative)** (§11) — the key filter.
+4. Short side (support→short continuation) fights NQ upward drift and is fragile; long/bounce is the robust side.
 
 ## Open questions / next experiments
-- Best target-based exit on the intrabar fade: open vs VWAP mean vs partial-scale.
-- Honest-fill audit of backtest A (open-touch exit could be optimistic on gaps).
-- Does a 15:00 entry work if we FLIP the filter — fade days already back INSIDE the band (75% reverters)?
-- Add trailing stop (user wants it later) once the base target-exit is locked.
+- Split by SLOPE at pierce: fade low-slope pierces (reversion), hold high-slope pierces (runaway). Does routing beat either pure approach?
+- The one untested entry: buy immediately at the pierce/band (accept worse price), hold to EOD — keeps you in the 24% runaways.
+- Support-side symmetry of §11 (slope/speed drivers computed for resistance only).
