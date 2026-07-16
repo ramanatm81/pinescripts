@@ -67,6 +67,11 @@ def run(bars, p):
     beOffset          = p.get("beOffset", 0.0) or 0.0
     lookback        = p.get("lookback", 10)
     slopeEntry      = p["slopeEntry"]
+    angleEntry      = p.get("angleEntry", False)
+    angleThresh     = p.get("angleThresh", 9.5)
+    angleAtrLen     = p.get("angleAtrLen", 14)
+    calmSkipMult    = p.get("calmSkipMult", 0.0)
+    atrLongLen      = p.get("atrLongLen", 100)
     slPts           = p.get("slPts", 50.0)
     enableSmaSL     = p.get("enableSmaSL", True)
     smaPeriod       = p.get("smaPeriod", 9)
@@ -117,7 +122,9 @@ def run(bars, p):
     deepBestPrice=None; deepBlockDir=0; entryWasDeep=False; exitBestPrice=None
     deepLossBlockDir=0
 
-    slopeBuf=[]; legSlope=None
+    slopeBuf=[]; legSlope=None; legSlopeAngle=None
+    trBuf=[]; atrVal=None; prevClose=None
+    trBufLong=[]; atrLong=None
     closes=[]; highs=[]; lows=[]
     lastFractalHigh=None; lastFractalLow=None
     lastFractalHighBar=None; lastFractalLowBar=None
@@ -215,6 +222,18 @@ def run(bars, p):
                 sx+=x; sy+=y; sxy+=x*y; sx2+=x*x
             denom=n*sx2-sx*sx
             legSlope = round((n*sxy-sx*sy)/denom,2) if denom!=0 else 0.0
+
+        tr = (h-l) if prevClose is None else max(h-l, abs(h-prevClose), abs(l-prevClose))
+        prevClose = c
+        trBuf.append(tr)
+        if len(trBuf) > angleAtrLen: trBuf.pop(0)
+        atrVal = (sum(trBuf)/len(trBuf)) if len(trBuf)==angleAtrLen else None
+        trBufLong.append(tr)
+        if len(trBufLong) > atrLongLen: trBufLong.pop(0)
+        atrLong = (sum(trBufLong)/len(trBufLong)) if len(trBufLong)==atrLongLen else None
+        legSlopeAngle = None
+        if legSlope is not None and atrVal is not None and atrVal>0:
+            legSlopeAngle = round(math.degrees(math.atan(legSlope/atrVal)),1)
 
         def close_trade(exit_price, reason):
             nonlocal deepLossBlockDir, deepBlockDir, deepBestPrice, bigLossBlock, beArmed
@@ -349,8 +368,9 @@ def run(bars, p):
         inDeepBlock = enableDeepBlock and deepBlockDir!=0
 
         # ===== entry signals =====
+        _calmOk = (calmSkipMult<=0.0) or (atrVal is not None and atrLong is not None and atrVal >= calmSkipMult*atrLong)
         canTrade = (not inTrade and cooldown==0 and not eodClose and not nyOpenBlock
-                    and not lnOpenBlock and not preNYBlock and not ethOpenBlock and legSlope is not None)
+                    and not lnOpenBlock and not preNYBlock and not ethOpenBlock and legSlope is not None and _calmOk)
         bigEnough = (not enableBodyFilter) or (abs(c-o) >= minBodyPts)
         isDeepSignal = legSlope is not None and abs(legSlope) >= deepSlope
 
@@ -388,10 +408,16 @@ def run(bars, p):
 
         vwapBlock = (vwap_block is not None and bi < len(vwap_block) and vwap_block[bi])
         bigBlk = bigLossBlock>0
-        bullEntry = (canTrade and not breachActive and bigEnough and not inFractalDrought and legSlope < -slopeEntry
+        if angleEntry:
+            _trigLong  = legSlopeAngle is not None and legSlopeAngle <= -angleThresh
+            _trigShort = legSlopeAngle is not None and legSlopeAngle >=  angleThresh
+        else:
+            _trigLong  = legSlope is not None and legSlope < -slopeEntry
+            _trigShort = legSlope is not None and legSlope >  slopeEntry
+        bullEntry = (canTrade and not breachActive and bigEnough and not inFractalDrought and _trigLong
                      and slExitDir!=1 and not srBlock and (not inDeepBlock or isDeepSignal)
                      and not deepLossBlockLong and not vwapBlock and not bigBlk)
-        bearEntry = (canTrade and not breachActive and bigEnough and not inFractalDrought and legSlope > slopeEntry
+        bearEntry = (canTrade and not breachActive and bigEnough and not inFractalDrought and _trigShort
                      and slExitDir!=-1 and not srBlock and (not inDeepBlock or isDeepSignal)
                      and not deepLossBlockShort and not vwapBlock and not bigBlk)
 
