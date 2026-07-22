@@ -12,10 +12,15 @@ own intrabar hard-SL / trail handling):
     (stop=_slPrice pins fill, no gap slippage, per the script comment). TP via
     strategy.exit limit -> fill at TP price. TRAIL/TEXP/THRD -> fill at close.
 """
-import csv, math
+import csv, math, os
 from datetime import datetime, timezone, timedelta
 
-DATA = "/Users/maheshk81/Downloads/data.csv"
+# Default to the full 5yr MNQ history. Override with BACKTEST_DATA env var
+# (e.g. point at an OOS export) without editing this file.
+DATA = os.environ.get(
+    "BACKTEST_DATA",
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                 "ohlcv", "mnq_5yr.csv"))
 
 def load():
     bars = []
