@@ -1,0 +1,120 @@
+//@version=6
+// =====================================================================================
+// RANGE DETECTOR v2 -- pure price. Flags GENUINE sideways ranges, not contained drifts.
+//
+// A "range" needs THREE things (v1 only checked span, which flagged spikes/drifts that
+// merely fit in a box -- e.g. a spike-up-then-grind-down compresses to a small envelope
+// once the spike ages out of the lookback):
+//   1. TIGHT span   -- highest(high,N) - lowest(low,N) <= rangeWidth
+//   2. FLAT trend   -- the regression slope of closes over the window is near zero:
+//                      |slope| * N <= trendMax. A range goes NOWHERE; a spike/grind/trend
+//                      has a steep slope even if start~end (net-drift alone misses this --
+//                      e.g. 13-Jul 14:18 had drift ~9 but slope -2.2/bar = -35 pts trend).
+//   3. HELD K bars  -- conditions 1+2 true for holdBars in a row (kills 1-bar flicker
+//                      when span grazes the threshold)
+//
+// Default: 30 bars (30 min), span <= 70, trend move <= 25 pts, held >= 5 bars. Configurable.
+// No VWAP / pivots / stats -- just price (+ volume in the data window).
+// =====================================================================================
+indicator("Range Detector", overlay=true, max_boxes_count=500)
+
+//=============================
+// Inputs
+//=============================
+rangeBars   = input.int(30,    "Range window (bars, 30 = 30 min on 1-min)",  minval=2, maxval=500, group="Range")
+rangeWidth  = input.float(70.0,"Max span: highest-lowest over window (pts)",  minval=1.0, step=1.0,  group="Range")
+trendMax    = input.float(25.0,"Max trend move over window: |slope|*N (pts)", minval=0.0, step=1.0,  group="Range")
+vLegMax     = input.float(40.0,"V-reject: reject if EITHER half-leg moves >= this (pts)", minval=1.0, step=1.0, group="Range")
+minCross    = input.int(4,     "Min mid-line crossings (real oscillation) in window", minval=0, maxval=100, group="Range")
+holdBars    = input.int(5,     "Must hold this many bars before confirming",  minval=1, maxval=100,  group="Range")
+
+showBox     = input.bool(true, "Draw range box while confirmed ranging",      group="Display")
+shadeBars   = input.bool(true, "Shade background on confirmed ranging bars",   group="Display")
+markStart   = input.bool(true, "Mark the bar a confirmed range STARTS",        group="Display")
+
+//=============================
+// Range detection
+//=============================
+_hi   = ta.highest(high, rangeBars)
+_lo   = ta.lowest(low,  rangeBars)
+span  = _hi - _lo
+
+// (a) full-window regression slope (pts/bar); trendMove = |slope|*N = straight-line move
+// across the window. Flat range -> near 0. Catches trends/spikes/grinds.
+_n     = rangeBars
+_slope = ta.linreg(close, _n, 0) - ta.linreg(close, _n, 1)
+trendMove = math.abs(_slope) * _n
+
+// (b) V / inverse-V / one-legged-move rejection. Split the window in half; measure the
+// directional move of EACH half (|half-slope| * halfBars). A genuine range has BOTH halves
+// FLAT. Reject if EITHER half made a big directional move -- this catches symmetric V's,
+// inverse-V's, AND one-legged L-shapes (one flat half + one steep half, which the old
+// "both steep" test wrongly let pass and made the range flicker). Reject when the bigger
+// of the two legs >= vLegMax.
+_half = math.max(2, math.floor(rangeBars / 2))
+_slHalfNow  = ta.linreg(close, _half, 0) - ta.linreg(close, _half, 1)
+_slHalfPrev = (ta.linreg(close, _half, 0) - ta.linreg(close, _half, 1))[_half]
+_legNow  = math.abs(_slHalfNow)  * _half
+_legPrev = math.abs(_slHalfPrev) * _half
+_maxLeg  = math.max(_legNow, _legPrev)
+isVshape = _maxLeg >= vLegMax
+
+// (c) oscillation = how many times price CROSSES THE WINDOW MIDLINE. Raw close-to-close
+// flips are useless on 1-min (price zigzags ~every bar in trends too, always ~17). A real
+// range crosses the mid of the high-low band many times; a trend/V crosses it once or twice.
+_mid = (_hi + _lo) / 2.0
+_midCross = 0
+for _k = 0 to rangeBars - 2
+    _a = close[_k]     >= _mid
+    _b = close[_k + 1] >= _mid
+    _midCross := _midCross + (_a != _b ? 1 : 0)
+
+// raw condition: tight span AND flat overall AND NOT a V/one-legged move AND enough mid-crossings
+tightAndFlat = span <= rangeWidth and trendMove <= trendMax and not isVshape and _midCross >= minCross
+
+// count consecutive bars the raw condition has held
+var int rawLen = 0
+rawLen := tightAndFlat ? rawLen + 1 : 0
+
+// confirmed range = raw condition has held for at least holdBars
+isRanging = rawLen >= holdBars
+
+newRange = isRanging and not isRanging[1]
+var int rangeLen = 0
+rangeLen := isRanging ? rangeLen + 1 : 0
+
+//=============================
+// Range box (top/bottom of the window while confirmed)
+//=============================
+var box rbox = na
+if showBox
+    if newRange
+        rbox := box.new(bar_index, _hi, bar_index, _lo, border_color=color.new(color.orange, 0), bgcolor=color.new(color.orange, 90))
+    if isRanging and not na(rbox)
+        box.set_right(rbox, bar_index)
+        box.set_top(rbox, _hi)
+        box.set_bottom(rbox, _lo)
+
+//=============================
+// Visuals
+//=============================
+bgcolor(shadeBars and isRanging ? color.new(color.orange, 88) : na, title="ranging")
+plotshape(markStart and newRange, "range start", shape.flag, location.belowbar, color=color.new(color.orange, 0), size=size.tiny)
+plot(isRanging ? _hi : na, "range top",    color=isRanging ? color.new(color.red,   30) : na, linewidth=1, style=plot.style_linebr)
+plot(isRanging ? _lo : na, "range bottom", color=isRanging ? color.new(color.green, 30) : na, linewidth=1, style=plot.style_linebr)
+
+//=============================
+// Diagnostics (data window)
+//=============================
+plot(span,      "span (pts)",       color=na, display=display.data_window)
+plot(trendMove, "trend move (pts)", color=na, display=display.data_window)
+plot(_legPrev,  "V leg1 (older)",   color=na, display=display.data_window)
+plot(_legNow,   "V leg2 (recent)",  color=na, display=display.data_window)
+plot(_maxLeg,   "max leg (V test)", color=na, display=display.data_window)
+plot(_midCross, "mid crossings",    color=na, display=display.data_window)
+plotchar(isVshape, "isVshape", "", location.top, color=na, display=display.data_window)
+plot(rawLen,   "raw held bars",    color=na, display=display.data_window)
+plot(rangeLen, "range length",     color=na, display=display.data_window)
+plotchar(tightAndFlat, "tightAndFlat", "", location.top, color=na, display=display.data_window)
+plotchar(isRanging,    "isRanging",    "", location.top, color=na, display=display.data_window)
+plot(volume,   "volume",           color=na, display=display.data_window)

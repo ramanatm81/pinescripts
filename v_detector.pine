@@ -1,0 +1,128 @@
+//@version=6
+// =====================================================================================
+// V DETECTOR -- identifies classic V and inverse-V shapes in price.
+//
+// A V  = price falls, makes a low near the MIDDLE of the window, then rises back.
+// An inverse-V (^) = price rises, peaks near the middle, then falls back.
+//
+// Method (two-legged half-slope test, the robust one):
+//   Split the last vBars bars into two halves. Fit a regression line to each half and take
+//   its directional move (|slope| * halfBars, in points).
+//     V         : older half moves DOWN >= legMin  AND  recent half moves UP   >= legMin
+//     inverse-V : older half moves UP   >= legMin  AND  recent half moves DOWN >= legMin
+//   Both legs must be steep (>= legMin) AND opposite-signed -> a genuine two-legged V/^.
+//   (A trend has both legs same sign; a range has both legs flat; only a V/^ has two steep
+//    legs of opposite sign.)
+//
+// Optional apex check: require the extreme (low for V, high for ^) to sit near the MIDDLE
+// of the window, so it is a real apex, not two legs meeting at an edge.
+//
+// This is a DETECTOR to eyeball -- no trades. The same two-legged test is portable into
+// slope_strategy.pine as an entry-rejection filter (don't enter a fresh slope trade when
+// the lookback is a V/^, since the "trend" is a snap-back likely to reverse).
+// =====================================================================================
+indicator("V Detector", overlay=true, max_labels_count=500)
+
+//=============================
+// Inputs
+//=============================
+vBars    = input.int(20,    "Window (bars) to test for a V / inverse-V", minval=4, maxval=200, group="V shape")
+legAtrMult = input.float(2.0, "Each leg must move >= this x ATR (volatility-relative)", minval=0.1, step=0.1, group="V shape")
+legAtrLen  = input.int(14,   "ATR length for the leg threshold",         minval=1, maxval=200, group="V shape")
+legMinAbs  = input.float(8.0,"Floor: each leg must also be >= this many pts (avoids tiny noise)", minval=0.0, step=1.0, group="V shape")
+symMax   = input.float(3.0, "Leg symmetry: reject if legs differ by more than this ratio (V vs cliff)", minval=1.0, step=0.5, group="V shape")
+useApex  = input.bool(true, "Require apex (extreme) near the middle",    group="V shape")
+apexTol  = input.float(0.30,"Apex tolerance (fraction of window from center, 0.3 = middle 60%)", minval=0.05, maxval=0.5, step=0.05, group="V shape")
+
+markV    = input.bool(true, "Mark V (bullish reversal) below bar",  group="Display")
+markIV   = input.bool(true, "Mark inverse-V (bearish reversal) above bar", group="Display")
+
+//=============================
+// APEX-SPLIT two-leg test -- catches V, U (round bottom) AND W (double bottom).
+// Measure the two legs from the ACTUAL apex, not from a fixed window midpoint. The path
+// shape between start->apex and apex->now is IGNORED, so a sharp V, a rounded U, or a
+// double-bottom W all pass identically -- only the net drops and the apex-in-middle matter.
+//   V bullish: down-leg = firstClose - lowestLow ;  up-leg = nowClose - lowestLow
+//   inverse  : up-leg   = highestHigh - firstClose; down-leg = highestHigh - nowClose
+//=============================
+// volatility-relative leg threshold (fixed pts fails across calm/violent regimes)
+_atr   = ta.atr(legAtrLen)
+legReq = math.max(legAtrMult * _atr, legMinAbs)
+
+// bars-ago of the extreme (0 = current .. -(vBars-1) = oldest). Convert to index 0..vBars-1.
+_loBack = ta.lowestbars(low,  vBars)   // <= 0
+_hiBack = ta.highestbars(high, vBars)
+_loIdx  = float(vBars - 1 + _loBack)   // 0 = oldest, vBars-1 = current
+_hiIdx  = float(vBars - 1 + _hiBack)
+
+_winLow   = ta.lowest(low,  vBars)
+_winHigh  = ta.highest(high, vBars)
+_firstClose = close[vBars - 1]         // close at the oldest bar of the window
+
+// bullish V/U/W: fell from the start into the low, recovered from the low to now
+_downLeg = _firstClose - _winLow       // how far it dropped into the bottom
+_upLeg   = close       - _winLow       // how far it recovered from the bottom
+// bearish inverse: rose into the high, fell from the high to now
+_upLeg2   = _winHigh - _firstClose
+_downLeg2 = _winHigh - close
+
+// apex must sit in the middle third (not at an edge -> not just a trend leg)
+_center   = float(vBars - 1) / 2.0
+_loNearMid = math.abs(_loIdx - _center) <= apexTol * vBars
+_hiNearMid = math.abs(_hiIdx - _center) <= apexTol * vBars
+
+// leg symmetry: a real reversal has comparable legs; reject a lopsided cliff
+_vSym  = math.min(_downLeg, _upLeg)   > 0 and (math.max(_downLeg, _upLeg)   / math.min(_downLeg, _upLeg))   <= symMax
+_ivSym = math.min(_upLeg2, _downLeg2) > 0 and (math.max(_upLeg2, _downLeg2) / math.min(_upLeg2, _downLeg2)) <= symMax
+
+isV  = _downLeg >= legReq and _upLeg   >= legReq and (not useApex or _loNearMid) and _vSym
+isIV = _upLeg2  >= legReq and _downLeg2 >= legReq and (not useApex or _hiNearMid) and _ivSym
+
+// FIRE ONCE PER DISTINCT APEX. The SAME low/high slides through the window over many bars,
+// so a per-bar test (even the rising edge) marks one V several times -- and a 1-bar flicker
+// re-arms it. Fix: track the PRICE of the apex we last marked; only fire a new V when its
+// low is a genuinely NEW low (below the last-marked low by newApexPts) OR after a cooldown
+// of vBars bars (a fresh window). Same for inverse-V highs. This gives exactly one mark per
+// distinct bottom/top regardless of how it slides or flickers.
+newApexPts = input.float(15.0, "New-apex separation: mark again only if the low/high moved this far (pts)", minval=0.0, step=1.0, group="V shape")
+var float _lastVlow  = na
+var float _lastIVhigh = na
+var int   _vCool  = 0
+var int   _ivCool = 0
+_vCool  := _vCool  > 0 ? _vCool  - 1 : 0
+_ivCool := _ivCool > 0 ? _ivCool - 1 : 0
+
+_vFresh  = na(_lastVlow)   or _winLow  <= _lastVlow  - newApexPts or _vCool  == 0
+_ivFresh = na(_lastIVhigh) or _winHigh >= _lastIVhigh + newApexPts or _ivCool == 0
+
+newV  = isV  and _vFresh
+newIV = isIV and _ivFresh
+if newV
+    _lastVlow  := _winLow
+    _vCool     := vBars
+if newIV
+    _lastIVhigh := _winHigh
+    _ivCool     := vBars
+
+//=============================
+// Visuals
+//=============================
+plotshape(markV  and newV,  "V (bullish reversal)",     shape.triangleup,   location.belowbar, color=color.new(color.lime, 0), size=size.small, text="V")
+plotshape(markIV and newIV, "inverse-V (bearish rev.)", shape.triangledown, location.abovebar, color=color.new(color.red,  0), size=size.small, text="^")
+
+// shade the window while a V/^ is active so you can see the shape it fit
+bgcolor(isV  ? color.new(color.green, 90) : na, title="V active")
+bgcolor(isIV ? color.new(color.red,   92) : na, title="inverse-V active")
+
+//=============================
+// Diagnostics (data window)
+//=============================
+plot(_downLeg, "V down-leg (start->low)",  color=na, display=display.data_window)
+plot(_upLeg,   "V up-leg (low->now)",      color=na, display=display.data_window)
+plot(_downLeg2,"IV down-leg (high->now)",  color=na, display=display.data_window)
+plot(_upLeg2,  "IV up-leg (start->high)",  color=na, display=display.data_window)
+plot(legReq,   "leg req (ATR-based pts)",  color=na, display=display.data_window)
+plot(_loIdx,   "low idx (0=oldest)",       color=na, display=display.data_window)
+plot(_hiIdx,   "high idx (0=oldest)",      color=na, display=display.data_window)
+plotchar(isV,  "isV",  "", location.top, color=na, display=display.data_window)
+plotchar(isIV, "isIV", "", location.top, color=na, display=display.data_window)

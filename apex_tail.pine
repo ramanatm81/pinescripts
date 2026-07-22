@@ -1,0 +1,105 @@
+//@version=6
+// =====================================================================================
+// APEX TAIL DETECTOR -- the INVERSE of the V detector's apex-in-middle test.
+//
+// V detector: apex (window low/high) sits near the MIDDLE -> a completed reversal (V/^).
+// This one: apex sits in the TAIL (right edge, most recent bars) -> a FRESH extreme with
+// no recovery yet = a trend/move STILL IN PROGRESS.
+//   low  in tail  = price fell into a fresh low, hasn't bounced  -> DOWN move in progress
+//   high in tail  = price rose into a fresh high, hasn't pulled back -> UP move in progress
+//
+// Over the 60-bar (1-hour) rolling window we find where the extreme sits. If it is within
+// the last tailFrac of the window AND the drop/rise into it is a real (ATR-relative) move,
+// we flag it. Pure detector -- no trades. Eyeball first.
+// =====================================================================================
+indicator("Apex Tail Detector", overlay=true, max_labels_count=500)
+
+//=============================
+// Inputs
+//=============================
+vBars      = input.int(60,   "Rolling window (bars, 60 = 1h on 1-min)", minval=4, maxval=200, group="Apex tail")
+tailFrac   = input.float(0.20,"Tail fraction: apex must be in the LAST this fraction of window (0.20 = last 20%)", minval=0.05, maxval=0.5, step=0.05, group="Apex tail")
+legAtrMult = input.float(2.5, "Move into the apex must be >= this x ATR (session-adaptive)", minval=0.1, step=0.1, group="Apex tail")
+legAtrLen  = input.int(14,   "ATR length", minval=1, maxval=200, group="Apex tail")
+legMinAbs  = input.float(12.0,"Floor: move into apex also >= this many pts", minval=0.0, step=1.0, group="Apex tail")
+newApexPts = input.float(15.0,"New-apex separation: re-flag only if the low/high moved this far (pts)", minval=0.0, step=1.0, group="Apex tail")
+
+markDown = input.bool(true, "Mark LOW-in-tail (down move in progress) below bar", group="Display")
+markUp   = input.bool(true, "Mark HIGH-in-tail (up move in progress) above bar",  group="Display")
+markApex = input.bool(true, "Label the apex low/high extreme itself", group="Display")
+
+//=============================
+// Window extremes + their position
+//=============================
+_atr   = ta.atr(legAtrLen)
+legReq = math.max(legAtrMult * _atr, legMinAbs)
+
+_loBack = ta.lowestbars(low,  vBars)          // <= 0
+_hiBack = ta.highestbars(high, vBars)
+_loIdx  = float(vBars - 1 + _loBack)          // 0 = oldest, vBars-1 = current (right edge)
+_hiIdx  = float(vBars - 1 + _hiBack)
+
+_winLow   = ta.lowest(low,  vBars)
+_winHigh  = ta.highest(high, vBars)
+_firstClose = close[vBars - 1]
+
+// move INTO the apex (how far price traveled to reach the extreme, from the window start)
+_dropInto = _firstClose - _winLow             // fall into the low
+_riseInto = _winHigh - _firstClose            // rise into the high
+
+// tail test: apex index in the LAST tailFrac of the window (right edge).
+// threshold index = (vBars-1) * (1 - tailFrac); apex must be at or beyond it.
+_tailStartIdx = float(vBars - 1) * (1.0 - tailFrac)
+_loInTail = _loIdx >= _tailStartIdx
+_hiInTail = _hiIdx >= _tailStartIdx
+
+// a fresh low in the tail = down move in progress; fresh high in tail = up move in progress
+rawDown = _loInTail and _dropInto >= legReq
+rawUp   = _hiInTail and _riseInto >= legReq
+
+//=============================
+// Fire once per distinct extreme (same de-dup idea as the V detector)
+//=============================
+var float _lastLow  = na
+var float _lastHigh = na
+var int   _dnCool = 0
+var int   _upCool = 0
+_dnCool := _dnCool > 0 ? _dnCool - 1 : 0
+_upCool := _upCool > 0 ? _upCool - 1 : 0
+
+_dnFresh = na(_lastLow)  or _winLow  <= _lastLow  - newApexPts or _dnCool == 0
+_upFresh = na(_lastHigh) or _winHigh >= _lastHigh + newApexPts or _upCool == 0
+
+newDown = rawDown and _dnFresh
+newUp   = rawUp   and _upFresh
+if newDown
+    _lastLow := _winLow
+    _dnCool  := vBars
+if newUp
+    _lastHigh := _winHigh
+    _upCool   := vBars
+
+//=============================
+// Visuals
+//=============================
+plotshape(markDown and newDown, "low-in-tail (down in progress)", shape.arrowdown, location.abovebar, color=color.new(color.red,  0), size=size.small, text="dn")
+plotshape(markUp   and newUp,   "high-in-tail (up in progress)",  shape.arrowup,   location.belowbar, color=color.new(color.lime, 0), size=size.small, text="up")
+
+if markApex and newDown
+    _b = bar_index - int((vBars - 1) - _loIdx)
+    label.new(_b, _winLow, "L\n" + str.tostring(_winLow, format.mintick), xloc=xloc.bar_index, yloc=yloc.belowbar, color=color.new(color.red, 20), textcolor=color.white, style=label.style_label_up, size=size.tiny)
+if markApex and newUp
+    _b2 = bar_index - int((vBars - 1) - _hiIdx)
+    label.new(_b2, _winHigh, "H\n" + str.tostring(_winHigh, format.mintick), xloc=xloc.bar_index, yloc=yloc.abovebar, color=color.new(color.green, 20), textcolor=color.white, style=label.style_label_down, size=size.tiny)
+
+//=============================
+// Diagnostics (data window)
+//=============================
+plot(_loIdx,       "low idx (0=oldest, 59=now)",  color=na, display=display.data_window)
+plot(_hiIdx,       "high idx",                    color=na, display=display.data_window)
+plot(_tailStartIdx,"tail start idx",              color=na, display=display.data_window)
+plot(_dropInto,    "drop into low (pts)",         color=na, display=display.data_window)
+plot(_riseInto,    "rise into high (pts)",        color=na, display=display.data_window)
+plot(legReq,       "leg req (ATR pts)",           color=na, display=display.data_window)
+plotchar(_loInTail,"low in tail",  "", location.top, color=na, display=display.data_window)
+plotchar(_hiInTail,"high in tail", "", location.top, color=na, display=display.data_window)

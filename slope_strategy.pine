@@ -47,6 +47,7 @@ droughtBlockBars   = input.int(50,    "Drought threshold (bars without any fract
 blockNYOpen  = input.bool(false,"Block NY open first 30 min (14:30–15:00 London / 08:30–09:00 CT)",       group="Session Filter")
 blockLNOpen  = input.bool(true, "Block LN open first 30 min (08:00–08:30 London / 02:00–02:30 CT)",       group="Session Filter")
 blockPreNY   = input.bool(true, "Block CME pre-open + NY open (13:30–15:00 London / 07:30–09:00 CT)",     group="Session Filter")
+blockLateUS  = input.bool(true, "Block 20:00–21:00 London hour (14:00–15:00 CT) — weakest hour in 5yr",   group="Session Filter")
 startDate    = input.time(timestamp("2000-01-01T00:00:00-06:00"), "Backtest Start", group="Backtest")
 endDate      = input.time(timestamp("2099-12-31T23:59:00-06:00"), "Backtest End",   group="Backtest")
 
@@ -66,6 +67,12 @@ nyOpenBlock  = blockNYOpen and ctMins >= 510 and ctMins < 540
 lnOpenBlock  = blockLNOpen and ctMins >= 120 and ctMins < 150
 preNYBlock   = blockPreNY  and ctMins >= 450 and ctMins < 540   // 13:30–15:00 London / 07:30–09:00 CT
 ethOpenBlock = ctMins >= 1020 and ctMins < 1050                 // 23:00–23:30 London / 17:00–17:30 CT hardcoded
+// Late-US block: 5yr per-hour study — the 20:00 London (14:00 CT) hour is the ONLY hour
+// that is net-negative in isolation (−556 @1pt slip), sub-50% win, and negative in 5 of 6
+// years. Block ONLY this one hour (14:00–15:00 CT = ctMins 840–899); trading resumes at
+// 21:00 London, which is a strong hour — do NOT extend the block past 15:00 CT (the 21:00
+// and 22:00 London hours are profitable; blocking through 23:30 costs ~−3.3k over 5yr).
+lateUSBlock  = blockLateUS and ctMins >= 840 and ctMins < 900
 
 // SMA for dynamic SL
 smaVal  = ta.sma(close, smaPeriod)
@@ -527,7 +534,7 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
 // legSlope < -slopeEntry → downtrend → enter LONG (mean reversion / reversal)
 // legSlope >  slopeEntry → uptrend   → enter SHORT
 //=============================
-canTrade  = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and not ethOpenBlock and time >= startDate and time <= endDate and not na(legSlope)
+canTrade  = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and not ethOpenBlock and not lateUSBlock and time >= startDate and time <= endDate and not na(legSlope)
 bigEnough = not enableBodyFilter or (math.abs(close - open) >= minBodyPts)
 
 bullEntry = canTrade and bigEnough and not inFractalDrought and legSlope < -slopeEntry and slExitDir != 1  and not srBlockLong  and not vwapZoneBlock

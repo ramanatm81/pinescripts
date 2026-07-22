@@ -1,0 +1,187 @@
+//@version=6
+// =====================================================================================
+// V REVERSAL STRATEGY -- trades WITH the V / inverse-V reversals from v_detector.pine.
+//   V  (bottom) -> LONG,  stop = apex low  - stopBeyond
+//   ^  (top)    -> SHORT, stop = apex high + stopBeyond
+//   Exit: MFE trail (arm after trailTrigger favorable, then trail trailDist behind peak).
+//
+// !! HONEST NOTE: an offline 5yr MNQ backtest of this exact logic showed NO EDGE --
+//    both legs ~ -8,900 pts; V->LONG only +74 raw and NEGATIVE with 1pt slippage;
+//    the short leg loses badly; one bad year (2025) wipes the small good years.
+//    This is a PAPER-TRADE / observation tool, not a validated edge. Ship-to-sim only.
+//
+// Session adaptivity: leg size is ATR-RELATIVE (legAtrMult * ATR) with a tiny absolute
+// floor, so a "big" V auto-scales -- small in calm Asia, large in US-RTH -- no session
+// clock needed. The 60-bar window is a TIME window and stays fixed across sessions.
+// =====================================================================================
+strategy("V Reversal Strategy", overlay=true, max_labels_count=500, max_bars_back=500,
+         default_qty_type=strategy.fixed, default_qty_value=1, calc_on_every_tick=false)
+
+//=============================
+// Detection inputs (mirror v_detector.pine; ATR-relative defaults for session adaptivity)
+//=============================
+vBars      = input.int(60,   "Window (bars) to test for a V / inverse-V", minval=4, maxval=200, group="V shape")
+legAtrMult = input.float(2.5, "Each leg must move >= this x ATR (session-adaptive)", minval=0.1, step=0.1, group="V shape")
+legAtrLen  = input.int(14,   "ATR length for the leg threshold",          minval=1, maxval=200, group="V shape")
+legMinAbs  = input.float(12.0,"Floor: each leg also >= this many pts (tiny, just kills noise)", minval=0.0, step=1.0, group="V shape")
+symMax     = input.float(3.0, "Leg height symmetry: reject if legs differ by more than this ratio", minval=1.0, step=0.5, group="V shape")
+useApex    = input.bool(true, "Require apex (extreme) near the middle", group="V shape")
+apexTol    = input.float(0.20,"Apex tolerance (fraction of window from center, 0.20 = middle 40%)", minval=0.05, maxval=0.5, step=0.05, group="V shape")
+newApexPts = input.float(15.0,"New-apex separation: mark again only if the low/high moved this far (pts)", minval=0.0, step=1.0, group="V shape")
+
+useGeom     = input.bool(true, "Geometry gate ON: each leg steep + both legs similar ANGLE", group="V geometry")
+minLegAngle = input.float(9.0, "Min leg angle (deg, ATR-normalized)", minval=1.0, maxval=89.0, step=0.5, group="V geometry")
+maxAngleGap = input.float(6.0, "Max angle gap between the two legs (deg)", minval=0.5, maxval=45.0, step=0.5, group="V geometry")
+
+useLockout  = input.bool(true, "Lockout: after any V/^ entry, block new entries for N bars", group="V lockout")
+lockoutBars = input.int(60,   "  Lockout length (bars, 60 = one window)", minval=1, maxval=500, group="V lockout")
+
+//=============================
+// Trade inputs
+//=============================
+tradeLong  = input.bool(true,  "Take V -> LONG",   group="Trades")
+tradeShort = input.bool(true,  "Take inverse-V -> SHORT", group="Trades")
+stopBeyond = input.float(30.0, "Stop: pts beyond the apex extreme", minval=1.0, step=1.0, group="Trades")
+trailTrig  = input.float(70.0, "MFE trail trigger (pts favorable before trailing arms)", minval=1.0, step=1.0, group="Trades")
+trailDist  = input.float(20.0, "MFE trail distance (pts behind peak)", minval=1.0, step=1.0, group="Trades")
+
+// session entry blocks (CT / America-Chicago), matching the other strategies' convention
+blockNYOpen = input.bool(false, "Block NY open 08:30-09:30 CT",      group="Session blocks")
+blockLNOpen = input.bool(false, "Block London open 02:00-03:00 CT",  group="Session blocks")
+blockEOD    = input.bool(true,  "Block EOD 14:00-15:00 CT",          group="Session blocks")
+blockAsia   = input.bool(false, "Block Asia thin 20:00-01:00 CT",    group="Session blocks")
+
+//=============================
+// Session gate
+//=============================
+ctMins   = hour(time, "America/Chicago") * 60 + minute(time, "America/Chicago")
+eodHard  = ctMins >= 900 and ctMins < 960
+nyBlk    = blockNYOpen and ctMins >= 510 and ctMins < 570
+lnBlk    = blockLNOpen and ctMins >= 120 and ctMins < 180
+eodBlk   = blockEOD    and ctMins >= 840 and ctMins < 900
+asiaBlk  = blockAsia   and (ctMins >= 1200 or ctMins < 60)
+blocked  = eodHard or nyBlk or lnBlk or eodBlk or asiaBlk
+
+//=============================
+// V / inverse-V detection (identical to v_detector.pine)
+//=============================
+_atr   = ta.atr(legAtrLen)
+legReq = math.max(legAtrMult * _atr, legMinAbs)
+
+_loBack = ta.lowestbars(low,  vBars)
+_hiBack = ta.highestbars(high, vBars)
+_loIdx  = float(vBars - 1 + _loBack)
+_hiIdx  = float(vBars - 1 + _hiBack)
+
+_winLow   = ta.lowest(low,  vBars)
+_winHigh  = ta.highest(high, vBars)
+_firstClose = close[vBars - 1]
+
+_downLeg = _firstClose - _winLow
+_upLeg   = close       - _winLow
+_upLeg2   = _winHigh - _firstClose
+_downLeg2 = _winHigh - close
+
+_center   = float(vBars - 1) / 2.0
+_loNearMid = math.abs(_loIdx - _center) <= apexTol * vBars
+_hiNearMid = math.abs(_hiIdx - _center) <= apexTol * vBars
+
+_vSym  = math.min(_downLeg, _upLeg)   > 0 and (math.max(_downLeg, _upLeg)   / math.min(_downLeg, _upLeg))   <= symMax
+_ivSym = math.min(_upLeg2, _downLeg2) > 0 and (math.max(_upLeg2, _downLeg2) / math.min(_upLeg2, _downLeg2)) <= symMax
+
+_atrGeom = _atr > 0 ? _atr : 1.0
+_vLeftBars  = math.max(1.0, _loIdx)
+_vRightBars = math.max(1.0, float(vBars - 1) - _loIdx)
+_vLeftAng  = math.atan((_downLeg / _vLeftBars)  / _atrGeom) * 180.0 / math.pi
+_vRightAng = math.atan((_upLeg   / _vRightBars) / _atrGeom) * 180.0 / math.pi
+_ivLeftBars  = math.max(1.0, _hiIdx)
+_ivRightBars = math.max(1.0, float(vBars - 1) - _hiIdx)
+_ivLeftAng  = math.atan((_upLeg2   / _ivLeftBars)  / _atrGeom) * 180.0 / math.pi
+_ivRightAng = math.atan((_downLeg2 / _ivRightBars) / _atrGeom) * 180.0 / math.pi
+
+_vGeom  = not useGeom or (_vLeftAng  >= minLegAngle and _vRightAng  >= minLegAngle and math.abs(_vLeftAng  - _vRightAng)  <= maxAngleGap)
+_ivGeom = not useGeom or (_ivLeftAng >= minLegAngle and _ivRightAng >= minLegAngle and math.abs(_ivLeftAng - _ivRightAng) <= maxAngleGap)
+
+isV  = _downLeg >= legReq and _upLeg   >= legReq and (not useApex or _loNearMid) and _vSym  and _vGeom
+isIV = _upLeg2  >= legReq and _downLeg2 >= legReq and (not useApex or _hiNearMid) and _ivSym and _ivGeom
+
+// fire-once-per-apex + optional cross-type lockout
+var float _lastVlow  = na
+var float _lastIVhigh = na
+var int   _vCool  = 0
+var int   _ivCool = 0
+var int   _lockCool = 0
+_vCool  := _vCool  > 0 ? _vCool  - 1 : 0
+_ivCool := _ivCool > 0 ? _ivCool - 1 : 0
+_lockCool := _lockCool > 0 ? _lockCool - 1 : 0
+
+_notLocked = not useLockout or _lockCool == 0
+_vFresh  = (na(_lastVlow)   or _winLow  <= _lastVlow  - newApexPts or _vCool  == 0) and _notLocked
+_ivFresh = (na(_lastIVhigh) or _winHigh >= _lastIVhigh + newApexPts or _ivCool == 0) and _notLocked
+
+newV  = isV  and _vFresh
+newIV = isIV and _ivFresh
+if newV
+    _lastVlow  := _winLow
+    _vCool     := vBars
+    _lockCool  := lockoutBars
+if newIV
+    _lastIVhigh := _winHigh
+    _ivCool     := vBars
+    _lockCool   := lockoutBars
+
+//=============================
+// Trade state -- MFE trail managed manually; stop is a fixed level from the apex
+//=============================
+var float slStop    = na    // hard stop level (from apex)
+var float bestPrice = na    // MFE peak while in trade
+var float trailStop = na
+
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+flat    = strategy.position_size == 0
+
+// ENTRIES -- one position at a time; lockout + fresh handle spacing
+canEnter = flat and not blocked
+if canEnter and tradeLong and newV
+    strategy.entry("L", strategy.long)
+    slStop    := _winLow - stopBeyond
+    bestPrice := close
+    trailStop := na
+if canEnter and tradeShort and newIV
+    strategy.entry("S", strategy.short)
+    slStop    := _winHigh + stopBeyond
+    bestPrice := close
+    trailStop := na
+
+// MANAGE -- MFE trail + hard stop
+if inLong
+    bestPrice := na(bestPrice) ? high : math.max(bestPrice, high)
+    if bestPrice - strategy.position_avg_price >= trailTrig
+        _ts = bestPrice - trailDist
+        trailStop := na(trailStop) ? _ts : math.max(trailStop, _ts)
+    _exit = na(trailStop) ? slStop : math.max(slStop, trailStop)
+    strategy.exit("Lx", from_entry="L", stop=_exit)
+if inShort
+    bestPrice := na(bestPrice) ? low : math.min(bestPrice, low)
+    if strategy.position_avg_price - bestPrice >= trailTrig
+        _ts = bestPrice + trailDist
+        trailStop := na(trailStop) ? _ts : math.min(trailStop, _ts)
+    _exit = na(trailStop) ? slStop : math.min(slStop, trailStop)
+    strategy.exit("Sx", from_entry="S", stop=_exit)
+
+// EOD hard flatten
+if eodHard and not flat
+    strategy.close_all(comment="EOD")
+
+//=============================
+// Visuals -- mark the apex the trade fired from
+//=============================
+plotshape(newV  and tradeLong,  "V->LONG",   shape.triangleup,   location.belowbar, color=color.new(color.lime, 0), size=size.small, text="V")
+plotshape(newIV and tradeShort, "^->SHORT",  shape.triangledown, location.abovebar, color=color.new(color.red,  0), size=size.small, text="^")
+plot(inLong or inShort ? slStop : na,    "hard stop", color=color.new(color.red, 40),   style=plot.style_linebr)
+plot(not na(trailStop) ? trailStop : na, "trail",     color=color.new(color.orange, 20), style=plot.style_linebr)
+
+// diagnostics
+plot(legReq, "legReq (ATR-based)", color=na, display=display.data_window)
+plot(_atr,   "ATR",                color=na, display=display.data_window)

@@ -1,0 +1,83 @@
+//@version=6
+// Slope Curve — companion oscillator for slope_strategy.pine
+// Plots legSlope (the 10-bar OLS slope of close, doji/EOD-skipped) in its own pane,
+// exactly as the strategy computes it. overlay=false → gets a separate bottom pane
+// like RSI/ATR. The strategy itself is overlay=true and can't put a plot in its own pane,
+// which is why this lives in a standalone indicator.
+indicator("Slope Curve", overlay=false)
+
+//=============================
+// Inputs — mirror slope_strategy.pine so the curve matches the strategy's signal
+//=============================
+lookback     = 10  // fixed rolling window for slope calculation (same as strategy)
+slopeEntry   = input.float(2.5, "Slope threshold (entry trigger)", minval=0.1, step=0.1)
+dojiPct      = input.float(10.0,"Doji body % of range (excluded)",  minval=1.0, maxval=49.0, step=1.0)
+smoothLen    = input.int(1,     "Smooth the slope line (EMA len, 1 = raw)", minval=1, maxval=50)
+
+//=============================
+// Session gate — skip EOD bars exactly like the strategy (America/Chicago 15:00–16:00)
+//=============================
+ctMins   = hour(time, "America/Chicago") * 60 + minute(time, "America/Chicago")
+eodClose = ctMins >= 900 and ctMins < 960
+
+//=============================
+// Doji detection — exclude from slope buffer (same rule as strategy)
+//=============================
+_range   = high - low
+_bodyPct = _range > 0.0 ? (math.abs(close - open) / _range) * 100.0 : 0.0
+isDoji   = _bodyPct < dojiPct
+
+//=============================
+// Rolling OLS slope buffer — accumulates closes, skips doji + EOD (identical to strategy)
+//=============================
+var float[] slopeBuf = array.new_float(0)
+var float   legSlope = na
+legSlope := na
+
+if not eodClose and not isDoji
+    array.push(slopeBuf, close)
+    if array.size(slopeBuf) > lookback
+        array.shift(slopeBuf)
+
+if array.size(slopeBuf) == lookback
+    n     = lookback
+    sumX  = 0.0
+    sumY  = 0.0
+    sumXY = 0.0
+    sumX2 = 0.0
+    for i = 0 to n - 1
+        x      = float(i)
+        y      = array.get(slopeBuf, i)
+        sumX  += x
+        sumY  += y
+        sumXY += x * y
+        sumX2 += x * x
+    denom    = n * sumX2 - sumX * sumX
+    legSlope := denom != 0.0 ? math.round((n * sumXY - sumX * sumY) / denom, 2) : 0.0
+
+// hold last value across doji/EOD bars so the line stays continuous (no gaps in the pane)
+var float slopeHeld = na
+if not na(legSlope)
+    slopeHeld := legSlope
+
+slopePlot = smoothLen > 1 ? ta.ema(slopeHeld, smoothLen) : slopeHeld
+
+//=============================
+// Plot — the running slope line, colored by sign & strength, with trigger bands
+//=============================
+_strong = not na(slopePlot) and math.abs(slopePlot) >= slopeEntry
+_col = na(slopePlot) ? na :
+       slopePlot > 0 ? (_strong ? color.new(color.lime, 0) : color.new(color.green, 45)) :
+       slopePlot < 0 ? (_strong ? color.new(color.red,  0) : color.new(color.maroon, 45)) :
+       color.new(color.gray, 45)
+
+plot(slopePlot, "legSlope", color=_col, linewidth=2)
+
+hline(0,           "zero",             color=color.new(color.gray, 40), linestyle=hline.style_solid)
+hline(slopeEntry,  "short trigger (+)", color=color.new(color.red,   60), linestyle=hline.style_dashed)
+hline(-slopeEntry, "long trigger (−)",  color=color.new(color.green, 60), linestyle=hline.style_dashed)
+
+// faint fill between the trigger bands to mark the "no-trade" flat zone
+_pTop = plot(slopeEntry,  "band top", color=na, display=display.none)
+_pBot = plot(-slopeEntry, "band bot", color=na, display=display.none)
+fill(_pTop, _pBot, color=color.new(color.gray, 92), title="flat zone")
