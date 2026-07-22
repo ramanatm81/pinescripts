@@ -48,6 +48,15 @@ blockNYOpen  = input.bool(false,"Block NY open first 30 min (14:30–15:00 Londo
 blockLNOpen  = input.bool(true, "Block LN open first 30 min (08:00–08:30 London / 02:00–02:30 CT)",       group="Session Filter")
 blockPreNY   = input.bool(true, "Block CME pre-open + NY open (13:30–15:00 London / 07:30–09:00 CT)",     group="Session Filter")
 blockLateUS  = input.bool(true, "Block 20:00–21:00 London hour (14:00–15:00 CT) — weakest hour in 5yr",   group="Session Filter")
+// --- Cross-Momentum override (OPTIONAL, default OFF — monitor live before trusting) ---
+// When the S/R fractals INVERT (resistance pivot < support pivot) it marks a sharp directional
+// thrust, not chop. The base strategy fades into these and loses. This module instead enters
+// WITH the thrust at cross onset and holds until the cross resolves, overriding the normal fade
+// gates (S/R zone, VWAP, barrier). 5yr backtest (1pt slip): +1,841 additive, 5/6 yrs >= base;
+// but thin (PF 1.24 alone) and OOS-negative on a 3-week window — hence a toggle to watch first.
+enableCrossMom = input.bool(false, "Cross-Momentum: trade WITH thrust when pivots invert (override fade)", group="Cross Momentum")
+crossMomSL     = input.float(40.0, "  Cross-momentum stop loss (pts)", minval=1.0, step=1.0, group="Cross Momentum")
+crossMomLook   = input.int(10,     "  Thrust lookback (bars) for direction", minval=1, maxval=50, group="Cross Momentum")
 startDate    = input.time(timestamp("2000-01-01T00:00:00-06:00"), "Backtest Start", group="Backtest")
 endDate      = input.time(timestamp("2099-12-31T23:59:00-06:00"), "Backtest End",   group="Backtest")
 
@@ -129,6 +138,12 @@ srBlockAny    = enableSRFilter and (_nearHigh or _nearLow)
 srBlockLong   = srBlockAny
 srBlockShort  = srBlockAny
 inSRZone      = srBlockLong or srBlockShort
+
+// ---- Cross-Momentum state: fractals inverted (resistance pivot < support pivot) = thrust ----
+pivotsCrossed = not na(lastFractalHigh) and not na(lastFractalLow) and lastFractalHigh < lastFractalLow
+crossOnset    = enableCrossMom and pivotsCrossed and not pivotsCrossed[1]   // first bar of a cross
+// thrust direction: +1 if price rose over the lookback (up-thrust), -1 if fell
+crossThrust   = close > close[crossMomLook] ? 1 : -1
 
 // ---- S/R zone visualization (chart) — shaded ±srZoneWidth band around active pivots ----
 // Only drawn when showSRZones is on and the pivot is valid; na hides the line otherwise.
@@ -228,6 +243,7 @@ var int    tradeSeq    = 0     // monotonic trade counter (uniqueness seed)
 var string tradeId     = ""    // pseudo-GUID for the current trade — shared by its entry & exit alerts
 var string exitReason  = ""    // reason of the last exit — set at each exit site, read by the exit alert
 var int    exitedDir   = 0     // direction that was just exited (1=long,-1=short) — for the exit alert side
+var bool   inCrossMom  = false // true while holding an optional cross-momentum override trade
 
 // Deterministic per-trade id, guaranteed unique. Built from a scrambled hash of
 // the entry bar time + monotonic counter, rendered as hex. The seq term alone
@@ -464,17 +480,20 @@ if slExitDir != 0 and not inTrade
 if inTrade and strategy.position_size != 0
     hardSLHit = (tradeDir == 1 and low <= entryPrice - activeSL) or (tradeDir == -1 and high >= entryPrice + activeSL)
     if hardSLHit
-        slExitDir    := tradeDir
+        // Cross-momentum trades do NOT arm the fade re-entry barrier (a momentum stop-out
+        // should not block future fade entries).
+        slExitDir    := inCrossMom ? 0 : tradeDir
         slBarrier    := na
-        slEntryPrice := entryPrice
-        barrierBuf   := activeSL
+        slEntryPrice := inCrossMom ? na : entryPrice
+        barrierBuf   := inCrossMom ? na : activeSL
         barrierCool  := 0
-        exitReason   := "SL"
+        exitReason   := inCrossMom ? "XSL" : "SL"
         exitedDir    := tradeDir
         tradeDir     := 0
         trailStop    := na
         bestPrice    := na
         inTrade      := false
+        inCrossMom   := false
         cooldown     := activeCooldown
 
 //=============================
@@ -486,7 +505,7 @@ if inTrade and strategy.position_size != 0
 else if not inTrade
     barsInTrade := 0
 
-if enableTExp and inTrade and strategy.position_size != 0 and barsInTrade >= tExpBars
+if enableTExp and inTrade and not inCrossMom and strategy.position_size != 0 and barsInTrade >= tExpBars
     isProfit = (tradeDir == 1 and close > entryPrice) or (tradeDir == -1 and close < entryPrice)
     if isProfit
         strategy.cancel("Exit-Long")
@@ -506,7 +525,7 @@ if enableTExp and inTrade and strategy.position_size != 0 and barsInTrade >= tEx
 // All slope inputs are absolute values, applied directionally:
 //   Long  entered on legSlope < -slopeEntry → mean reversion failed if slope STILL <= -tExpHardSlope (trend never reversed)
 //   Short entered on legSlope > +slopeEntry → mean reversion failed if slope STILL >= +tExpHardSlope (trend never reversed)
-if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >= tExpHardBars and not na(legSlope)
+if enableTExpHard and inTrade and not inCrossMom and strategy.position_size != 0 and barsInTrade >= tExpHardBars and not na(legSlope)
     slopeAgainst = (tradeDir == 1 and legSlope <= -tExpHardSlope) or (tradeDir == -1 and legSlope >= tExpHardSlope)
     if slopeAgainst
         thrdIsLoss = (tradeDir == 1 and close < entryPrice) or (tradeDir == -1 and close > entryPrice)
@@ -539,6 +558,15 @@ bigEnough = not enableBodyFilter or (math.abs(close - open) >= minBodyPts)
 
 bullEntry = canTrade and bigEnough and not inFractalDrought and legSlope < -slopeEntry and slExitDir != 1  and not srBlockLong  and not vwapZoneBlock
 bearEntry = canTrade and bigEnough and not inFractalDrought and legSlope >  slopeEntry and slExitDir != -1 and not srBlockShort and not vwapZoneBlock
+
+// Cross-momentum entry — fires on cross onset, in the thrust direction, OVERRIDING the fade
+// gates (S/R zone, VWAP, barrier). Session/time/date guards still apply; only fires when flat.
+// When it fires it suppresses the normal fade entry on this bar.
+crossLong  = crossOnset and crossThrust ==  1 and not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and not ethOpenBlock and not lateUSBlock and time >= startDate and time <= endDate
+crossShort = crossOnset and crossThrust == -1 and not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and not ethOpenBlock and not lateUSBlock and time >= startDate and time <= endDate
+// A cross entry pre-empts the normal fade entry on this bar
+bullEntry := bullEntry and not crossLong and not crossShort
+bearEntry := bearEntry and not crossLong and not crossShort
 
 // V/inverse-V point-calc — runs ONLY when an entry is firing (not every bar). Manual loop
 // over the last vLookback bars (no ta.*). Sets isVprev/isIVprev for the data window; reset
@@ -628,12 +656,74 @@ else if bearEntry
               size      = size.normal)
 
 //=============================
+// Cross-Momentum entries (optional override) — enter WITH the thrust at cross onset.
+// Holds until the cross resolves (see exit below) or the crossMomSL is hit. Marked X↑/X↓.
+//=============================
+if crossLong
+    strategy.entry("Long", strategy.long, comment="X↑")
+    strategy.exit("Exit-Long", "Long", stop = close - crossMomSL)
+    slExitDir := 0
+    slBarrier := na
+    slEntryPrice := na
+    barrierBuf := na
+    barrierCool := 0
+    tradeDir := 1
+    entryPrice := close
+    entrySlope := legSlope
+    trailStop := na
+    bestPrice := na
+    inTrade := true
+    inCrossMom := true
+    activeSL := crossMomSL
+    tradeSeq += 1
+    tradeId := makeTradeId(tradeSeq)
+    label.new(bar_index, low, text="X↑", style=label.style_label_up,
+              color=color.new(color.purple, 10), textcolor=color.white, size=size.normal)
+else if crossShort
+    strategy.entry("Short", strategy.short, comment="X↓")
+    strategy.exit("Exit-Short", "Short", stop = close + crossMomSL)
+    slExitDir := 0
+    slBarrier := na
+    slEntryPrice := na
+    barrierBuf := na
+    barrierCool := 0
+    tradeDir := -1
+    entryPrice := close
+    entrySlope := legSlope
+    trailStop := na
+    bestPrice := na
+    inTrade := true
+    inCrossMom := true
+    activeSL := crossMomSL
+    tradeSeq += 1
+    tradeId := makeTradeId(tradeSeq)
+    label.new(bar_index, high, text="X↓", style=label.style_label_down,
+              color=color.new(color.purple, 10), textcolor=color.white, size=size.normal)
+
+// Cross-momentum exit: close when the cross resolves (pivots un-invert). SL handled above.
+if inCrossMom and inTrade and strategy.position_size != 0 and not pivotsCrossed
+    strategy.cancel("Exit-Long")
+    strategy.cancel("Exit-Short")
+    strategy.close("Long",  comment="XEXIT")
+    strategy.close("Short", comment="XEXIT")
+    exitReason  := "XEXIT"
+    exitedDir   := tradeDir
+    tradeDir    := 0
+    trailStop   := na
+    bestPrice   := na
+    inTrade     := false
+    inCrossMom  := false
+    cooldown    := activeCooldown
+if not inTrade
+    inCrossMom := false
+
+//=============================
 // Trailing stop
 //=============================
 var bool trailFired = false
 trailFired := false
 
-if tradeDir == 1 and strategy.position_size != 0
+if tradeDir == 1 and strategy.position_size != 0 and not inCrossMom
     bestPrice := na(bestPrice) ? high : math.max(bestPrice, high)
     if bestPrice - entryPrice >= trailTrigger
         // wider trail when slope still strongly in favour (continuing down = still mean-reverting up)
@@ -651,7 +741,7 @@ if tradeDir == 1 and strategy.position_size != 0
         inTrade   := false
         cooldown  := activeCooldown
 
-else if tradeDir == -1 and strategy.position_size != 0
+else if tradeDir == -1 and strategy.position_size != 0 and not inCrossMom
     bestPrice := na(bestPrice) ? low : math.min(bestPrice, low)
     if entryPrice - bestPrice >= trailTrigger
         // wider trail when slope strongly confirms short direction (deeply negative = price falling)
@@ -801,6 +891,9 @@ plot(slEntryPrice,                       "slEntryPrice", color=color.rgb(255,80,
 plot(barrierBuf,                         "barrierBuf",  color=color.rgb(255,140,0),   display=display.data_window)
 plot(barrierCool > 0 ? barrierCool : na, "barrierCool", color=color.rgb(200,100,255), display=display.data_window)
 plot(vwapZoneBlock ? 1 : 0,              "vwapZoneBlock", color=color.aqua,            display=display.data_window)  // 1 = entry blocked near a VWAP ±2σ band
+plot(pivotsCrossed ? 1 : 0,              "pivotsCrossed", color=color.purple,          display=display.data_window)  // 1 = resistance pivot < support pivot (thrust)
+plot(inCrossMom ? crossThrust : 0,       "crossMomDir",   color=color.purple,          display=display.data_window)  // +1/-1 when in a cross-momentum trade, else 0
+plot(enableCrossMom ? 1 : 0,             "cfg_crossMom",  color=color.gray,            display=display.data_window)
 
 // No-traction stats table — bottom-right corner of chart
 var table statsTable = table.new(position.bottom_right, 2, 6,
