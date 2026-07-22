@@ -1,0 +1,257 @@
+//@version=6
+// =====================================================================================
+// LIVE TREND DETECTOR
+//
+// A "live trend" = a directional run that, over a stretch of time (however long it takes),
+// covers a meaningful distance AND is CLEAN (not zig-zag). Cleanliness = R-squared of an
+// OLS fit: bars hugging the fit line = straight trend; scattered = chop, rejected.
+// Steepness is IRRELEVANT -- a slow shallow grind that stays on its line is a trend just
+// as much as a sharp plunge. Total run + straightness qualify it, not slope.
+//
+// STATE MACHINE (this is the key difference from a level-detector):
+//   FLAT  -- scan windows winMin..winMax. When a clean run (R^2 >= minR2) reaches runMinPts
+//            (>=150 default) we LATCH a live trend: lock the anchor bar, the slope, the
+//            direction, and open a line object. Fire the start dot.
+//   LIVE  -- 150pts is only the TRIGGER, not the end. Each bar we REFIT the OLS over the
+//            whole live window (anchor->now) and redraw ONE line from that fit, so the line
+//            BENDS with the move -- the same shape the old "fan" traced, but as a single
+//            clean line with one start dot and one end dot (no stutter, no stacking).
+//            The trend stays alive as long as the refit stays clean and pointed the right
+//            way; it tolerates pauses (incl. overnight) so a multi-hour descent = one line.
+//   BREAK -- ends ONLY on a BIG pullback: price bounces pullbackPts off the extreme (a real
+//            reversal). The live refit draws the bending line but does NOT decide the break,
+//            so a trend never ends at its own low/high on a fit metric. Freeze the bent line,
+//            drop an end dot at the confirmation bar, arm a same-direction lock.
+//   LOCK  -- after a break we BLOCK a new trend in the SAME direction until price retraces
+//            reEntryFrac of the completed move back off its extreme (a real reversal). This
+//            is what stops a long clean grind from being re-detected as N marches 100->240.
+//
+// Math: over the last N bars, x = 0 (oldest) .. N-1 (current), y = price.
+//   slope = cov(x,y)/var(x)   R^2 = cov(x,y)^2/(var(x)*var(y))   run = |slope|*(N-1)
+// Pure detector -- no trades. Eyeball first.
+// =====================================================================================
+indicator("Live Trend Detector", overlay=true, max_labels_count=500, max_lines_count=500, max_bars_back=2000)
+
+//=============================
+// Inputs
+//=============================
+winMin     = input.int(30,  "Scan window MIN (bars)", minval=5,  maxval=1000, group="Trend window")
+winMax     = input.int(240, "Scan window MAX (bars)", minval=5,  maxval=1000, group="Trend window")
+winStep    = input.int(10,  "Scan step (bars)",       minval=1,  maxval=50,   group="Trend window")
+
+runMinPts  = input.float(150.0, "Min run size to TRIGGER a trend (pts, fit-line net move)", minval=1.0, step=5.0, group="Trend qualification")
+minR2      = input.float(0.75,  "Min R-squared (straightness; 1 = perfect line)", minval=0.1, maxval=1.0, step=0.05, group="Trend qualification")
+srcPrice   = input.source(close, "Price source for the fit", group="Trend qualification")
+pickBest   = input.bool(true, "Detect on BEST-fitting window (else first qualifying)", group="Trend qualification")
+
+pullbackPts = input.float(150.0, "Break: retrace this many pts off the trend extreme (big pullback = real reversal)", minval=1.0, step=5.0, group="Trend break")
+reEntryFrac = input.float(0.7,  "Re-entry block: after a break, block a SAME-direction trend until price retraces this fraction of the completed move", minval=0.0, maxval=1.0, step=0.05, group="Trend break")
+liveCap     = input.int(1500,   "Safety cap on live window length (bars) — protects Pine calc time", minval=100, maxval=1990, group="Trend break")
+
+markStart  = input.bool(true, "Plot trend START dot",  group="Display")
+markEnd    = input.bool(true, "Plot trend BREAK dot",  group="Display")
+showLine   = input.bool(true, "Draw / extend the trend line", group="Display")
+
+//=============================
+// OLS helper over the last N bars (manual, so N can be dynamic).
+// Returns slope, r2, and the fit-line value at the OLDEST bar (x=0 intercept b0)
+// via tuple. run = |slope|*(N-1).
+//=============================
+// NUMERICALLY STABLE OLS. The naive Σy² − (Σy)²/N formula catastrophically cancels when
+// prices are large (~29500) and N is big: both terms are ~1.6e11 and their tiny difference
+// (~1e6) is lost to float precision -> garbage variance/slope/R^2 (the "slope ramps from 0"
+// bug). Fix: CENTER y on the first sample (yRef) so accumulated values stay small. x is
+// small already (0..N-1) so it needs no centering. Variances/covariance are shift-invariant,
+// so centering changes nothing mathematically -- only the precision.
+olsScan(int N) =>
+    float yRef = srcPrice[N - 1]   // oldest bar in the window; subtract to keep sums small
+    float sx  = 0.0
+    float sy  = 0.0
+    float sxx = 0.0
+    float syy = 0.0
+    float sxy = 0.0
+    for i = 0 to N - 1
+        x = float(N - 1 - i)          // current bar -> x=N-1, oldest -> x=0
+        y = srcPrice[i] - yRef        // centered price (small magnitude)
+        sx  += x
+        sy  += y
+        sxx += x * x
+        syy += y * y
+        sxy += x * y
+    fN    = float(N)
+    varX  = sxx - sx * sx / fN
+    varY  = syy - sy * sy / fN
+    covXY = sxy - sx * sy / fN
+    float slope = na
+    float r2    = na
+    float b0    = na
+    if varX > 0 and varY > 0
+        slope := covXY / varX
+        r2    := (covXY * covXY) / (varX * varY)
+        // b0 is the fit value at x=0 (oldest bar); add yRef back to undo the centering
+        b0    := yRef + (sy / fN) - slope * (sx / fN)
+    [slope, r2, b0]
+
+//=============================
+// State
+//=============================
+var int    state      = 0      // 0 = FLAT (scanning), 1 = LIVE
+var int    anchorBar  = na     // bar_index of the trend's oldest (start) bar
+var float  anchorY    = na     // fit-line price at the anchor (x=0)
+var float  startPrice = na     // actual price at the anchor bar (for travel measure)
+var float  liveSlope  = na     // locked slope (pts per bar), signed
+var int    liveDir    = 0      // +1 up, -1 down
+var float  liveExtreme = na    // running high (up) / low (down) reached while live
+var line   trendLine  = na     // the persistent, bending refit line
+
+// same-direction re-entry lock: after a break, remember the direction, the extreme the
+// trend reached, and how far it travelled. Block a NEW trend in the SAME direction until
+// price retraces reEntryFrac of that travel back off the extreme (a genuine reversal).
+var int    lockDir     = 0
+var float  lockExtreme = na
+var float  lockTravel  = na
+
+bool  firedStart = false
+bool  firedBreak = false
+int   brokeDirEnded = 0     // direction of the trend that ended THIS bar (+1 up / -1 down / 0 none)
+
+// ---- diagnostics exposed to the data window (per-bar, reset each bar) ----
+float dbgExtreme  = na      // running extreme while live
+float dbgPullback = na      // how far price has retraced off the extreme (pts)
+float dbgLiveR2   = na      // R^2 of the live refit this bar (drawing only, not the break)
+float dbgLiveSlope = na     // slope of the live refit this bar
+
+//=============================
+// Clear the same-direction re-entry lock once price has genuinely reversed:
+// retraced reEntryFrac of the completed move back off its extreme.
+//=============================
+if lockDir != 0 and not na(lockExtreme)
+    _need = reEntryFrac * lockTravel
+    if lockDir < 0 and high >= lockExtreme + _need
+        lockDir := 0
+    else if lockDir > 0 and low <= lockExtreme - _need
+        lockDir := 0
+
+//=============================
+// FLAT: scan windows to detect a new trend
+//=============================
+if state == 0
+    float dSlope = na
+    float dR2    = na
+    float dB0    = na
+    int   dN     = na
+    _wmax = math.min(winMax, 4990)
+    for N = winMin to _wmax by winStep
+        if N >= 3 and bar_index >= N - 1
+            [s, r2, b0] = olsScan(N)
+            if not na(s)
+                run = math.abs(s) * float(N - 1)
+                if run >= runMinPts and r2 >= minR2
+                    dir = s > 0 ? 1 : -1
+                    // block re-detecting a trend in the still-locked direction
+                    if dir != lockDir and (na(dN) or (pickBest and r2 > dR2))
+                        dSlope := s
+                        dR2    := r2
+                        dB0    := b0
+                        dN     := N
+    if not na(dN)
+        // latch the trend
+        state      := 1
+        anchorBar  := bar_index - (dN - 1)
+        anchorY    := dB0
+        startPrice := close[dN - 1]                 // actual price at the anchor bar
+        liveSlope  := dSlope
+        liveDir    := dSlope > 0 ? 1 : -1
+        liveExtreme := liveDir > 0 ? high : low
+        firedStart := true
+        if showLine
+            _yNow = anchorY + liveSlope * float(dN - 1)
+            trendLine := line.new(anchorBar, anchorY, bar_index, _yNow, xloc=xloc.bar_index,
+                 color=(liveDir > 0 ? color.new(color.lime, 0) : color.new(color.red, 0)), width=2)
+
+//=============================
+// LIVE: refit the line over anchor->now each bar (so it BENDS with the move, like the
+// fan's envelope but as ONE line). The refit is for DRAWING only. The trend ends solely on
+// a big pullback off the extreme (see break condition below).
+//=============================
+if state == 1
+    _liveN = math.min(bar_index - anchorBar + 1, liveCap)
+    // update the running extreme in the trend's direction
+    liveExtreme := liveDir > 0 ? math.max(liveExtreme, high) : math.min(liveExtreme, low)
+
+    // refit OLS over the live window (last _liveN bars; = anchor..now unless capped)
+    [rs, rr2, rb0] = olsScan(_liveN)
+    // the refit gives the current bending line; redraw it over the fit window
+    if showLine and not na(trendLine) and not na(rs)
+        _fitStart = bar_index - (_liveN - 1)          // left edge of the fit window
+        _yOld = rb0                                   // fit value at x=0 (fit-window start)
+        _yNow = rb0 + rs * float(_liveN - 1)          // fit value at current bar
+        line.set_xy1(trendLine, _fitStart, _yOld)
+        line.set_xy2(trendLine, bar_index, _yNow)
+        liveSlope := rs
+
+    // break condition: ONE rule only -- a big pullback off the extreme (a real reversal).
+    // The live refit is used ONLY to draw the bending line; it does NOT decide the break,
+    // so the trend can't end at the low on a fit metric. A down-trend ends when price
+    // bounces pullbackPts above its low; an up-trend when price drops pullbackPts below
+    // its high. This is knowable in real time and never lands the break at the turning point.
+    brokeUp  = liveDir > 0 and close < liveExtreme - pullbackPts
+    brokeDn  = liveDir < 0 and close > liveExtreme + pullbackPts
+
+    // ---- publish diagnostics for THIS live bar ----
+    dbgExtreme   := liveExtreme
+    dbgPullback  := liveDir > 0 ? (liveExtreme - close) : (close - liveExtreme)  // + = retraced off extreme
+    dbgLiveR2    := rr2
+    dbgLiveSlope := rs
+
+    if brokeUp or brokeDn
+        firedBreak := true
+        // arm the same-direction re-entry lock, keyed to this move's total travel
+        lockDir     := liveDir
+        lockExtreme := liveExtreme
+        lockTravel  := math.max(math.abs(liveExtreme - startPrice), 1.0)
+        // NO lookahead: the trend is only KNOWN to be over on THIS (confirmation) bar --
+        // the bar price has bounced pullbackPts off the extreme. A strategy could act here,
+        // not at the extreme (which you can't identify until the bounce completes). The end
+        // marker is drawn (as a plotshape) at the confirmation bar in the Visuals section.
+        brokeDirEnded := liveDir       // remember which trend just ended (for marker placement)
+        state       := 0
+        anchorBar   := na
+        anchorY     := na
+        liveSlope   := na
+        liveDir     := 0
+        liveExtreme := na
+        trendLine   := na          // freeze the final bent line; stop refitting it
+
+//=============================
+// Visuals
+//=============================
+plotshape(markStart and firedStart and liveDir > 0, "up trend start",   shape.circle, location.belowbar, color=color.new(color.lime, 0), size=size.small)
+plotshape(markStart and firedStart and liveDir < 0, "down trend start", shape.circle, location.abovebar, color=color.new(color.red,  0), size=size.small)
+// trend BREAK (confirmation bar): bright X, placed on the side the ended trend was heading.
+// A down-trend ends with an up-bounce -> mark ABOVE; an up-trend ends -> mark BELOW.
+plotshape(markEnd and firedBreak and brokeDirEnded < 0, "down trend break", shape.xcross, location.abovebar, color=color.new(color.yellow, 0), size=size.small, text="END")
+plotshape(markEnd and firedBreak and brokeDirEnded > 0, "up trend break",   shape.xcross, location.belowbar, color=color.new(color.yellow, 0), size=size.small, text="END")
+// (trend BREAK marker is drawn as a label at the break price inside the LIVE block above)
+
+//=============================
+// Version label — bottom-right (same style as slope_strategy)
+//=============================
+var table cityTable = table.new(position.bottom_right, 1, 1,
+     bgcolor      = color.new(color.black, 20),
+     border_width = 1,
+     border_color = color.new(color.gray, 50))
+if barstate.islast
+    table.cell(cityTable, 0, 0, "Galway", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+
+//=============================
+// Diagnostics (data window)
+//=============================
+plot(state == 1 ? 1 : 0, "live (1/0)",        color=na, display=display.data_window)
+plot(liveSlope,          "locked slope pts/bar", color=na, display=display.data_window)
+plot(state == 1 ? float(bar_index - anchorBar + 1) : na, "live length (bars)", color=na, display=display.data_window)
+// --- break-diagnostic columns (fresh export will show WHY/WHERE a break fires) ---
+plot(dbgExtreme,   "dbg extreme",        color=na, display=display.data_window)
+plot(dbgPullback,  "dbg pullback off ext", color=na, display=display.data_window)
+plot(dbgLiveR2,    "dbg live R2",        color=na, display=display.data_window)
+plot(dbgLiveSlope, "dbg live slope",     color=na, display=display.data_window)

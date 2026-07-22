@@ -1,0 +1,225 @@
+//@version=6
+// =====================================================================================
+// APEX TAIL TREND-EXHAUSTION STRATEGY
+//
+// Uses the SAME fresh-high / fresh-low definition as apex_tail.pine: a window extreme that
+// sits in the TAIL (right edge) with a real ATR-relative move into it = a NEW high/low made
+// recently (newUp / newDown).
+//
+// Premise (short): wait for numHighs STRICTLY ASCENDING fresh-highs forming a compact
+// staircase uptrend, then SHORT it (fading an exhausted run). Symmetric long option off lows.
+//   - each new fresh-high must be > the previous one; a lower one RESETS the count to 1
+//   - all numHighs must occur within maxSpanBars (else reset) -> "not 5 highs over 4 hours"
+//   - enter on the Nth ascending high; stop = entry + slPts (100-200); MFE trail exit
+//   - no entries in the London/NY open window (07:30-09:30 CT, configurable)
+//
+// EYEBALL FIRST -- unvalidated. Detector marks show the staircase it counted.
+// =====================================================================================
+strategy("Apex Tail Trend Exhaustion", overlay=true, max_labels_count=500, max_bars_back=500,
+         default_qty_type=strategy.fixed, default_qty_value=1, calc_on_every_tick=false)
+
+//=============================
+// Fresh-high / fresh-low detection (identical to apex_tail.pine)
+//=============================
+vBars      = input.int(60,   "Rolling window (bars, 60 = 1h)", minval=4, maxval=200, group="Fresh extreme")
+tailFrac   = input.float(0.20,"Tail fraction: extreme in LAST this fraction of window", minval=0.05, maxval=0.5, step=0.05, group="Fresh extreme")
+legAtrMult = input.float(2.5, "Move into extreme >= this x ATR (session-adaptive)", minval=0.1, step=0.1, group="Fresh extreme")
+legAtrLen  = input.int(14,   "ATR length", minval=1, maxval=200, group="Fresh extreme")
+legMinAbs  = input.float(12.0,"Floor: move into extreme also >= this many pts", minval=0.0, step=1.0, group="Fresh extreme")
+rearmBars  = input.int(20,   "Min bars between fresh-extreme marks (re-arm gate)", minval=0, maxval=200, group="Fresh extreme")
+minStepPts = input.float(15.0,"Min pts each staircase step must extend beyond the previous extreme (kills micro-steps)", minval=0.0, step=1.0, group="Staircase")
+
+_atr   = ta.atr(legAtrLen)
+legReq = math.max(legAtrMult * _atr, legMinAbs)
+
+_loBack = ta.lowestbars(low,  vBars)
+_hiBack = ta.highestbars(high, vBars)
+_loIdx  = float(vBars - 1 + _loBack)
+_hiIdx  = float(vBars - 1 + _hiBack)
+_winLow   = ta.lowest(low,  vBars)
+_winHigh  = ta.highest(high, vBars)
+_firstClose = close[vBars - 1]
+_dropInto = _firstClose - _winLow
+_riseInto = _winHigh - _firstClose
+_tailStartIdx = float(vBars - 1) * (1.0 - tailFrac)
+_loInTail = _loIdx >= _tailStartIdx
+_hiInTail = _hiIdx >= _tailStartIdx
+rawDown = _loInTail and _dropInto >= legReq
+rawUp   = _hiInTail and _riseInto >= legReq
+
+var int _dnCool = 0
+var int _upCool = 0
+_dnCool := _dnCool > 0 ? _dnCool - 1 : 0
+_upCool := _upCool > 0 ? _upCool - 1 : 0
+newDown = rawDown and not rawDown[1] and _dnCool == 0
+newUp   = rawUp   and not rawUp[1]   and _upCool == 0
+if newDown
+    _dnCool := rearmBars
+if newUp
+    _upCool := rearmBars
+
+//=============================
+// Staircase counter -- N strictly-ascending fresh-highs (for SHORT) within a compact span
+//=============================
+numHighs    = input.int(5,   "Number of ascending highs/lows before entry", minval=3, maxval=8, group="Staircase")
+maxSpanBars = input.int(120, "Max bars from 1st to Nth extreme (compactness; else reset)", minval=10, maxval=1000, group="Staircase")
+tradeShort  = input.bool(true,  "Short after N ascending fresh-highs", group="Staircase")
+tradeLong   = input.bool(false, "Long after N descending fresh-lows",  group="Staircase")
+
+// UP staircase (for shorts): count consecutive ascending fresh-highs
+var int   _upCount   = 0
+var float _lastUpHi  = na
+var int   _upFirstBar = 0
+_upStepped = false   // true only when this bar actually advanced/restarted the count
+if newUp
+    // a step only counts if the new high extends >= minStepPts ABOVE the last counted high
+    _isHigher = na(_lastUpHi) or _winHigh >= _lastUpHi + minStepPts
+    if _isHigher and _upCount > 0 and (bar_index - _upFirstBar) <= maxSpanBars
+        _upCount := _upCount + 1
+        _lastUpHi := _winHigh
+        _upStepped := true
+    else if na(_lastUpHi) or _winHigh <= _lastUpHi - minStepPts
+        // a clearly LOWER high broke the staircase -> restart the run here
+        _upCount := 1
+        _upFirstBar := bar_index
+        _lastUpHi := _winHigh
+        _upStepped := true
+    // else: a fresh high within +/- minStepPts of the last -> same step, count unchanged
+// span expiry: if too long since the run started without completing, reset
+if _upCount > 0 and (bar_index - _upFirstBar) > maxSpanBars
+    _upCount := 0
+    _lastUpHi := na
+
+// DOWN staircase (for longs): consecutive descending fresh-lows
+var int   _dnCount   = 0
+var float _lastDnLo  = na
+var int   _dnFirstBar = 0
+_dnStepped = false
+if newDown
+    // a step only counts if the new low extends >= minStepPts BELOW the last counted low
+    _isLower = na(_lastDnLo) or _winLow <= _lastDnLo - minStepPts
+    if _isLower and _dnCount > 0 and (bar_index - _dnFirstBar) <= maxSpanBars
+        _dnCount := _dnCount + 1
+        _lastDnLo := _winLow
+        _dnStepped := true
+    else if na(_lastDnLo) or _winLow >= _lastDnLo + minStepPts
+        // a clearly HIGHER low broke the staircase -> restart the run here
+        _dnCount := 1
+        _dnFirstBar := bar_index
+        _lastDnLo := _winLow
+        _dnStepped := true
+    // else: a fresh low within +/- minStepPts of the last -> same step, count unchanged
+if _dnCount > 0 and (bar_index - _dnFirstBar) > maxSpanBars
+    _dnCount := 0
+    _lastDnLo := na
+
+// signal fires only on a bar that actually ADVANCED the count to N (not a micro-step)
+shortSignal = tradeShort and _upStepped and _upCount >= numHighs
+longSignal  = tradeLong  and _dnStepped and _dnCount >= numHighs
+
+//=============================
+// Session block -- no entries in the London/NY open window (CT), configurable
+//=============================
+blockOpens   = input.bool(true, "Block entries during open window", group="Session")
+openStartCT  = input.int(450, "Open block start (CT minutes, 450 = 07:30)", minval=0, maxval=1439, group="Session")
+openEndCT    = input.int(570, "Open block end (CT minutes, 570 = 09:30)",   minval=0, maxval=1439, group="Session")
+ctMins   = hour(time, "America/Chicago") * 60 + minute(time, "America/Chicago")
+eodHard  = ctMins >= 900 and ctMins < 960
+inOpenBlk = blockOpens and ctMins >= openStartCT and ctMins < openEndCT
+
+//=============================
+// legSlope -- 10-bar OLS slope of close (doji/EOD-skipped), IDENTICAL to slope_strategy.pine.
+// Display-only here (data window) so you can eyeball the slope alongside the apex-tail signals.
+//=============================
+_slLookback = 10
+_slRange   = high - low
+_slBodyPct = _slRange > 0.0 ? (math.abs(close - open) / _slRange) * 100.0 : 0.0
+_slIsDoji  = _slBodyPct < 10.0
+var float[] _slBuf   = array.new_float(0)
+var float   legSlope = na
+legSlope := na
+if not eodHard and not _slIsDoji
+    array.push(_slBuf, close)
+    if array.size(_slBuf) > _slLookback
+        array.shift(_slBuf)
+if array.size(_slBuf) == _slLookback
+    _n = _slLookback
+    _sx = 0.0
+    _sy = 0.0
+    _sxy = 0.0
+    _sx2 = 0.0
+    for _i = 0 to _n - 1
+        _x = float(_i)
+        _y = array.get(_slBuf, _i)
+        _sx  += _x
+        _sy  += _y
+        _sxy += _x * _y
+        _sx2 += _x * _x
+    _den = _n * _sx2 - _sx * _sx
+    legSlope := _den != 0.0 ? math.round((_n * _sxy - _sx * _sy) / _den, 2) : 0.0
+// ATR-normalized slope angle (deg), same convention as slope_strategy.pine
+_slAtr = ta.atr(14)
+legSlopeAngle = (not na(legSlope) and not na(_slAtr) and _slAtr > 0) ? math.round(math.atan(legSlope / _slAtr) * 180.0 / math.pi, 1) : na
+
+//=============================
+// Trade
+//=============================
+slPts     = input.float(150.0, "Stop loss (pts from entry, 100-200)", minval=10.0, step=5.0, group="Trade")
+trailTrig = input.float(70.0,  "MFE trail trigger (pts favorable)", minval=1.0, step=5.0, group="Trade")
+trailDist = input.float(30.0,  "MFE trail distance (pts behind peak)", minval=1.0, step=5.0, group="Trade")
+
+var float slStop    = na
+var float bestPrice = na
+var float trailStop = na
+flat = strategy.position_size == 0
+
+canEnter = flat and not eodHard and not inOpenBlk
+if canEnter and shortSignal
+    strategy.entry("S", strategy.short)
+    slStop    := close + slPts
+    bestPrice := close
+    trailStop := na
+    _upCount  := 0
+    _lastUpHi := na
+if canEnter and longSignal
+    strategy.entry("L", strategy.long)
+    slStop    := close - slPts
+    bestPrice := close
+    trailStop := na
+    _dnCount  := 0
+    _lastDnLo := na
+
+if strategy.position_size < 0
+    bestPrice := na(bestPrice) ? low : math.min(bestPrice, low)
+    if strategy.position_avg_price - bestPrice >= trailTrig
+        _ts = bestPrice + trailDist
+        trailStop := na(trailStop) ? _ts : math.min(trailStop, _ts)
+    _exit = na(trailStop) ? slStop : math.min(slStop, trailStop)
+    strategy.exit("Sx", from_entry="S", stop=_exit)
+if strategy.position_size > 0
+    bestPrice := na(bestPrice) ? high : math.max(bestPrice, high)
+    if bestPrice - strategy.position_avg_price >= trailTrig
+        _ts = bestPrice - trailDist
+        trailStop := na(trailStop) ? _ts : math.max(trailStop, _ts)
+    _exit = na(trailStop) ? slStop : math.max(slStop, trailStop)
+    strategy.exit("Lx", from_entry="L", stop=_exit)
+
+if eodHard and not flat
+    strategy.close_all(comment="EOD")
+
+//=============================
+// Visuals -- show the staircase highs it is counting + the entry
+//=============================
+// small numbered dot on each ascending fresh-high while a run is building
+plotshape(_upStepped, "asc high (counted step)", shape.circle, location.abovebar, color=color.new(color.orange, 30), size=size.tiny)
+plotshape(_dnStepped, "desc low (counted step)", shape.circle, location.belowbar, color=color.new(color.aqua, 30), size=size.tiny)
+plotshape(shortSignal, "SHORT", shape.triangledown, location.abovebar, color=color.new(color.red, 0), size=size.small, text="S")
+plotshape(longSignal,  "LONG",  shape.triangleup,   location.belowbar, color=color.new(color.lime, 0), size=size.small, text="L")
+
+// diagnostics
+plot(_upCount, "asc-high count", color=na, display=display.data_window)
+plot(_dnCount, "desc-low count", color=na, display=display.data_window)
+plot(_hiIdx,   "high idx",       color=na, display=display.data_window)
+plot(legReq,   "leg req (ATR)",  color=na, display=display.data_window)
+plot(legSlope,      "legSlope (10-bar OLS)", color=na, display=display.data_window)
+plot(legSlopeAngle, "legSlope angle (deg)",  color=na, display=display.data_window)

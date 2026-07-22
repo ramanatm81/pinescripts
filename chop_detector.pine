@@ -1,0 +1,197 @@
+//@version=6
+// =====================================================================================
+// CHOP / MEAN-REVERSION DETECTOR
+//
+// The companion to live_trend.pine. Where the trend detector fires on CLEAN DIRECTIONAL
+// runs, this one fires on the opposite regime: price that COVERS A BAND BUT GOES NOWHERE
+// -- round-tripping, mean-reverting, chop. It is a separate, independent signal (different
+// math, not just "not a trend"), so a region can be TREND, CHOP, or NEITHER (transitional).
+//
+// DEFINITION (structural, not curve-fit):
+//   Over a rolling lookback of L bars, measure:
+//     net  = |close_now - close_L_ago|     (how far price NET travelled)
+//     band = highest_high - lowest_low     (how wide a range it wandered)
+//   CHOP when net/band is small (price wandered a real band but netted ~nothing) AND the
+//   band is real (>= bandMin, so we ignore dead-flat nothing-happening stretches).
+//     net/band  ~1.0 = straight move (trend)      ~0.0 = pure round-trip (chop)
+//
+// This was validated on NQ 1-min data: genuine ranges (e.g. 6 Jul 09:00-14:00) flag ~40-45%
+// chop; clean trends (16 Jul descent, 17 Jul rise) flag <20%. Not a razor edge -- an honest
+// regime tint. Threshold deliberately NOT over-tuned to any one day.
+//
+// TREND SUPPRESSION: a slow multi-hour grind is really a STAIRCASE -- short flat treads (real
+// local chop) joined by small steps -- so net/band flags the treads and the chop "bombards"
+// the trend at ANY window size (tested; no window separates slow-trend from range, they are
+// structurally the same locally). Fix: embed a copy of live_trend.pine's trend-live state
+// machine and SUPPRESS chop while a trend is live. Overnight grind (8-9 Jul) drops 36%->5%
+// chop; genuine ranges (no trend live) still tint. This couples the two signals -- chop now
+// defers to the trend detector -- which is the point. Keep the trend params here IN SYNC
+// with live_trend.pine or the two will disagree about what "trend" means.
+//
+// OUTPUT: shades the chart background over chop bars (when no trend is live). Pure regime ID
+// -- no entries, no bands, mirroring how live_trend.pine is pure trend ID.
+// =====================================================================================
+indicator("Chop / Mean-Reversion Detector", overlay=true, max_labels_count=500, max_bars_back=2000)
+
+//=============================
+// Inputs
+//=============================
+L        = input.int(60,   "Lookback (bars)",                         minval=10, maxval=500, group="Chop")
+nbMax    = input.float(0.25,"Chop when net/band <= this (0=pure round-trip, 1=straight move)", minval=0.05, maxval=0.9, step=0.05, group="Chop")
+bandMin  = input.float(40.0,"Minimum band width (pts) to count as a real range (ignores dead-flat)", minval=1.0, step=5.0, group="Chop")
+persist  = input.int(3,    "Require chop condition to hold this many bars in a row (debounce)", minval=1, maxval=50, group="Chop")
+
+suppressInTrend = input.bool(true, "Suppress chop while a TREND is live (mirrors live_trend.pine)", group="Chop")
+
+shadeChop = input.bool(true, "Shade chop regions (background)", group="Display")
+markEdges = input.bool(true, "Label the region's start/end", group="Display")
+
+// --- trend-detection params (MUST match live_trend.pine so 'trend live' agrees) ---
+winMin     = input.int(30,  "Trend scan window MIN (bars)", minval=5, maxval=1000, group="Trend suppression")
+winMax     = input.int(240, "Trend scan window MAX (bars)", minval=5, maxval=1000, group="Trend suppression")
+winStep    = input.int(10,  "Trend scan step (bars)",       minval=1, maxval=50,   group="Trend suppression")
+runMinPts  = input.float(150.0, "Trend min run size (pts)", minval=1.0, step=5.0,   group="Trend suppression")
+minR2      = input.float(0.75,  "Trend min R-squared",      minval=0.1, maxval=1.0, step=0.05, group="Trend suppression")
+pullbackPts= input.float(150.0, "Trend break pullback (pts)", minval=1.0, step=5.0, group="Trend suppression")
+reEntryFrac= input.float(0.7,   "Trend re-entry block fraction", minval=0.0, maxval=1.0, step=0.05, group="Trend suppression")
+
+//=============================
+// Embedded TREND-LIVE detector (a stripped copy of live_trend.pine's state machine, no
+// drawing) so this indicator KNOWS when a trend is running and can stay quiet then. This is
+// why a slow overnight grind (a staircase of flat treads) doesn't get bombarded with chop:
+// the trend is live across it, so chop is suppressed. Genuine ranges (no trend live) still tint.
+//=============================
+olsScan(int Nw) =>
+    float yRef = close[Nw - 1]
+    float sx  = 0.0
+    float sy  = 0.0
+    float sxx = 0.0
+    float syy = 0.0
+    float sxy = 0.0
+    for i = 0 to Nw - 1
+        x = float(Nw - 1 - i)
+        y = close[i] - yRef
+        sx  += x
+        sy  += y
+        sxx += x * x
+        syy += y * y
+        sxy += x * y
+    fN = float(Nw)
+    varX  = sxx - sx * sx / fN
+    varY  = syy - sy * sy / fN
+    covXY = sxy - sx * sy / fN
+    float slope = na
+    float r2    = na
+    if varX > 0 and varY > 0
+        slope := covXY / varX
+        r2    := (covXY * covXY) / (varX * varY)
+    [slope, r2]
+
+var int   tState   = 0
+var int   tDir     = 0
+var float tExtreme = na
+var float tStartPx = na
+var int   tLockDir = 0
+var float tLockExt = na
+var float tLockTrv = na
+
+// clear same-direction re-entry lock on genuine reversal
+if tLockDir != 0 and not na(tLockExt)
+    _need = reEntryFrac * tLockTrv
+    if tLockDir < 0 and high >= tLockExt + _need
+        tLockDir := 0
+    else if tLockDir > 0 and low <= tLockExt - _need
+        tLockDir := 0
+
+if tState == 0
+    float dS = na
+    float dR = na
+    int   dN = na
+    _wmax = math.min(winMax, 4990)
+    for Nw = winMin to _wmax by winStep
+        if Nw >= 3 and bar_index >= Nw - 1
+            [s, r2] = olsScan(Nw)
+            if not na(s) and math.abs(s) * float(Nw - 1) >= runMinPts and r2 >= minR2
+                d = s > 0 ? 1 : -1
+                if d != tLockDir and (na(dN) or r2 > dR)
+                    dS := s
+                    dR := r2
+                    dN := Nw
+    if not na(dN)
+        tState   := 1
+        tDir     := dS > 0 ? 1 : -1
+        tStartPx := close[dN - 1]
+        tExtreme := tDir > 0 ? high : low
+else
+    tExtreme := tDir > 0 ? math.max(tExtreme, high) : math.min(tExtreme, low)
+    _brokeUp = tDir > 0 and close < tExtreme - pullbackPts
+    _brokeDn = tDir < 0 and close > tExtreme + pullbackPts
+    if _brokeUp or _brokeDn
+        tLockDir := tDir
+        tLockExt := tExtreme
+        tLockTrv := math.max(math.abs(tExtreme - tStartPx), 1.0)
+        tState   := 0
+        tDir     := 0
+        tExtreme := na
+
+trendLive = tState == 1
+
+//=============================
+// Rolling net vs band
+//=============================
+_netMove = math.abs(close - close[L - 1])          // net displacement over the window
+_band    = ta.highest(high, L) - ta.lowest(low, L) // range wandered
+_nb      = _band > 0 ? _netMove / _band : 9.0
+
+rawChop  = _band >= bandMin and _nb <= nbMax
+
+//=============================
+// Debounce: only call it chop once the condition has held `persist` bars in a row, so a
+// single flicker doesn't paint the background. Symmetric on exit.
+//=============================
+var int _chopRun = 0
+_chopRun := rawChop ? _chopRun + 1 : 0
+// suppress chop while a trend is live: a slow grind is a staircase of flat treads, and we
+// don't want to paint chop across a move the trend detector is already claiming.
+isChop = _chopRun >= persist and not (suppressInTrend and trendLive)
+
+// region edges (rising/falling of the debounced state)
+enterChop = isChop and not isChop[1]
+exitChop  = not isChop and isChop[1]
+
+//=============================
+// Visuals
+//=============================
+bgcolor(shadeChop and isChop ? color.new(color.orange, 88) : na, title="chop zone")
+
+// NOTE ON TIMING: net/band is a TRAILING window, so these marks LAG the true range by ~L
+// bars (the chop had been forming before the metric could confirm it, and likewise on exit).
+// They are NOT lookahead -- every mark uses only past data, so they're valid in real time /
+// for a strategy -- they are just LATE. The label text says "detected"/"broke" to make clear
+// these are the confirmation bars, not the range's true visual edges.
+if markEdges and enterChop
+    label.new(bar_index, high, "CHOP\ndetected", xloc=xloc.bar_index, yloc=yloc.abovebar,
+         color=color.new(color.orange, 30), textcolor=color.white, style=label.style_label_down, size=size.tiny)
+if markEdges and exitChop
+    label.new(bar_index, high, "CHOP\nbroke", xloc=xloc.bar_index, yloc=yloc.belowbar,
+         color=color.new(color.orange, 30), textcolor=color.white, style=label.style_label_up, size=size.tiny)
+
+//=============================
+// Version label — bottom-right (same style as slope_strategy / live_trend)
+//=============================
+var table cityTable = table.new(position.bottom_right, 1, 1,
+     bgcolor      = color.new(color.black, 20),
+     border_width = 1,
+     border_color = color.new(color.gray, 50))
+if barstate.islast
+    table.cell(cityTable, 0, 0, "Galway-Chop", text_color=color.orange, text_size=size.small, bgcolor=color.new(color.navy, 10))
+
+//=============================
+// Diagnostics (data window)
+//=============================
+plot(_netMove, "net move (pts)",  color=na, display=display.data_window)
+plot(_band,    "band width (pts)",color=na, display=display.data_window)
+plot(_nb,      "net/band ratio",  color=na, display=display.data_window)
+plot(isChop ? 1 : 0, "is chop (1/0)", color=na, display=display.data_window)
+plot(trendLive ? 1 : 0, "trend live (1/0)", color=na, display=display.data_window)
+plot(rawChop ? 1 : 0,  "raw chop before suppress (1/0)", color=na, display=display.data_window)

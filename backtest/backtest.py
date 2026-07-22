@@ -65,6 +65,11 @@ def run(bars, p):
     # entry + beOffset so the trade can no longer become a loss. 0 = off.
     beArm             = p.get("beArm", 0.0) or 0.0
     beOffset          = p.get("beOffset", 0.0) or 0.0
+    # Post-trail skip: after a trade closes via TRAIL, skip the next N entry signals
+    # (any direction) that the strategy would otherwise take, then resume. 0 = off.
+    skipAfterTrail  = p.get("skipAfterTrail", 0) or 0
+    # Block new entries during these CT hours (set of ints 0-23). Open-trade mgmt unaffected.
+    blockHoursCT    = p.get("blockHoursCT", None)
     lookback        = p.get("lookback", 10)
     slopeEntry      = p["slopeEntry"]
     angleEntry      = p.get("angleEntry", False)
@@ -121,6 +126,7 @@ def run(bars, p):
     thrdRevPending=False; thrdRevDir=0
     deepBestPrice=None; deepBlockDir=0; entryWasDeep=False; exitBestPrice=None
     deepLossBlockDir=0
+    trailSkipLeft=0   # entry signals still to skip after a TRAIL exit
 
     slopeBuf=[]; legSlope=None; legSlopeAngle=None
     trBuf=[]; atrVal=None; prevClose=None
@@ -236,11 +242,14 @@ def run(bars, p):
             legSlopeAngle = round(math.degrees(math.atan(legSlope/atrVal)),1)
 
         def close_trade(exit_price, reason):
-            nonlocal deepLossBlockDir, deepBlockDir, deepBestPrice, bigLossBlock, beArmed
+            nonlocal deepLossBlockDir, deepBlockDir, deepBestPrice, bigLossBlock, beArmed, trailSkipLeft
             beArmed=False
             pnl = (exit_price-entryPrice) if tradeDir==1 else (entryPrice-exit_price)
             wasLong = (tradeDir==1)
             trades.append((tradeDir, entryPrice, exit_price, pnl, reason, entryWasDeep, dt))
+            # post-trail skip: arm the counter so the next N would-be entries are skipped
+            if skipAfterTrail>0 and reason=="TRAIL":
+                trailSkipLeft = skipAfterTrail
             # pine posClosed bookkeeping: deep profit block / deep loss block
             if enableDeepBlock and entryWasDeep and pnl>0:
                 deepBlockDir = 1 if wasLong else -1
@@ -369,8 +378,10 @@ def run(bars, p):
 
         # ===== entry signals =====
         _calmOk = (calmSkipMult<=0.0) or (atrVal is not None and atrLong is not None and atrVal >= calmSkipMult*atrLong)
+        _hourBlocked = (blockHoursCT is not None and (ctmins//60) in blockHoursCT)
         canTrade = (not inTrade and cooldown==0 and not eodClose and not nyOpenBlock
-                    and not lnOpenBlock and not preNYBlock and not ethOpenBlock and legSlope is not None and _calmOk)
+                    and not lnOpenBlock and not preNYBlock and not ethOpenBlock and legSlope is not None
+                    and _calmOk and not _hourBlocked)
         bigEnough = (not enableBodyFilter) or (abs(c-o) >= minBodyPts)
         isDeepSignal = legSlope is not None and abs(legSlope) >= deepSlope
 
@@ -420,6 +431,12 @@ def run(bars, p):
         bearEntry = (canTrade and not breachActive and bigEnough and not inFractalDrought and _trigShort
                      and slExitDir!=-1 and not srBlock and (not inDeepBlock or isDeepSignal)
                      and not deepLossBlockShort and not vwapBlock and not bigBlk)
+
+        # Post-trail skip: consume a would-be entry signal (either direction) and suppress it.
+        # A skipped signal does NOT become a delayed entry either — it's fully dropped.
+        if trailSkipLeft>0 and (bullEntry or bearEntry):
+            trailSkipLeft -= 1
+            bullEntry=False; bearEntry=False
 
         # Delayed-entry interception: extreme slope while price is ABOVE the SMA -> don't
         # enter now; arm a delay and re-confirm the slope after delayBars bars.

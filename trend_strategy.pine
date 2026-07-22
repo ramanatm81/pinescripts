@@ -1,0 +1,177 @@
+//@version=6
+// =====================================================================================
+// TREND STRATEGY  (trades the live_trend.pine detector)
+//
+// Enter on a confirmed trend START, hold until the trend BREAKS. Same OLS-run detection as
+// live_trend.pine: adaptive-window scan (winMin..winMax), latch when a window's clean fit-
+// line run (|slope|*(N-1)) >= runMinPts AND R^2 >= minR2; ride the extreme; break on a big
+// pullback off it. Long on UP trends, short on DOWN trends -- each side independently toggled.
+//
+// N-FLOOR FILTER (the point of this file): only take trades whose WINNING window N is >= nFloor
+// (default 120). Backtest finding (5yr MNQ, 1pt slip): raising the N floor trades quantity for
+// quality -- LONG N>=120 = 206 trades, PF 1.54 vs 1.27 for all-N; big-N (>=180) entries are
+// LATE and lose, so this is a FLOOR not "biggest N". Short side is a net loser historically
+// (kept toggleable, default OFF). Exits are pullback-only (no SL -- SL cut the trailing tail
+// and hurt net in testing). All entries/exits are next-bar (no lookahead).
+// =====================================================================================
+strategy("Trend Strategy (N-floor)", overlay=true, max_labels_count=500, max_bars_back=2000,
+         default_qty_type=strategy.fixed, default_qty_value=1, calc_on_every_tick=false,
+         pyramiding=0, process_orders_on_close=false)
+
+//=============================
+// Inputs
+//=============================
+winMin     = input.int(30,  "Scan window MIN (bars)", minval=5,  maxval=1000, group="Trend detection")
+winMax     = input.int(240, "Scan window MAX (bars)", minval=5,  maxval=1000, group="Trend detection")
+winStep    = input.int(10,  "Scan step (bars)",       minval=1,  maxval=50,   group="Trend detection")
+runMinPts  = input.float(150.0, "Min run size to trigger a trend (pts)", minval=1.0, step=5.0, group="Trend detection")
+minR2      = input.float(0.75,  "Min R-squared (straightness)",          minval=0.1, maxval=1.0, step=0.05, group="Trend detection")
+pickBest   = input.bool(true,   "Detect on BEST-fitting window (else first qualifying)",         group="Trend detection")
+
+nFloor     = input.int(120, "N floor: only take trades whose winning window N >= this", minval=5, maxval=1000, group="N filter")
+
+pullbackPts= input.float(150.0, "Break: pullback pts off the extreme (exit)", minval=1.0, step=5.0, group="Trend break")
+reEntryFrac= input.float(0.7,   "Re-entry block: same-dir blocked until this fraction retraced", minval=0.0, maxval=1.0, step=0.05, group="Trend break")
+
+tradeLong  = input.bool(true,  "Take LONG trades (UP trends)",   group="Trade side")
+tradeShort = input.bool(false, "Take SHORT trades (DOWN trends)", group="Trade side")
+
+useSL      = input.bool(false, "Use hard stop loss (testing showed SL HURTS net — off by default)", group="Risk (optional)")
+slPts      = input.float(100.0,"Stop loss (pts from entry)", minval=1.0, step=5.0, group="Risk (optional)")
+
+//=============================
+// Numerically-stable OLS over the last Nw bars (centered on oldest bar to avoid float
+// cancellation on large prices). Returns [slope, r2].
+//=============================
+olsScan(int Nw) =>
+    float yRef = close[Nw - 1]
+    float sx  = 0.0
+    float sy  = 0.0
+    float sxx = 0.0
+    float syy = 0.0
+    float sxy = 0.0
+    for i = 0 to Nw - 1
+        x = float(Nw - 1 - i)
+        y = close[i] - yRef
+        sx  += x
+        sy  += y
+        sxx += x * x
+        syy += y * y
+        sxy += x * y
+    fN = float(Nw)
+    varX  = sxx - sx * sx / fN
+    varY  = syy - sy * sy / fN
+    covXY = sxy - sx * sy / fN
+    float slope = na
+    float r2    = na
+    if varX > 0 and varY > 0
+        slope := covXY / varX
+        r2    := (covXY * covXY) / (varX * varY)
+    [slope, r2]
+
+//=============================
+// Trend state machine (same as live_trend.pine; records the winning N)
+//=============================
+var int   tState   = 0        // 0 flat, 1 live
+var int   tDir     = 0        // +1 up, -1 down
+var int   tWinN    = na       // winning window N of the live trend
+var float tExtreme = na
+var float tStartPx = na
+var int   tLockDir = 0
+var float tLockExt = na
+var float tLockTrv = na
+
+// per-bar event flags
+bool trendStart = false
+bool trendBreak = false
+int  startDir   = 0
+int  startN     = na
+
+// clear same-direction re-entry lock on a genuine reversal
+if tLockDir != 0 and not na(tLockExt)
+    _need = reEntryFrac * tLockTrv
+    if tLockDir < 0 and high >= tLockExt + _need
+        tLockDir := 0
+    else if tLockDir > 0 and low <= tLockExt - _need
+        tLockDir := 0
+
+if tState == 0
+    float dS = na
+    float dR = na
+    int   dN = na
+    _wmax = math.min(winMax, 1990)
+    for Nw = winMin to _wmax by winStep
+        if Nw >= 3 and bar_index >= Nw - 1
+            [s, r2] = olsScan(Nw)
+            if not na(s) and math.abs(s) * float(Nw - 1) >= runMinPts and r2 >= minR2
+                d = s > 0 ? 1 : -1
+                if d != tLockDir and (na(dN) or r2 > dR)
+                    dS := s
+                    dR := r2
+                    dN := Nw
+    if not na(dN)
+        tState   := 1
+        tDir     := dS > 0 ? 1 : -1
+        tWinN    := dN
+        tStartPx := close[dN - 1]
+        tExtreme := tDir > 0 ? high : low
+        trendStart := true
+        startDir   := tDir
+        startN     := dN
+else
+    tExtreme := tDir > 0 ? math.max(tExtreme, high) : math.min(tExtreme, low)
+    _brokeUp = tDir > 0 and close < tExtreme - pullbackPts
+    _brokeDn = tDir < 0 and close > tExtreme + pullbackPts
+    if _brokeUp or _brokeDn
+        trendBreak := true
+        tLockDir := tDir
+        tLockExt := tExtreme
+        tLockTrv := math.max(math.abs(tExtreme - tStartPx), 1.0)
+        tState   := 0
+        tDir     := 0
+        tWinN    := na
+        tExtreme := na
+
+//=============================
+// Entries / exits (next bar, since calc_on_every_tick=false -> orders fill next bar open)
+//=============================
+// qualify the START by the N floor and the chosen side
+takeLong  = trendStart and startDir > 0 and startN >= nFloor and tradeLong
+takeShort = trendStart and startDir < 0 and startN >= nFloor and tradeShort
+
+if takeLong
+    strategy.entry("Long", strategy.long)
+if takeShort
+    strategy.entry("Short", strategy.short)
+
+// exit on the trend break (only closes if a position is open)
+if trendBreak
+    strategy.close("Long",  comment="break")
+    strategy.close("Short", comment="break")
+
+// optional hard SL (default off — SL hurt net in backtests)
+if useSL
+    strategy.exit("L-SL", from_entry="Long",  stop=strategy.position_avg_price - slPts)
+    strategy.exit("S-SL", from_entry="Short", stop=strategy.position_avg_price + slPts)
+
+//=============================
+// Visuals — mark qualifying starts + breaks
+//=============================
+plotshape(takeLong,  "long entry",  shape.triangleup,   location.belowbar, color=color.new(color.lime, 0), size=size.small, text="L")
+plotshape(takeShort, "short entry", shape.triangledown, location.abovebar, color=color.new(color.red,  0), size=size.small, text="S")
+plotshape(trendBreak and (strategy.position_size != 0 or strategy.position_size[1] != 0), "exit", shape.xcross, location.abovebar, color=color.new(color.yellow, 0), size=size.tiny, text="X")
+
+//=============================
+// Version label — bottom-right
+//=============================
+var table cityTable = table.new(position.bottom_right, 1, 1,
+     bgcolor = color.new(color.black, 20), border_width = 1, border_color = color.new(color.gray, 50))
+if barstate.islast
+    table.cell(cityTable, 0, 0, "Galway-Trend", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+
+//=============================
+// Diagnostics (data window)
+//=============================
+plot(tState == 1 ? 1 : 0, "live (1/0)",     color=na, display=display.data_window)
+plot(startN,              "start N (winning window)", color=na, display=display.data_window)
+plot(tState == 1 ? float(tWinN) : na, "live win N", color=na, display=display.data_window)

@@ -26,13 +26,16 @@ indicator("V Detector", overlay=true, max_labels_count=500)
 //=============================
 // Inputs
 //=============================
-vBars    = input.int(20,    "Window (bars) to test for a V / inverse-V", minval=4, maxval=200, group="V shape")
-legAtrMult = input.float(2.0, "Each leg must move >= this x ATR (volatility-relative)", minval=0.1, step=0.1, group="V shape")
+vBars    = input.int(60,    "Window (bars) to test for a V / inverse-V", minval=4, maxval=200, group="V shape")
+legAtrMult = input.float(2.5, "Each leg must move >= this x ATR (session-adaptive)", minval=0.1, step=0.1, group="V shape")
 legAtrLen  = input.int(14,   "ATR length for the leg threshold",         minval=1, maxval=200, group="V shape")
-legMinAbs  = input.float(8.0,"Floor: each leg must also be >= this many pts (avoids tiny noise)", minval=0.0, step=1.0, group="V shape")
+legMinAbs  = input.float(12.0,"Floor: each leg also >= this many pts (tiny, just kills noise)", minval=0.0, step=1.0, group="V shape")
 symMax   = input.float(3.0, "Leg symmetry: reject if legs differ by more than this ratio (V vs cliff)", minval=1.0, step=0.5, group="V shape")
+useGeom     = input.bool(true, "Geometry gate ON: each leg steep + both legs similar ANGLE. OFF = height-symmetry only (earlier behavior)", group="V geometry")
+minLegAngle = input.float(9.0, "Min leg angle (deg, ATR-normalized) — each leg must be at least this steep", minval=1.0, maxval=89.0, step=0.5, group="V geometry")
+maxAngleGap = input.float(6.0, "Max angle gap between the two legs (deg) — reject lopsided grind-then-cliff", minval=0.5, maxval=45.0, step=0.5, group="V geometry")
 useApex  = input.bool(true, "Require apex (extreme) near the middle",    group="V shape")
-apexTol  = input.float(0.30,"Apex tolerance (fraction of window from center, 0.3 = middle 60%)", minval=0.05, maxval=0.5, step=0.05, group="V shape")
+apexTol  = input.float(0.20,"Apex tolerance (fraction of window from center, 0.20 = middle 40%)", minval=0.05, maxval=0.5, step=0.05, group="V shape")
 
 markV    = input.bool(true, "Mark V (bullish reversal) below bar",  group="Display")
 markIV   = input.bool(true, "Mark inverse-V (bearish reversal) above bar", group="Display")
@@ -75,8 +78,29 @@ _hiNearMid = math.abs(_hiIdx - _center) <= apexTol * vBars
 _vSym  = math.min(_downLeg, _upLeg)   > 0 and (math.max(_downLeg, _upLeg)   / math.min(_downLeg, _upLeg))   <= symMax
 _ivSym = math.min(_upLeg2, _downLeg2) > 0 and (math.max(_upLeg2, _downLeg2) / math.min(_upLeg2, _downLeg2)) <= symMax
 
-isV  = _downLeg >= legReq and _upLeg   >= legReq and (not useApex or _loNearMid) and _vSym
-isIV = _upLeg2  >= legReq and _downLeg2 >= legReq and (not useApex or _hiNearMid) and _ivSym
+// GEOMETRY gate. Height-symmetry passes a lopsided shape (a gradual 46-bar rise + a steep
+// 13-bar fall have similar HEIGHTS but very different ANGLES). Measure each leg's ANGLE:
+//   bars in each leg = distance of apex from the two window edges
+//   slope = leg height / leg bars (pts/bar); angle = atan(slope / ATR) (ATR-normalizes so
+//   "steep" is scale-invariant, same convention as slope_strategy). A real V/^ needs BOTH
+//   legs steep (>= minLegAngle) AND close in angle (gap <= maxAngleGap).
+_atrGeom = _atr > 0 ? _atr : 1.0
+// V (apex = low): left leg = start->low over _loIdx bars; right leg = low->now over the rest
+_vLeftBars  = math.max(1.0, _loIdx)
+_vRightBars = math.max(1.0, float(vBars - 1) - _loIdx)
+_vLeftAng  = math.atan((_downLeg / _vLeftBars)  / _atrGeom) * 180.0 / math.pi
+_vRightAng = math.atan((_upLeg   / _vRightBars) / _atrGeom) * 180.0 / math.pi
+// inverse-V (apex = high): left leg = start->high over _hiIdx bars; right = high->now
+_ivLeftBars  = math.max(1.0, _hiIdx)
+_ivRightBars = math.max(1.0, float(vBars - 1) - _hiIdx)
+_ivLeftAng  = math.atan((_upLeg2   / _ivLeftBars)  / _atrGeom) * 180.0 / math.pi
+_ivRightAng = math.atan((_downLeg2 / _ivRightBars) / _atrGeom) * 180.0 / math.pi
+
+_vGeom  = not useGeom or (_vLeftAng  >= minLegAngle and _vRightAng  >= minLegAngle and math.abs(_vLeftAng  - _vRightAng)  <= maxAngleGap)
+_ivGeom = not useGeom or (_ivLeftAng >= minLegAngle and _ivRightAng >= minLegAngle and math.abs(_ivLeftAng - _ivRightAng) <= maxAngleGap)
+
+isV  = _downLeg >= legReq and _upLeg   >= legReq and (not useApex or _loNearMid) and _vSym  and _vGeom
+isIV = _upLeg2  >= legReq and _downLeg2 >= legReq and (not useApex or _hiNearMid) and _ivSym and _ivGeom
 
 // FIRE ONCE PER DISTINCT APEX. The SAME low/high slides through the window over many bars,
 // so a per-bar test (even the rising edge) marks one V several times -- and a 1-bar flicker
@@ -85,30 +109,53 @@ isIV = _upLeg2  >= legReq and _downLeg2 >= legReq and (not useApex or _hiNearMid
 // of vBars bars (a fresh window). Same for inverse-V highs. This gives exactly one mark per
 // distinct bottom/top regardless of how it slides or flickers.
 newApexPts = input.float(15.0, "New-apex separation: mark again only if the low/high moved this far (pts)", minval=0.0, step=1.0, group="V shape")
+// Cross-type lockout: after ANY mark (V or ^), block ALL new marks (both types) for
+// lockoutBars bars. Kills overlapping V-then-^ round-trips that share the same swing.
+useLockout  = input.bool(false, "Lockout: after any V/^, block ALL new marks for N bars (no overlaps)", group="V lockout")
+lockoutBars = input.int(60, "  Lockout length (bars, 60 = one window)", minval=1, maxval=500, group="V lockout")
 var float _lastVlow  = na
 var float _lastIVhigh = na
 var int   _vCool  = 0
 var int   _ivCool = 0
+var int   _lockCool = 0   // shared cross-type lockout counter
 _vCool  := _vCool  > 0 ? _vCool  - 1 : 0
 _ivCool := _ivCool > 0 ? _ivCool - 1 : 0
+_lockCool := _lockCool > 0 ? _lockCool - 1 : 0
 
-_vFresh  = na(_lastVlow)   or _winLow  <= _lastVlow  - newApexPts or _vCool  == 0
-_ivFresh = na(_lastIVhigh) or _winHigh >= _lastIVhigh + newApexPts or _ivCool == 0
+_notLocked = not useLockout or _lockCool == 0
+_vFresh  = (na(_lastVlow)   or _winLow  <= _lastVlow  - newApexPts or _vCool  == 0) and _notLocked
+_ivFresh = (na(_lastIVhigh) or _winHigh >= _lastIVhigh + newApexPts or _ivCool == 0) and _notLocked
 
 newV  = isV  and _vFresh
 newIV = isIV and _ivFresh
 if newV
     _lastVlow  := _winLow
     _vCool     := vBars
+    _lockCool  := lockoutBars
 if newIV
     _lastIVhigh := _winHigh
     _ivCool     := vBars
+    _lockCool   := lockoutBars
 
 //=============================
 // Visuals
 //=============================
 plotshape(markV  and newV,  "V (bullish reversal)",     shape.triangleup,   location.belowbar, color=color.new(color.lime, 0), size=size.small, text="V")
 plotshape(markIV and newIV, "inverse-V (bearish rev.)", shape.triangledown, location.abovebar, color=color.new(color.red,  0), size=size.small, text="^")
+
+// Mark the ACTUAL apex (the low of a V / high of a ^), not the fire bar. The apex sits
+// (vBars-1 - loIdx) bars back from the current bar; drop a label right on it.
+markApex = input.bool(true, "Mark the apex low/high itself (not just the fire bar)", group="Display")
+if markApex and newV
+    _apexBar = bar_index - int((vBars - 1) - _loIdx)
+    label.new(_apexBar, _winLow, "V\n" + str.tostring(_winLow, format.mintick), xloc=xloc.bar_index,
+              yloc=yloc.belowbar, color=color.new(color.lime, 0), textcolor=color.white,
+              style=label.style_label_up, size=size.small)
+if markApex and newIV
+    _apexBarH = bar_index - int((vBars - 1) - _hiIdx)
+    label.new(_apexBarH, _winHigh, "^\n" + str.tostring(_winHigh, format.mintick), xloc=xloc.bar_index,
+              yloc=yloc.abovebar, color=color.new(color.red, 0), textcolor=color.white,
+              style=label.style_label_down, size=size.small)
 
 // shade the window while a V/^ is active so you can see the shape it fit
 bgcolor(isV  ? color.new(color.green, 90) : na, title="V active")
@@ -122,6 +169,10 @@ plot(_upLeg,   "V up-leg (low->now)",      color=na, display=display.data_window
 plot(_downLeg2,"IV down-leg (high->now)",  color=na, display=display.data_window)
 plot(_upLeg2,  "IV up-leg (start->high)",  color=na, display=display.data_window)
 plot(legReq,   "leg req (ATR-based pts)",  color=na, display=display.data_window)
+plot(_vLeftAng,  "V left-leg angle",   color=na, display=display.data_window)
+plot(_vRightAng, "V right-leg angle",  color=na, display=display.data_window)
+plot(_ivLeftAng, "IV left-leg angle",  color=na, display=display.data_window)
+plot(_ivRightAng,"IV right-leg angle", color=na, display=display.data_window)
 plot(_loIdx,   "low idx (0=oldest)",       color=na, display=display.data_window)
 plot(_hiIdx,   "high idx (0=oldest)",      color=na, display=display.data_window)
 plotchar(isV,  "isV",  "", location.top, color=na, display=display.data_window)

@@ -58,26 +58,25 @@ rawDown = _loInTail and _dropInto >= legReq
 rawUp   = _hiInTail and _riseInto >= legReq
 
 //=============================
-// Fire once per distinct extreme (same de-dup idea as the V detector)
+// Fire ONCE per move, not every bar. "Apex in tail" is an ONGOING STATE (a live trend keeps
+// making fresh edge-extremes every bar), so a level-check flags continuously. Instead fire
+// only on the RISING EDGE -- the bar the state first turns ON -- then stay silent until it
+// turns OFF (apex leaves the tail: a pullback/pause forms) and turns ON again. One mark per
+// distinct down/up move. Optional cooldown blocks immediate re-arm inside the same trend.
 //=============================
-var float _lastLow  = na
-var float _lastHigh = na
-var int   _dnCool = 0
-var int   _upCool = 0
+rearmBars = input.int(20, "Min bars between marks of the same direction (re-arm gate)", minval=0, maxval=200, group="Apex tail")
+var int _dnCool = 0
+var int _upCool = 0
 _dnCool := _dnCool > 0 ? _dnCool - 1 : 0
 _upCool := _upCool > 0 ? _upCool - 1 : 0
 
-_dnFresh = na(_lastLow)  or _winLow  <= _lastLow  - newApexPts or _dnCool == 0
-_upFresh = na(_lastHigh) or _winHigh >= _lastHigh + newApexPts or _upCool == 0
-
-newDown = rawDown and _dnFresh
-newUp   = rawUp   and _upFresh
+// rising edge: state is true now but was NOT true on the previous bar, and re-arm elapsed
+newDown = rawDown and not rawDown[1] and _dnCool == 0
+newUp   = rawUp   and not rawUp[1]   and _upCool == 0
 if newDown
-    _lastLow := _winLow
-    _dnCool  := vBars
+    _dnCool := rearmBars
 if newUp
-    _lastHigh := _winHigh
-    _upCool   := vBars
+    _upCool := rearmBars
 
 //=============================
 // Visuals
