@@ -7,14 +7,15 @@ strategy("Slope Strategy", overlay=true, max_labels_count=500, max_bars_back=500
 //=============================
 lookback     = 10  // fixed rolling window for slope calculation
 slopeEntry   = input.float(2.5, "Slope threshold (entry trigger)",        minval=0.1, step=0.1)
-// --- Adverse-extension filter (the "1-min loser" killer) ---
-// Don't fade a move that has ALREADY run far. The entry rule sees slope but not how far price
-// already travelled, so it fades a fresh 8pt dip and an extended 40pt plunge identically — and
-// the extended ones are falling knives that keep going (the never-green losers: 76% of SL loss,
-// 60% of THRD loss). Gate: skip entry if price moved > extLimit pts INTO the fade over the last
-// extLook bars. 5yr backtest @1pt slip: net +21k -> +93k, win 59% -> 78%, 6/6 yrs; OOS (3wk)
-// +2.3k -> +5.1k, win 63% -> 87%. Both in-sample and OOS. Default ON.
-enableExtFilter = input.bool(true,  "Block fades of already-extended moves (falling-knife filter)", group="Adverse Extension")
+// --- Adverse-extension filter (EXPERIMENTAL, default OFF) ---
+// Idea: skip fades of moves that already ran far (falling knives) — block entry if price moved
+// > extLimit pts INTO the fade over the last extLook bars.
+// WARNING: the Python backtest port showed this strongly additive, but on LIVE TradingView it
+// CUTS PnL and removes winners. The port under-credits the trailing-stop tail, so the deep
+// fades this removes (which catch hard reversals and ride the trail to big wins) look like
+// losers in the port but are real winners in Pine. Do NOT trust the backtest numbers here.
+// Kept as an OFF-by-default toggle for live experimentation only.
+enableExtFilter = input.bool(false, "Block fades of already-extended moves (falling-knife filter)", group="Adverse Extension")
 extLimit        = input.float(20.0, "  Max pts price may have already moved into the fade", minval=1.0, step=1.0, group="Adverse Extension")
 extLook         = input.int(15,     "  Lookback bars for the extension measure", minval=1, maxval=60, group="Adverse Extension")
 slPts        = input.float(50.0,"Stop Loss (pts from entry) — fallback when SMA SL disabled", minval=0.5, step=0.5)
@@ -413,6 +414,7 @@ if strategy.position_size == 0 and (inTrade or tradeDir != 0)
 // Cooldown countdown
 //=============================
 if cooldown > 0 and not inTrade
+
     cooldown -= 1
 
 //=============================
