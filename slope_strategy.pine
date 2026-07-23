@@ -321,27 +321,6 @@ _atrForAngle = ta.atr(angleAtrLen)
 legSlopeAngle = (not na(legSlope) and not na(_atrForAngle) and _atrForAngle > 0) ? math.round(math.atan(legSlope / _atrForAngle) * 180.0 / math.pi, 1) : na
 
 //=============================
-// V / inverse-V detector over the previous N bars — computed ON THE FLY (manual loop over
-// bar history, NO ta.lowest/ta.linreg). Catches V, U (round bottom) and W (double bottom).
-// Inputs + output holders declared here; the actual point-calc LOOP runs later, ONLY on
-// entry bars (bullEntry/bearEntry) — not every bar. Display-only for now (data window).
-//=============================
-vLookback  = input.int(20,  "V-detect: bars to look back",                minval=4, maxval=200, group="V Detect")
-vLegAtrMlt = input.float(2.0,"V-detect: each leg >= this x ATR",          minval=0.1, step=0.1, group="V Detect")
-vLegFloor  = input.float(8.0,"V-detect: leg floor (pts)",                 minval=0.0, step=1.0, group="V Detect")
-vApexTol   = input.float(0.30,"V-detect: apex within this frac of center",minval=0.05, maxval=0.5, step=0.05, group="V Detect")
-vSymMax    = input.float(3.0,"V-detect: max leg asymmetry ratio",         minval=1.0, step=0.5, group="V Detect")
-
-// output holders (computed only at entry bars, below). na/false on non-entry bars.
-var bool  isVprev  = false
-var bool  isIVprev = false
-var float _vDown   = na
-var float _vUp     = na
-var float _vUp2    = na
-var float _vDown2  = na
-var float _vLegReq = na
-
-//=============================
 // Trade leg slope — OLS slope of close prices since entry bar
 //=============================
 tradeLegSlope := na
@@ -585,39 +564,6 @@ crossShort = crossOnset and crossThrust == -1 and not inTrade and cooldown == 0 
 // A cross entry pre-empts the normal fade entry on this bar
 bullEntry := bullEntry and not crossLong and not crossShort
 bearEntry := bearEntry and not crossLong and not crossShort
-
-// V/inverse-V point-calc — runs ONLY when an entry is firing (not every bar). Manual loop
-// over the last vLookback bars (no ta.*). Sets isVprev/isIVprev for the data window; reset
-// to false on non-entry bars so the flag reflects "was there a V/IV at THIS entry".
-isVprev  := false
-isIVprev := false
-if bullEntry or bearEntry
-    _vLegReq := math.max(vLegAtrMlt * _atrForAngle, vLegFloor)
-    _vLo = low
-    _vHi = high
-    _vLoOff = 0
-    _vHiOff = 0
-    for i = 1 to vLookback - 1
-        if low[i] < _vLo
-            _vLo := low[i]
-            _vLoOff := i
-        if high[i] > _vHi
-            _vHi := high[i]
-            _vHiOff := i
-    _vFirstClose = close[vLookback - 1]
-    _vLoIdx = float(vLookback - 1 - _vLoOff)
-    _vHiIdx = float(vLookback - 1 - _vHiOff)
-    _vCenter = float(vLookback - 1) / 2.0
-    _vLoMid = math.abs(_vLoIdx - _vCenter) <= vApexTol * vLookback
-    _vHiMid = math.abs(_vHiIdx - _vCenter) <= vApexTol * vLookback
-    _vDown := _vFirstClose - _vLo
-    _vUp   := close        - _vLo
-    _vUp2   := _vHi - _vFirstClose
-    _vDown2 := _vHi - close
-    _vSymOK  = math.min(_vDown, _vUp)   > 0 and (math.max(_vDown, _vUp)   / math.min(_vDown, _vUp))   <= vSymMax
-    _ivSymOK = math.min(_vUp2, _vDown2) > 0 and (math.max(_vUp2, _vDown2) / math.min(_vUp2, _vDown2)) <= vSymMax
-    isVprev  := (not na(_vLegReq)) and _vDown >= _vLegReq and _vUp   >= _vLegReq and _vLoMid and _vSymOK
-    isIVprev := (not na(_vLegReq)) and _vUp2  >= _vLegReq and _vDown2 >= _vLegReq and _vHiMid and _ivSymOK
 
 if bullEntry
     tp  = close + tpPts * tpMult
@@ -867,13 +813,6 @@ if posClosed
 //=============================
 plot(legSlope,                          "legSlope",      color=color.rgb(100,180,255), display=display.data_window)
 plot(legSlopeAngle,                     "legSlopeAngle", color=color.rgb(140,200,255), display=display.data_window)
-plot(isVprev  ? 1 : 0,                  "isVprev",       color=color.lime,             display=display.data_window)
-plot(isIVprev ? 1 : 0,                  "isIVprev",      color=color.red,              display=display.data_window)
-plot(_vDown,                            "V downLeg",     color=na,                     display=display.data_window)
-plot(_vUp,                              "V upLeg",       color=na,                     display=display.data_window)
-plot(_vUp2,                             "IV upLeg",      color=na,                     display=display.data_window)
-plot(_vDown2,                           "IV downLeg",    color=na,                     display=display.data_window)
-plot(_vLegReq,                          "V legReq",      color=na,                     display=display.data_window)
 plot(tradeLegSlope,                     "tradeLegSlope", color=color.rgb(255,200,80),  display=display.data_window)
 plot(activeSL,                          "activeSL",      color=color.rgb(255,160,80),  display=display.data_window)
 plot(smaVal,                            "SMA",           color=color.rgb(255,220,100), display=display.data_window)
@@ -891,18 +830,8 @@ plot(inSRZone    ? 1 : 0,                         "inSRZone",      color=color.r
 // Zone-escape distances (pts past the OUTER band, wick-side). na when price is inside.
 plot(_lowValid  and low  < _supOuter ? _supOuter - low  : na, "supEscapePts", color=color.aqua,    display=display.data_window)
 plot(_highValid and high > _resOuter ? high - _resOuter : na, "resEscapePts", color=color.fuchsia, display=display.data_window)
-plot(srZoneWidth,                                 "cfg_srZoneWidth",  color=color.gray,             display=display.data_window)
-plot(srLookback,                                  "cfg_srLookback",  color=color.gray,             display=display.data_window)
-plot(srHalfWidth,                                 "cfg_srHalfWidth", color=color.gray,             display=display.data_window)
-plot(enableSRFilter ? 1 : 0,                      "cfg_srEnabled",   color=color.gray,             display=display.data_window)
 plot(barsSinceFractal,                            "barsSinceFractal",color=color.rgb(255,165,0),   display=display.data_window)
 plot(inFractalDrought ? 1 : 0,                   "inDrought",       color=color.rgb(255,100,255), display=display.data_window)
-plot(slopeEntry,                                  "cfg_slopeEntry",  color=color.gray,             display=display.data_window)
-plot(activeCooldown,                              "cfg_cooldown",    color=color.gray,             display=display.data_window)
-plot(cooldownBarsRTH,                             "cfg_cooldownRTH", color=color.gray,             display=display.data_window)
-plot(enableSmaSL ? 1 : 0,                         "cfg_smaSL",       color=color.gray,             display=display.data_window)
-plot(trailTrigger,                                "cfg_trailTrigger",color=color.gray,             display=display.data_window)
-plot(trailDist,                                   "cfg_trailDist",   color=color.gray,             display=display.data_window)
 plot(slExitDir,                        "slExitDir",      color=color.rgb(255,100,100), display=display.data_window)
 plot(slBarrier,                          "slBarrier",    color=color.rgb(255,180,50),  display=display.data_window)
 plot(slEntryPrice,                       "slEntryPrice", color=color.rgb(255,80,80),   display=display.data_window)
