@@ -1,5 +1,5 @@
 //@version=6
-strategy("Slope Strategy — Geneva", overlay=true, max_labels_count=500, max_bars_back=5000,
+strategy("Slope Strategy", overlay=true, max_labels_count=500, max_bars_back=5000,
          default_qty_type=strategy.fixed, default_qty_value=1, calc_on_every_tick=false)
 
 //=============================
@@ -413,6 +413,7 @@ if strategy.position_size == 0 and (inTrade or tradeDir != 0)
 // Cooldown countdown
 //=============================
 if cooldown > 0 and not inTrade
+
     cooldown -= 1
 
 //=============================
@@ -854,7 +855,7 @@ var table statsTable = table.new(position.bottom_right, 2, 6,
      border_color = color.new(color.gray, 50))
 
 if barstate.islast
-    table.cell(statsTable, 0, 0, "Cork",               text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.cell(statsTable, 0, 0, "Geneva",             text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 1, 0, "SMA-SL|Trail|Barrier", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
     table.cell(statsTable, 0, 1, "No-Traction exits",text_color=color.white, text_size=size.small)
     table.cell(statsTable, 1, 1, str.tostring(noTractCount),
