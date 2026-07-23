@@ -7,6 +7,16 @@ strategy("Slope Strategy", overlay=true, max_labels_count=500, max_bars_back=500
 //=============================
 lookback     = 10  // fixed rolling window for slope calculation
 slopeEntry   = input.float(2.5, "Slope threshold (entry trigger)",        minval=0.1, step=0.1)
+// --- Adverse-extension filter (the "1-min loser" killer) ---
+// Don't fade a move that has ALREADY run far. The entry rule sees slope but not how far price
+// already travelled, so it fades a fresh 8pt dip and an extended 40pt plunge identically — and
+// the extended ones are falling knives that keep going (the never-green losers: 76% of SL loss,
+// 60% of THRD loss). Gate: skip entry if price moved > extLimit pts INTO the fade over the last
+// extLook bars. 5yr backtest @1pt slip: net +21k -> +93k, win 59% -> 78%, 6/6 yrs; OOS (3wk)
+// +2.3k -> +5.1k, win 63% -> 87%. Both in-sample and OOS. Default ON.
+enableExtFilter = input.bool(true,  "Block fades of already-extended moves (falling-knife filter)", group="Adverse Extension")
+extLimit        = input.float(20.0, "  Max pts price may have already moved into the fade", minval=1.0, step=1.0, group="Adverse Extension")
+extLook         = input.int(15,     "  Lookback bars for the extension measure", minval=1, maxval=60, group="Adverse Extension")
 slPts        = input.float(50.0,"Stop Loss (pts from entry) — fallback when SMA SL disabled", minval=0.5, step=0.5)
 enableSmaSL  = input.bool(true,  "Dynamic SL based on SMA",                                   group="SMA Stop Loss")
 smaPeriod    = input.int(9,      "SMA period",              minval=2,   maxval=500,            group="SMA Stop Loss")
@@ -556,8 +566,16 @@ if enableTExpHard and inTrade and not inCrossMom and strategy.position_size != 0
 canTrade  = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and not ethOpenBlock and not lateUSBlock and time >= startDate and time <= endDate and not na(legSlope)
 bigEnough = not enableBodyFilter or (math.abs(close - open) >= minBodyPts)
 
-bullEntry = canTrade and bigEnough and not inFractalDrought and legSlope < -slopeEntry and slExitDir != 1  and not srBlockLong  and not vwapZoneBlock
-bearEntry = canTrade and bigEnough and not inFractalDrought and legSlope >  slopeEntry and slExitDir != -1 and not srBlockShort and not vwapZoneBlock
+// Adverse extension over the last extLook bars, measured per side (no lookahead — uses only
+// close and close[extLook]). Long fades a down-move → extension = how far price FELL.
+// Short fades an up-move → extension = how far price ROSE.
+_extLong  = close[extLook] - close   // + when price fell into a long fade
+_extShort = close - close[extLook]   // + when price rose into a short fade
+extOkLong  = not enableExtFilter or na(close[extLook]) or _extLong  <= extLimit
+extOkShort = not enableExtFilter or na(close[extLook]) or _extShort <= extLimit
+
+bullEntry = canTrade and bigEnough and not inFractalDrought and legSlope < -slopeEntry and slExitDir != 1  and not srBlockLong  and not vwapZoneBlock and extOkLong
+bearEntry = canTrade and bigEnough and not inFractalDrought and legSlope >  slopeEntry and slExitDir != -1 and not srBlockShort and not vwapZoneBlock and extOkShort
 
 // Cross-momentum entry — fires on cross onset, in the thrust direction, OVERRIDING the fade
 // gates (S/R zone, VWAP, barrier). Session/time/date guards still apply; only fires when flat.
@@ -894,6 +912,11 @@ plot(vwapZoneBlock ? 1 : 0,              "vwapZoneBlock", color=color.aqua,     
 plot(pivotsCrossed ? 1 : 0,              "pivotsCrossed", color=color.purple,          display=display.data_window)  // 1 = resistance pivot < support pivot (thrust)
 plot(inCrossMom ? crossThrust : 0,       "crossMomDir",   color=color.purple,          display=display.data_window)  // +1/-1 when in a cross-momentum trade, else 0
 plot(enableCrossMom ? 1 : 0,             "cfg_crossMom",  color=color.gray,            display=display.data_window)
+// Adverse-extension monitor: the fade-direction extension over extLook bars. When |value| is
+// large and > extLimit, the entry is a falling-knife and the filter blocks it.
+plot(legSlope < 0 ? _extLong : (legSlope > 0 ? _extShort : na), "adverseExt", color=color.orange, display=display.data_window)
+plot(extLimit,                           "cfg_extLimit",  color=color.gray,            display=display.data_window)
+plot(enableExtFilter ? 1 : 0,            "cfg_extFilter", color=color.gray,            display=display.data_window)
 
 // No-traction stats table — bottom-right corner of chart
 var table statsTable = table.new(position.bottom_right, 2, 6,
