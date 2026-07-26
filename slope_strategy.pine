@@ -47,6 +47,8 @@ droughtBlockBars   = input.int(50,    "Drought threshold (bars without any fract
 blockNYOpen  = input.bool(false,"Block NY open first 30 min (14:30–15:00 London / 08:30–09:00 CT)",       group="Session Filter")
 blockLNOpen  = input.bool(true, "Block LN open first 30 min (08:00–08:30 London / 02:00–02:30 CT)",       group="Session Filter")
 blockPreNY   = input.bool(true, "Block CME pre-open + NY open (13:30–15:00 London / 07:30–09:00 CT)",     group="Session Filter")
+blockLunch   = input.bool(true, "Block lunch entries (10:00–13:00 CT / 16:00–19:00 London)",             group="Session Filter")
+blockAsia    = input.bool(false,"Block overnight entries (22:00–05:00 CT)",                               group="Session Filter")
 startDate    = input.time(timestamp("2000-01-01T00:00:00-06:00"), "Backtest Start", group="Backtest")
 endDate      = input.time(timestamp("2099-12-31T23:59:00-06:00"), "Backtest End",   group="Backtest")
 
@@ -66,6 +68,8 @@ nyOpenBlock  = blockNYOpen and ctMins >= 510 and ctMins < 540
 lnOpenBlock  = blockLNOpen and ctMins >= 120 and ctMins < 150
 preNYBlock   = blockPreNY  and ctMins >= 450 and ctMins < 540   // 13:30–15:00 London / 07:30–09:00 CT
 ethOpenBlock = ctMins >= 1020 and ctMins < 1050                 // 23:00–23:30 London / 17:00–17:30 CT hardcoded
+lunchBlock   = blockLunch and ctMins >= 600 and ctMins < 780    // 10:00–13:00 CT / 16:00–19:00 London
+asiaBlock    = blockAsia  and (ctMins >= 1320 or ctMins < 300)  // 22:00–05:00 CT
 
 // SMA for dynamic SL
 smaVal  = ta.sma(close, smaPeriod)
@@ -314,7 +318,7 @@ else
 //=============================
 // Session block exits — close any open trade on entering a blocked window
 //=============================
-inAnyBlock = nyOpenBlock or lnOpenBlock or preNYBlock or ethOpenBlock
+inAnyBlock = nyOpenBlock or lnOpenBlock or preNYBlock or ethOpenBlock or lunchBlock or asiaBlock
 if inAnyBlock and inTrade and strategy.position_size != 0
     strategy.cancel("Exit-Long")
     strategy.cancel("Exit-Short")
@@ -507,7 +511,7 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
 // legSlope < -slopeEntry → downtrend → enter LONG (mean reversion / reversal)
 // legSlope >  slopeEntry → uptrend   → enter SHORT
 //=============================
-canTrade  = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and not ethOpenBlock and time >= startDate and time <= endDate and not na(legSlope)
+canTrade  = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and not ethOpenBlock and not lunchBlock and not asiaBlock and time >= startDate and time <= endDate and not na(legSlope)
 bigEnough = not enableBodyFilter or (math.abs(close - open) >= minBodyPts)
 
 bullEntry = canTrade and bigEnough and not inFractalDrought and legSlope < -slopeEntry and slExitDir != 1  and not srBlockLong  and not vwapZoneBlock

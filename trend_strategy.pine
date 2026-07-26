@@ -7,12 +7,18 @@
 // line run (|slope|*(N-1)) >= runMinPts AND R^2 >= minR2; ride the extreme; break on a big
 // pullback off it. Long on UP trends, short on DOWN trends -- each side independently toggled.
 //
-// N-FLOOR FILTER (the point of this file): only take trades whose WINNING window N is >= nFloor
-// (default 120). Backtest finding (5yr MNQ, 1pt slip): raising the N floor trades quantity for
-// quality -- LONG N>=120 = 206 trades, PF 1.54 vs 1.27 for all-N; big-N (>=180) entries are
-// LATE and lose, so this is a FLOOR not "biggest N". Short side is a net loser historically
-// (kept toggleable, default OFF). Exits are pullback-only (no SL -- SL cut the trailing tail
-// and hurt net in testing). All entries/exits are next-bar (no lookahead).
+// Detection is IDENTICAL to live_trend.pine -- the strategy trades EVERY trend the detector
+// shows (no N-floor filter; the old nFloor was tuned at winMin=30 and removed). Each side is
+// independently toggleable; short side is historically a net loser (default OFF). Exits are
+// pullback-only (no SL -- SL cut the trailing tail and hurt net in testing). All entries/exits
+// are next-bar (no lookahead). (start N / live win N are still exported as diagnostics only.)
+//
+// SYNCED FROM live_trend.pine (all default OFF so base behavior is unchanged):
+//   - pullbackFrac : dynamic pullback = max(pullbackPts, travel*frac). Far-travelled runners
+//     get more room. Sweep-validated fat-tail-safe. ~0.5 recommended.
+//   - confirmMins/confirmAdvPts : cancel a false latch that reverses >= confirmAdvPts within
+//     confirmMins bars of the dot; a cancel CLOSES the open trade (false-start exit). Keep
+//     confirmAdvPts >= 40 (30 clips runners). cancelCool blocks same-dir re-latch after a cancel.
 // =====================================================================================
 strategy("Trend Strategy (N-floor)", overlay=true, max_labels_count=500, max_bars_back=2000,
          default_qty_type=strategy.fixed, default_qty_value=1, calc_on_every_tick=false,
@@ -21,20 +27,110 @@ strategy("Trend Strategy (N-floor)", overlay=true, max_labels_count=500, max_bar
 //=============================
 // Inputs
 //=============================
-winMin     = input.int(30,  "Scan window MIN (bars)", minval=5,  maxval=1000, group="Trend detection")
+winMin     = input.int(60,  "Scan window MIN (bars)", minval=5,  maxval=1000, group="Trend detection")
 winMax     = input.int(240, "Scan window MAX (bars)", minval=5,  maxval=1000, group="Trend detection")
 winStep    = input.int(10,  "Scan step (bars)",       minval=1,  maxval=50,   group="Trend detection")
+// MAX winning-N cap: skip entries whose winning window N > maxWinN. Big-N latches (>130) span a
+// multi-hour move that can be net-down while the recent hour bounces up -- producing shorts on
+// "long-looking" price (e.g. 23-Jul 09:18, N=170 short). OOS: the winN>130 tail nets ~0 (wins and
+// losses cancel), so capping it removes ~18 trades for the same net = higher PF, less exposure.
+// It does NOT boost net (the tail is a wash, not a loser). 0 = off (no cap).
+maxWinN    = input.int(130, "Max winning-N for entry (0=off; skip staler big-window latches)", minval=0, maxval=1000, group="Trend detection")
 runMinPts  = input.float(150.0, "Min run size to trigger a trend (pts)", minval=1.0, step=5.0, group="Trend detection")
 minR2      = input.float(0.75,  "Min R-squared (straightness)",          minval=0.1, maxval=1.0, step=0.05, group="Trend detection")
+srcPrice   = input.source(close, "Price source for the fit",             group="Trend detection")
 pickBest   = input.bool(true,   "Detect on BEST-fitting window (else first qualifying)",         group="Trend detection")
 
-nFloor     = input.int(120, "N floor: only take trades whose winning window N >= this", minval=5, maxval=1000, group="N filter")
-
 pullbackPts= input.float(150.0, "Break: pullback pts off the extreme (exit)", minval=1.0, step=5.0, group="Trend break")
+// DYNAMIC pullback (synced from live_trend.pine): a far-travelled trend deserves more room
+// before we call a reversal. Effective break = max(pullbackPts, travel*pullbackFrac), travel
+// = |extreme - startPx|, ratchets up only. 0 = off. ~0.5 lets runners run. Validated fat-tail-safe.
+pullbackFrac= input.float(0.5,  "Break: dynamic pullback = max(base, travel x this). 0=off, ~0.5 lets runners run", minval=0.0, maxval=2.0, step=0.05, group="Trend break")
 reEntryFrac= input.float(0.7,   "Re-entry block: same-dir blocked until this fraction retraced", minval=0.0, maxval=1.0, step=0.05, group="Trend break")
+// CONFIRMATION WINDOW (synced from live_trend.pine): a latch on the tail of a dying move
+// reverses immediately. Within confirmMins bars of the START, if price moves >= confirmAdvPts
+// AGAINST the trend (from the dot close), CANCEL the latch -- and CLOSE any trade entered on it
+// (false start). A cancel does NOT arm the lock but blocks same-dir re-latch for cancelCool bars.
+// 0 mins = off. Sweep-validated: keep confirmAdvPts >= 40 (30 clips runners).
+confirmMins  = input.int(0,     "Confirm window (bars): cancel latch if it reverses within this (0=off)", minval=0, maxval=120, group="Trend break")
+confirmAdvPts= input.float(40.0,"Confirm: cancel if adverse move >= this (pts) inside the window", minval=1.0, step=5.0, group="Trend break")
+// UN-TIMED ADVERSE STOP (replaces the confirm window; synced from live_trend.pine). Cancel the
+// latch / exit the trade if price moves >= adverseStopPts AGAINST the dot close at ANY age --
+// catches SLOW failures the fixed confirm window misses (crosses 40pt only at bar 31+). Active
+// only UNTIL the trend PROVES itself (favorable travel from dot >= provenPts); after that only
+// the pullback break exits, so a deep runner's normal pullback won't trigger it. 0 = OFF.
+adverseStopPts= input.float(40.0,"Adverse stop: cancel if it moves this far vs the dot (0=off, un-timed)", minval=0.0, step=5.0, group="Trend break")
+provenPts     = input.float(80.0,"Adverse stop turns OFF once trend travels this far in its favor", minval=1.0, step=5.0, group="Trend break")
+cancelCool   = input.int(10,    "Cooldown bars blocking same-dir re-latch after a cancel", minval=0, maxval=200, group="Trend break")
+
+// DOUBLE-BOTTOM / DOUBLE-TOP EXIT (strategy only). Once a trade is PROVEN, remember the trend's
+// running extreme (low for a short / high for a long). If price has moved AWAY from it by
+// dbAwayPts and then RETESTS the extreme (comes back within dbTolPts without breaking through),
+// the move is stalling at a double bottom/top -> CLOSE the trade to lock the profit. Breaking
+// through = a new extreme (trend continuing) -> the reference just updates, no exit. No time
+// gate -- the away-then-back requirement (dbAwayPts) alone defines the double bottom.
+enableDblEx  = input.bool(true, "Enable double-bottom/top exit (proven trades)", group="Double-bottom exit")
+dbAwayPts    = input.float(30.0,"Price must move this far AWAY from the extreme first (pts)", minval=1.0, step=5.0, group="Double-bottom exit")
+dbTolPts     = input.float(8.0, "Retest tolerance: within this many pts of the extreme = a touch", minval=0.5, step=0.5, group="Double-bottom exit")
+// DOUBLE-BOTTOM RIDE (instead of exiting): when a double bottom forms, DON'T close -- switch to a
+// HOLD mode to capture the continuation. Two protective levels: (1) INVALIDATION = the pullback
+// high/low (the middle peak of the W, between the two extremes). If price crosses back through it,
+// the pattern failed -> exit with the locked gain. (2) TRAIL = if price breaks through the extreme
+// and continues, trail dbRideTrail pts behind each NEW extreme. Rides the second leg while the
+// double-bottom gain is protected. When ON it REPLACES the plain double-bottom close.
+enableDblRide = input.bool(false, "Ride the double-bottom (hold + trail) instead of closing", group="Double-bottom exit")
+dbRideTrail   = input.float(20.0, "Ride: trail this many pts behind each new extreme", minval=1.0, step=5.0, group="Double-bottom exit")
+// STALE-TRADE CANCEL: a trade that goes nowhere (never reaches staleFavPts in its favor) within
+// staleBars of entry is dead -- cancel it. Complements the adverse stop (which cancels on movement
+// AGAINST); this cancels on NO movement. Only checked at exactly staleBars age, once. 0 = off.
+enableStale  = input.bool(false, "Cancel a stale trade (no progress in staleBars)", group="Stale cancel")
+staleBars    = input.int(20,   "Stale window (bars from entry)", minval=1, maxval=200, group="Stale cancel")
+staleFavPts  = input.float(30.0,"Min favorable travel by staleBars, else cancel (pts)", minval=1.0, step=5.0, group="Stale cancel")
+
+// REJECTION-WICK EXIT (strategy only). A single bar that stabs the extreme then rejects hard --
+// a long lower wick at the low (short) / upper wick at the high (long) -- is a capitulation /
+// exhaustion signal that the trend is done. When a PROVEN trade is currently in PROFIT, if a bar
+// makes a fresh extreme AND its rejection wick (how far it closed back off that extreme) >=
+// wickPts, exit to lock the gain -- no need to wait for a double-bottom retest or the wide
+// pullback break. (Fri 10-Jul 10:01: the low bar rejected ~20pt off its 29716 low as the trend
+// topped a +99 short.) Only fires proven + profitable, so it never clips un-proven noise.
+enableWickExit  = input.bool(false, "Enable rejection-wick EXIT (exit proven+profit trade on a rejection)", group="Rejection-wick exit")
+wickPts      = input.float(20.0,"EXIT: rejection wick >= this (pts) at the extreme = exit proven+profit trade", minval=1.0, step=5.0, group="Rejection-wick exit")
+// WICK REVERSAL ENTRY: when FLAT, a huge rejection wick is a capitulation/V-reversal -> enter the
+// bounce direction. Long LOWER wick (price stabbed a low and slammed back up) -> LONG; long UPPER
+// wick -> SHORT. Separate, larger threshold so only big rejections fire (Fri 10-Jul 15:33 had an
+// 88pt lower wick). Only fires when no position is open. Now its OWN toggle (independent of exit).
+enableWickEntry = input.bool(false, "Enable wick reversal ENTRY (enter on a big wick when flat)", group="Rejection-wick exit")
+wickEntryPts = input.float(60.0,"ENTRY: rejection wick >= this (pts) when FLAT = reversal entry", minval=1.0, step=5.0, group="Rejection-wick exit")
+// Body filter: a big wick on a DOJI (tiny body) is indecision, not a rejection -- price stabbed
+// and returned to the open (e.g. 08-Jul 15:27: 1pt body on a 71pt range, then fell 170pt). Require
+// a SOLID body: |close-open| >= wickBodyFrac of the bar range, AND the candle closes in the bounce
+// direction (green for a wick-long, red for a wick-short) to confirm buyers/sellers took over.
+wickBodyFrac = input.float(0.30,"ENTRY: min body as fraction of bar range (rejects dojis)", minval=0.0, maxval=1.0, step=0.05, group="Rejection-wick exit")
 
 tradeLong  = input.bool(true,  "Take LONG trades (UP trends)",   group="Trade side")
-tradeShort = input.bool(false, "Take SHORT trades (DOWN trends)", group="Trade side")
+tradeShort = input.bool(true,  "Take SHORT trades (DOWN trends)", group="Trade side")
+
+// SESSION FILTER: block NEW entries during the loss-heavy overnight/morning window. OOS (Jul,
+// reconstructed from the indicator's own signals) shows ASIA 23-07 (22% win, net -158) and
+// LDN_AM 07-12 (27% win, -100) are net-negative, while LDN/US midday and US_PM carry the
+// profit -- the SAME overnight-loses pattern the slope strategy showed on 5yr. Blocks entries
+// when the session-filter tz hour is in [blockStartHr, blockEndHr). Default OFF -- confirm on a
+// TradingView Strategy Tester run before enabling. Open positions are unaffected.
+enableSessFilt = input.bool(true, "Session filter: block entries in the losing overnight window", group="Session filter")
+blockStartHr = input.int(23, "Block entries from this hour (session-filter tz)", minval=0, maxval=23, group="Session filter")
+blockEndHr   = input.int(12, "...until this hour (exclusive)",                    minval=0, maxval=23, group="Session filter")
+sessTz       = input.string("Europe/London", "Session-filter timezone", options=["Europe/London","America/New_York","America/Chicago","UTC"], group="Session filter")
+
+// EOD flatten (day-trading): flatten any open position at eodHour:eodMin (session close) and
+// block NEW entries until reopenHour:reopenMin. NO re-entry -- once flattened, only a fresh
+// trend START opens a new position. Times are in eodTz. Default OFF.
+enableEod  = input.bool(true,  "EOD: flatten position at session close", group="EOD (day trading)")
+eodHour    = input.int(21, "EOD flatten hour (chart/London time)",   minval=0, maxval=23, group="EOD (day trading)")
+eodMin     = input.int(0,  "EOD flatten minute",                     minval=0, maxval=59, group="EOD (day trading)")
+reopenHour = input.int(23, "Re-open hour (resume NEW entries)",      minval=0, maxval=23, group="EOD (day trading)")
+reopenMin  = input.int(0,  "Re-open minute",                         minval=0, maxval=59, group="EOD (day trading)")
+eodTz      = input.string("Europe/London", "EOD timezone", options=["Europe/London","America/New_York","America/Chicago","UTC"], group="EOD (day trading)")
 
 useSL      = input.bool(false, "Use hard stop loss (testing showed SL HURTS net — off by default)", group="Risk (optional)")
 slPts      = input.float(100.0,"Stop loss (pts from entry)", minval=1.0, step=5.0, group="Risk (optional)")
@@ -44,7 +140,7 @@ slPts      = input.float(100.0,"Stop loss (pts from entry)", minval=1.0, step=5.
 // cancellation on large prices). Returns [slope, r2].
 //=============================
 olsScan(int Nw) =>
-    float yRef = close[Nw - 1]
+    float yRef = srcPrice[Nw - 1]
     float sx  = 0.0
     float sy  = 0.0
     float sxx = 0.0
@@ -52,7 +148,7 @@ olsScan(int Nw) =>
     float sxy = 0.0
     for i = 0 to Nw - 1
         x = float(Nw - 1 - i)
-        y = close[i] - yRef
+        y = srcPrice[i] - yRef
         sx  += x
         sy  += y
         sxx += x * x
@@ -80,10 +176,25 @@ var float tStartPx = na
 var int   tLockDir = 0
 var float tLockExt = na
 var float tLockTrv = na
+// confirmation-window state (synced from live_trend.pine)
+var int   tDotBar   = na       // bar_index where the current trend latched
+var float tDotPrice = na       // close at the latch bar (adverse move measured from here)
+var int   tCancelDir = 0       // direction just cancelled (blocks same-dir re-latch during cooldown)
+var int   tCancelBar = na      // bar_index of the cancel
+// double-bottom/top exit state
+var bool  tMovedAway = false   // has price moved >= dbAwayPts away from the extreme since it was set
+var float tPullExt   = na      // pullback extreme (the W's middle peak/trough) since the extreme
+var bool  tRiding    = false   // in double-bottom RIDE hold-mode (holding for the continuation)
+bool  dblExit = false          // this bar produced a double-bottom/top exit
+bool  wickExit = false         // this bar produced a rejection-wick exit
+bool  rideStart = false        // this bar a double-bottom formed and RIDE mode began (marker)
+int   exitDir = 0              // direction of the trade the dbl/wick exit closed (marker placement)
+int   rideDir = 0              // direction of the trade that started riding (marker placement)
 
 // per-bar event flags
 bool trendStart = false
 bool trendBreak = false
+bool trendCancel = false       // a latch was cancelled THIS bar (false start)
 int  startDir   = 0
 int  startN     = na
 
@@ -95,21 +206,51 @@ if tLockDir != 0 and not na(tLockExt)
     else if tLockDir > 0 and low <= tLockExt - _need
         tLockDir := 0
 
+// expire the post-cancel cooldown once cancelCool bars have passed
+if tCancelDir != 0 and (na(tCancelBar) or bar_index - tCancelBar >= cancelCool)
+    tCancelDir := 0
+
+//=============================
+// EOD: end the live trend at session close and block new detection in the [flatten,reopen)
+// window -- IDENTICAL to live_trend.pine so detection matches. A real session TIME GAP
+// (weekend/holiday/early close) also ends the trend, so nothing carries over a closed session;
+// next session a continuing move re-detects as a FRESH trend (new start), which the strategy
+// can then trade. eodFlatEdge (the flatten/end bar) is reused in the Entries/exits section.
+//=============================
+_nowMin  = hour(time, eodTz) * 60 + minute(time, eodTz)
+_flatMin = eodHour * 60 + eodMin
+_openMin = reopenHour * 60 + reopenMin
+_inWin   = _flatMin <= _openMin ? (_nowMin >= _flatMin and _nowMin < _openMin) : (_nowMin >= _flatMin or _nowMin < _openMin)
+eodClosed = enableEod and _inWin
+_windowEdge = eodClosed and not eodClosed[1]
+_gapEdge    = enableEod and (time - time[1]) / 60000.0 > 60   // >60min gap = session break
+eodFlatEdge = _windowEdge or _gapEdge
+
+// end the live detection trend at the EOD edge (no lock) so it re-detects fresh next session
+if eodFlatEdge and tState == 1
+    trendBreak := true
+    tState   := 0
+    tDir     := 0
+    tWinN    := na
+    tExtreme := na
+    tRiding  := false
+
 if tState == 0
     float dS = na
     float dR = na
     int   dN = na
-    _wmax = math.min(winMax, 1990)
+    _wmax = math.min(winMax, 4990)
     for Nw = winMin to _wmax by winStep
         if Nw >= 3 and bar_index >= Nw - 1
             [s, r2] = olsScan(Nw)
             if not na(s) and math.abs(s) * float(Nw - 1) >= runMinPts and r2 >= minR2
                 d = s > 0 ? 1 : -1
-                if d != tLockDir and (na(dN) or r2 > dR)
+                // block re-detecting a still-locked direction OR a same-dir re-latch in cooldown
+                if d != tLockDir and d != tCancelDir and (na(dN) or (pickBest and r2 > dR))
                     dS := s
                     dR := r2
                     dN := Nw
-    if not na(dN)
+    if not na(dN) and not eodClosed
         tState   := 1
         tDir     := dS > 0 ? 1 : -1
         tWinN    := dN
@@ -118,11 +259,94 @@ if tState == 0
         trendStart := true
         startDir   := tDir
         startN     := dN
+        tDotBar    := bar_index
+        tDotPrice  := close
+        tMovedAway := false
+        tRiding    := false
+        tPullExt   := na
 else
+    _prevExt = tExtreme
     tExtreme := tDir > 0 ? math.max(tExtreme, high) : math.min(tExtreme, low)
-    _brokeUp = tDir > 0 and close < tExtreme - pullbackPts
-    _brokeDn = tDir < 0 and close > tExtreme + pullbackPts
-    if _brokeUp or _brokeDn
+    // double-bottom/top exit: when the trend makes a NEW extreme, reset the moved-away flag (a
+    // break through the level = trend continuing, not a double bottom). Then track whether price
+    // has moved dbAwayPts off the extreme; a later return within dbTolPts on a PROVEN trade is a
+    // double bottom/top -> exit. No time gate.
+    _newExtreme = tDir > 0 ? (tExtreme > _prevExt) : (tExtreme < _prevExt)
+    if _newExtreme
+        tMovedAway := false
+        tPullExt   := na       // new extreme -> reset the pullback tracker (a fresh W starts)
+    // track the pullback extreme (the W's middle peak/trough): for a LONG (extreme=high) the
+    // pullback is the LOWEST low since the extreme; for a SHORT (extreme=low) it's the HIGHEST high.
+    // This middle level is the double-bottom RIDE invalidation.
+    tPullExt := na(tPullExt) ? (tDir > 0 ? low : high) : (tDir > 0 ? math.min(tPullExt, low) : math.max(tPullExt, high))
+    // has price pulled AWAY from the extreme by dbAwayPts? (short: how far the high sits above the
+    // low extreme; long: how far the low sits below the high extreme)
+    _offExt = tDir > 0 ? (tExtreme - low) : (high - tExtreme)
+    if _offExt >= dbAwayPts
+        tMovedAway := true
+    // retest gap: how close THIS bar's approach edge is to the extreme, WITHOUT breaking through.
+    // short -> bar low above the extreme low; long -> bar high below the extreme high.
+    _retestGap = tDir > 0 ? (tExtreme - high) : (low - tExtreme)   // >=0 means not broken through
+    // confirmation window: cancel a false latch that reverses right after the dot (>=1 bar old,
+    // within confirmMins). A cancel drops the trend (no lock) but arms the cooldown; the trade
+    // exit is handled in the Entries/exits section via trendCancel.
+    _age     = bar_index - tDotBar
+    _adverse = tDir > 0 ? (tDotPrice - low) : (high - tDotPrice)
+    _confirmCancel = confirmMins > 0 and _age >= 1 and _age <= confirmMins and _adverse >= confirmAdvPts
+    // un-timed adverse stop: fire at ANY age until the trend proves itself (favorable travel
+    // from the dot >= provenPts); after that the pullback break is the only exit.
+    _favTravel = tDir > 0 ? (tExtreme - tDotPrice) : (tDotPrice - tExtreme)
+    _proven    = _favTravel >= provenPts
+    _adverseStop = adverseStopPts > 0 and _age >= 1 and not _proven and _adverse >= adverseStopPts
+    // stale cancel: at exactly staleBars age, if the trade isn't at least staleFavPts in favor RIGHT
+    // NOW (current close vs the dot, not the best-ever extreme), it's going nowhere -> cancel. Using
+    // the current price (not the peak) means a trade that briefly poked favorable then reversed back
+    // to/above entry is correctly caught (e.g. 12-Jul 23:45 short: +18 low early, then back above
+    // entry by age 10 -> now-favorable <= 0 -> cancel).
+    _favNow = tDir > 0 ? (close - tDotPrice) : (tDotPrice - close)
+    _staleCancel = enableStale and _age == staleBars and _favNow < staleFavPts
+    _cancel  = _confirmCancel or _adverseStop or _staleCancel
+    // double-bottom/top exit: proven trade, price moved away (dbAwayPts) then RETESTED the extreme
+    // (within dbTolPts, not broken through) -> stalling at a double bottom/top, close to lock
+    // profit. Must NOT be a new-extreme bar -- a retest comes BACK to the extreme, it doesn't make
+    // it (a new low/high is the trend continuing, not a double bottom).
+    _dblDetected = enableDblEx and _proven and tMovedAway and not _newExtreme and _retestGap >= 0 and _retestGap <= dbTolPts
+    // DOUBLE-BOTTOM RIDE: when enabled, a detected double bottom does NOT exit -- it switches to
+    // HOLD mode to capture the continuation. While riding: exit if price crosses back through the
+    // pullback extreme tPullExt (the W's middle level -> pattern failed), OR if a dbRideTrail-pt
+    // pullback off the CURRENT extreme is hit (the continuation reversed). If ride is OFF, the
+    // double bottom closes immediately as before.
+    if enableDblRide and _dblDetected and not tRiding
+        tRiding := true
+        rideStart := true
+        rideDir   := tDir
+    _rideInvalid = tRiding and (tDir > 0 ? (close < tPullExt) : (close > tPullExt))
+    _rideTrail   = tRiding and (tDir > 0 ? (close < tExtreme - dbRideTrail) : (close > tExtreme + dbRideTrail))
+    dblExit := enableDblRide ? (tRiding and (_rideInvalid or _rideTrail)) : _dblDetected
+    // rejection-wick exit: a bar that stabs a FRESH extreme then closes hard back off it (wick >=
+    // wickPts) is capitulation. Only when proven AND currently in profit. wick = how far this bar
+    // closed back from the extreme it made (short: close - low; long: high - close).
+    _wick    = tDir > 0 ? (high - close) : (close - low)
+    _inProfit = tDir > 0 ? (close > tDotPrice) : (close < tDotPrice)
+    wickExit := enableWickExit and _proven and _inProfit and _newExtreme and _wick >= wickPts
+    if dblExit or wickExit
+        exitDir := tDir
+    // dynamic pullback: far-travelled runner needs a proportionally bigger reversal to break
+    _travel  = math.abs(tExtreme - tStartPx)
+    _effPb   = math.max(pullbackPts, _travel * pullbackFrac)
+    _brokeUp = tDir > 0 and close < tExtreme - _effPb
+    _brokeDn = tDir < 0 and close > tExtreme + _effPb
+    if _cancel
+        trendCancel := true
+        tCancelDir  := tDir
+        tCancelBar  := bar_index
+        tState   := 0
+        tDir     := 0
+        tWinN    := na
+        tExtreme := na
+        tRiding  := false
+    else if _brokeUp or _brokeDn or dblExit or wickExit
+        // trendBreak also covers the double-bottom/top and rejection-wick exits (trend end); lock.
         trendBreak := true
         tLockDir := tDir
         tLockExt := tExtreme
@@ -131,23 +355,84 @@ else
         tDir     := 0
         tWinN    := na
         tExtreme := na
+        tRiding  := false
 
+//=============================
+// EOD flatten window (day trading). "Closed" = the [flatten, reopen) window in eodTz: hold flat
 //=============================
 // Entries / exits (next bar, since calc_on_every_tick=false -> orders fill next bar open)
 //=============================
-// qualify the START by the N floor and the chosen side
-takeLong  = trendStart and startDir > 0 and startN >= nFloor and tradeLong
-takeShort = trendStart and startDir < 0 and startN >= nFloor and tradeShort
+// take EVERY detected trend on the chosen side (no N-floor; identical to the detector).
+// Entries fire ONLY on a fresh trend START. At EOD the trend itself ENDS (fires trendBreak
+// above), so a move that spans the close is NOT carried over -- next session it re-detects as a
+// brand-new trend with a fresh start, which is the only thing that opens a new position.
+// session filter: is this bar inside the blocked overnight window? handles wrap (23 -> 12).
+_sh = hour(time, sessTz)
+_blocked = enableSessFilt and (blockStartHr <= blockEndHr ? (_sh >= blockStartHr and _sh < blockEndHr) : (_sh >= blockStartHr or _sh < blockEndHr))
+_winNok = maxWinN <= 0 or (not na(startN) and startN <= maxWinN)
+takeLong  = trendStart and startDir > 0 and tradeLong and not eodClosed and not _blocked and _winNok
+takeShort = trendStart and startDir < 0 and tradeShort and not eodClosed and not _blocked and _winNok
 
-if takeLong
+// WICK REVERSAL ENTRY: only when FLAT (no position). A long LOWER wick = bullish rejection ->
+// long; a long UPPER wick = bearish rejection -> short. Respects side toggles, EOD, session block.
+_loWick = math.min(open, close) - low
+_hiWick = high - math.max(open, close)
+_flat   = strategy.position_size == 0
+// solid-body gate: reject dojis (body must be >= wickBodyFrac of the bar range) and require the
+// candle to close the bounce way (green for long, red for short).
+_barRange = high - low
+_body     = math.abs(close - open)
+_solidBody = _barRange > 0 and (_body / _barRange) >= wickBodyFrac
+wickLong  = enableWickEntry and _flat and tradeLong  and not eodClosed and not _blocked and _loWick >= wickEntryPts and _solidBody and close > open
+wickShort = enableWickEntry and _flat and tradeShort and not eodClosed and not _blocked and _hiWick >= wickEntryPts and _solidBody and close < open
+
+if takeLong or wickLong
     strategy.entry("Long", strategy.long)
-if takeShort
+if takeShort or wickShort
     strategy.entry("Short", strategy.short)
 
-// exit on the trend break (only closes if a position is open)
-if trendBreak
+// A WICK ENTRY must flow through the SAME exit machinery (adverse-stop, confirm-cancel, double-
+// bottom, dynamic-pullback break) as a trend trade -- otherwise it has no exit and rides the move
+// unprotected. So synthesize a trend state for it, matching normal-trend semantics: direction =
+// the wick's bounce side; dot price = this bar's close (adverse-stop reference); extreme = the
+// FAVORABLE extreme so far (high for a long / low for a short), same as a real latch. Only when
+// the OLS scan did NOT already latch a real trend this bar -- a real latch takes precedence.
+if (wickLong or wickShort) and tState == 0
+    tState   := 1
+    tDir     := wickLong ? 1 : -1
+    tWinN    := na
+    tStartPx := close
+    tExtreme := wickLong ? high : low
+    startDir := tDir
+    startN   := na
+    tDotBar  := bar_index
+    tDotPrice := close
+    tMovedAway := false
+    tRiding  := false
+    tPullExt := na
+
+// exit on the trend break (only closes if a position is open). The double-bottom and rejection-
+// wick exits ride the same trendBreak but get their own comments for the trade list.
+if wickExit
+    strategy.close("Long",  comment="wick")
+    strategy.close("Short", comment="wick")
+else if dblExit
+    strategy.close("Long",  comment="dbl-top")
+    strategy.close("Short", comment="dbl-bot")
+else if trendBreak
     strategy.close("Long",  comment="break")
     strategy.close("Short", comment="break")
+
+// exit on a confirmation-window CANCEL (the entry was a false start that reversed immediately)
+if trendCancel
+    strategy.close("Long",  comment="cancel")
+    strategy.close("Short", comment="cancel")
+
+// EOD FLATTEN safety net: the EOD trend-end above already fires trendBreak (which closes the
+// position), but this guarantees flat at the close even if no trend was live. No re-entry.
+if eodFlatEdge and strategy.position_size != 0
+    strategy.close("Long",  comment="eod")
+    strategy.close("Short", comment="eod")
 
 // optional hard SL (default off — SL hurt net in backtests)
 if useSL
@@ -159,7 +444,30 @@ if useSL
 //=============================
 plotshape(takeLong,  "long entry",  shape.triangleup,   location.belowbar, color=color.new(color.lime, 0), size=size.small, text="L")
 plotshape(takeShort, "short entry", shape.triangledown, location.abovebar, color=color.new(color.red,  0), size=size.small, text="S")
-plotshape(trendBreak and (strategy.position_size != 0 or strategy.position_size[1] != 0), "exit", shape.xcross, location.abovebar, color=color.new(color.yellow, 0), size=size.tiny, text="X")
+// wick reversal entries (distinct markers so they're separable in the export)
+plotshape(wickLong,  "wick long entry",  shape.triangleup,   location.belowbar, color=color.new(color.teal, 0),   size=size.small, text="WL")
+plotshape(wickShort, "wick short entry", shape.triangledown, location.abovebar, color=color.new(color.maroon, 0), size=size.small, text="WS")
+// a position was actually OPEN on the exit bar (fills are next-bar, so position is still open on
+// the signal bar). Guards against orphan markers from trends whose ENTRY was blocked (session
+// filter / trade-side off / EOD) -- the detection event fires but there's no trade to exit.
+_hadPos = strategy.position_size != 0 or strategy.position_size[1] != 0
+// BREAK exit (pullback) and CANCEL exit (confirm-window / adverse-stop) are SEPARATE markers and
+// export columns so analysis can tell them apart (they used to share one yellow X).
+plotshape(trendBreak and not dblExit and not wickExit and _hadPos, "break exit",  shape.xcross, location.abovebar, color=color.new(color.yellow, 0), size=size.tiny, text="X")
+plotshape(trendCancel and _hadPos,                "cancel exit", shape.xcross, location.abovebar, color=color.new(color.orange, 0), size=size.tiny, text="C")
+// RIDE-START marker: small aqua circle where the double bottom formed and ride mode began (ride
+// ON only). Marks the ACTUAL double bottom -- the ride-exit diamond below appears later.
+plotshape(rideStart and rideDir < 0, "dbl bottom (ride start)", shape.circle, location.belowbar, color=color.new(color.aqua, 30), size=size.tiny, text="db")
+plotshape(rideStart and rideDir > 0, "dbl top (ride start)",    shape.circle, location.abovebar, color=color.new(color.aqua, 30), size=size.tiny, text="dt")
+// double-bottom/top EXIT diamond, at the retested extreme (ride OFF) or the EXTENDED ride exit
+// (ride ON). Blue when ride ON (extended exit), aqua when ride OFF (plain dbl exit) -- so you can
+// tell an extended ride-exit from a plain double-bottom close.
+_dblCol = enableDblRide ? color.blue : color.aqua
+plotshape(dblExit and _hadPos and exitDir < 0, "dbl bottom exit", shape.diamond, location.belowbar, color=color.new(_dblCol, 0), size=size.small, text="DB")
+plotshape(dblExit and _hadPos and exitDir > 0, "dbl top exit",    shape.diamond, location.abovebar, color=color.new(_dblCol, 0), size=size.small, text="DT")
+// rejection-wick exit marker: fuchsia flag at the extreme side.
+plotshape(wickExit and _hadPos and exitDir < 0, "wick exit (short)", shape.flag, location.belowbar, color=color.new(color.fuchsia, 0), size=size.small, text="W")
+plotshape(wickExit and _hadPos and exitDir > 0, "wick exit (long)",  shape.flag, location.abovebar, color=color.new(color.fuchsia, 0), size=size.small, text="W")
 
 //=============================
 // Version label — bottom-right
@@ -168,6 +476,45 @@ var table cityTable = table.new(position.bottom_right, 1, 1,
      bgcolor = color.new(color.black, 20), border_width = 1, border_color = color.new(color.gray, 50))
 if barstate.islast
     table.cell(cityTable, 0, 0, "Galway-Trend", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+
+//=============================
+// PARAM columns -- actual input values every bar so any export SELF-DOCUMENTS its settings.
+//=============================
+plot(winMin,        "P_winMin",       color=na, display=display.data_window)
+plot(winMax,        "P_winMax",       color=na, display=display.data_window)
+plot(maxWinN,       "P_maxWinN",      color=na, display=display.data_window)
+plot(runMinPts,     "P_runMinPts",    color=na, display=display.data_window)
+plot(minR2,         "P_minR2",        color=na, display=display.data_window)
+plot(pullbackPts,   "P_pullbackPts",  color=na, display=display.data_window)
+plot(pullbackFrac,  "P_pullbackFrac", color=na, display=display.data_window)
+plot(reEntryFrac,   "P_reEntryFrac",  color=na, display=display.data_window)
+plot(confirmMins,   "P_confirmMins",  color=na, display=display.data_window)
+plot(confirmAdvPts, "P_confirmAdvPts",color=na, display=display.data_window)
+plot(adverseStopPts,"P_adverseStopPts",color=na, display=display.data_window)
+plot(provenPts,     "P_provenPts",    color=na, display=display.data_window)
+plot(enableDblEx ? 1 : 0, "P_enableDblEx", color=na, display=display.data_window)
+plot(dbAwayPts,     "P_dbAwayPts",    color=na, display=display.data_window)
+plot(dbTolPts,      "P_dbTolPts",     color=na, display=display.data_window)
+plot(enableDblRide ? 1 : 0, "P_enableDblRide", color=na, display=display.data_window)
+plot(dbRideTrail,   "P_dbRideTrail",  color=na, display=display.data_window)
+plot(tRiding ? 1 : 0, "riding (1/0)", color=na, display=display.data_window)
+plot(enableStale ? 1 : 0, "P_enableStale", color=na, display=display.data_window)
+plot(staleBars,     "P_staleBars",    color=na, display=display.data_window)
+plot(staleFavPts,   "P_staleFavPts",  color=na, display=display.data_window)
+plot(enableWickExit ? 1 : 0,  "P_enableWickExit",  color=na, display=display.data_window)
+plot(enableWickEntry ? 1 : 0, "P_enableWickEntry", color=na, display=display.data_window)
+plot(wickPts,       "P_wickPts",      color=na, display=display.data_window)
+plot(wickEntryPts,  "P_wickEntryPts", color=na, display=display.data_window)
+plot(wickBodyFrac,  "P_wickBodyFrac", color=na, display=display.data_window)
+plot(cancelCool,    "P_cancelCool",   color=na, display=display.data_window)
+plot(enableEod ? 1 : 0, "P_enableEod",color=na, display=display.data_window)
+plot(eodHour,       "P_eodHour",      color=na, display=display.data_window)
+plot(reopenHour,    "P_reopenHour",   color=na, display=display.data_window)
+plot(tradeLong ? 1 : 0,  "P_tradeLong",  color=na, display=display.data_window)
+plot(tradeShort ? 1 : 0, "P_tradeShort", color=na, display=display.data_window)
+plot(enableSessFilt ? 1 : 0, "P_enableSessFilt", color=na, display=display.data_window)
+plot(blockStartHr,  "P_blockStartHr", color=na, display=display.data_window)
+plot(blockEndHr,    "P_blockEndHr",   color=na, display=display.data_window)
 
 //=============================
 // Diagnostics (data window)
