@@ -1,0 +1,344 @@
+//@version=6
+// =====================================================================================
+// SLOPE-TOUCH FADE  (detector, no trades)
+//
+// PREMISE: a clean, far-travelled trend that runs INTO an S/R level and THEN REVERSES is
+// exhausted -- fade it. But a trend running into S/R often just keeps going, so a touch alone
+// is premature. The triangle marks the trend's END, confirmed by a pullback, NOT the touch.
+// Combines two pieces we already built:
+//   * S/R pivots from slope_analysis.pine  -- fractal pivot high/low (we touch the LINE)
+//   * OLS run measure from live_trend.pine -- size of the run into the level (fixed window)
+//
+// FLOW (per side, independent):
+//   1) ARM  : a qualifying run (|slope|*(N-1) >= runMinPts, R^2 >= minR2) TOUCHES the S/R line
+//             (high >= resistance pivot / low <= support pivot). Start tracking the extreme.
+//   2) TRACK: while armed the trend is LIVE -- no signal. Price keeps pushing, the extreme just
+//             extends (highest high for a short-arm / lowest low for a long-arm).
+//   3) FIRE  : price retraces pullbackPts (default 70) off that extreme -> the trend is confirmed
+//             OVER. Drop the triangle HERE, at the confirmation bar. Return to FLAT. ONE per trend.
+//
+// This is live_trend.pine's break concept (a trend ends only on a real pullback off its extreme,
+// never at the extreme on a fit metric), gated by an S/R-LINE touch to arm.
+//
+// WHY THIS FIXES THE CLUSTERING: the old build fired the instant price touched the level, so a
+// trend grinding along S/R for 60+ bars fired 60+ times ("lots of red"). Now the touch only ARMS;
+// while price grinds the trend is just LIVE (one armed state, no repeat fires), and exactly one
+// triangle prints when it finally reverses pullbackPts. (An earlier FLATTEN gate and a per-bar
+// band+cooldown were both tried and removed -- see git history.)
+//
+// WHY FIXED WINDOW: the old multi-window scan re-picked a different best window every bar (N
+//   walked 210->90->220), so the run measure jittered and a transient steep sub-window mis-fired
+//   (the 20:30 case). A fixed window makes the run measure smooth and monotone.
+//
+// Pure detector -- eyeball the dots first, no strategy.* calls.
+// =====================================================================================
+indicator("Slope-Touch Fade (no trades)", overlay=true, max_labels_count=500, max_bars_back=5000)
+
+//=============================
+// Inputs -- S/R (from slope_analysis)
+//=============================
+srHalfWidth  = input.int(10,     "Fractal half-width (bars each side, 10=21-bar pivot)", minval=1, maxval=20, group="S/R")
+srZoneWidth  = input.float(25.0, "Zone width (pts) for the drawn band only (touch uses the LINE)", minval=1.0, step=0.5, group="S/R")
+srLookback   = input.int(0,      "Pivot lookback (bars, 0=all)",                         minval=0, maxval=500, group="S/R")
+showSRZones  = input.bool(true,  "Draw S/R zones",                                       group="S/R")
+
+//=============================
+// Inputs -- OLS trend measure (from live_trend)
+//
+// FIXED single window (no multi-window scan). The scan version re-picked a DIFFERENT best
+// window every bar (N walked 210->90->220->240 within a few bars); each window has a different
+// slope, so the run-size measurement jittered and a transient steep sub-window fired signals on
+// a one-bar re-fit blip (the 20:30 false long). A fixed window makes the run measure smooth and
+// monotone, so a threshold cross means something stable happened, not a re-fit artifact.
+//=============================
+winLen     = input.int(150, "OLS window length (bars, FIXED)", minval=10, maxval=1000, group="Trend measure")
+// NOTE: a FIXED window averages over more bars than the old scan's short steep sub-windows, so
+// the same run number is HARDER to reach here -- 130 on a 150-bar fit is a big, clean move. 100
+// is a reasonable floor; raise it to be more selective, lower it if too few signals fire.
+runMinPts  = input.float(100.0, "Min run size to qualify the trend (pts, fit-line net move)", minval=1.0, step=5.0, group="Trend measure")
+minR2      = input.float(0.75,  "Min R-squared (straightness; 1 = perfect line)", minval=0.1, maxval=1.0, step=0.05, group="Trend measure")
+srcPrice   = input.source(close, "Price source for the fit", group="Trend measure")
+
+//=============================
+// Inputs -- pullback confirmation (the trend-END trigger)
+//=============================
+// The triangle no longer fires when price TOUCHES the level -- a trend running into S/R often
+// just keeps going, so a touch is premature. Instead: when a qualifying run touches the S/R LINE
+// we ARM a trend and track its extreme. The trend stays live (no signal) as long as price keeps
+// pushing. We fire the triangle ONLY once price has PULLED BACK pullbackPts off that extreme --
+// that is when the trend is confirmed over. One triangle per trend, at the confirmation bar.
+pullbackPts = input.float(70.0, "Pullback off the extreme that ENDS the trend & fires the dot (pts)", minval=1.0, step=5.0, group="Pullback confirm")
+markLong   = input.bool(true, "Plot LONG fade triangle (down-trend into support, confirmed by pullback)",  group="Display")
+markShort  = input.bool(true, "Plot SHORT fade triangle (up-trend into resistance, confirmed by pullback)", group="Display")
+markArm    = input.bool(true, "Plot ARM dot (where the trend arms = S/R-line touch)", group="Display")
+// ARM-dot size scales with the RUN SIZE (pts) at the arm -- bigger trend into S/R = bigger glowing
+// dot. Pine sizes are constant-only, so we bucket into 3 tiers by these run boundaries. Defaults
+// sit just above the qualifying floor (~130): <armMidPts = small, up to armBigPts = normal, above
+// = large. Raise/lower to re-scale what counts as a "big" trend dot.
+armMidPts  = input.float(180.0, "Arm dot: run below this = SMALL dot (pts)",  minval=1.0, step=10.0, group="Display")
+armBigPts  = input.float(260.0, "Arm dot: run above this = LARGE dot (pts)",  minval=1.0, step=10.0, group="Display")
+
+//=============================
+// OLS helper over the last N bars (manual, dynamic N). Numerically stable: center y on the
+// oldest sample so large prices (~29500) don't destroy variance precision (live_trend's fix).
+// Returns [slope (pts/bar, signed), r2]. run = |slope|*(N-1).
+//=============================
+olsScan(int N) =>
+    float yRef = srcPrice[N - 1]
+    float sx  = 0.0
+    float sy  = 0.0
+    float sxx = 0.0
+    float syy = 0.0
+    float sxy = 0.0
+    for i = 0 to N - 1
+        x = float(N - 1 - i)          // current bar -> x=N-1, oldest -> x=0
+        y = srcPrice[i] - yRef
+        sx  += x
+        sy  += y
+        sxx += x * x
+        syy += y * y
+        sxy += x * y
+    fN    = float(N)
+    varX  = sxx - sx * sx / fN
+    varY  = syy - sy * sy / fN
+    covXY = sxy - sx * sy / fN
+    float slope = na
+    float r2    = na
+    if varX > 0 and varY > 0
+        slope := covXY / varX
+        r2    := (covXY * covXY) / (varX * varY)
+    [slope, r2]
+
+//=============================
+// FIXED-window OLS measure. One window (winLen). No scan, no per-bar N-flip. The run size
+// evolves smoothly bar to bar, so a threshold cross reflects real price movement, not a re-fit.
+//=============================
+float bestSlope = na
+float bestR2    = na
+if bar_index >= winLen - 1
+    [s, r2] = olsScan(winLen)
+    bestSlope := s
+    bestR2    := r2
+float bestRun = na(bestSlope) ? na : math.abs(bestSlope) * float(winLen - 1)
+
+// qualified = clean enough AND big enough (in the fixed window)
+bool  qualified  = not na(bestSlope) and not na(bestR2) and bestR2 >= minR2 and not na(bestRun) and bestRun >= runMinPts
+int   runDir     = not qualified ? 0 : (bestSlope > 0 ? 1 : -1)   // +1 up-run, -1 down-run
+bool  hasDownRun = qualified and runDir < 0
+bool  hasUpRun   = qualified and runDir > 0
+
+//=============================
+// S/R fractal pivots (from slope_analysis) + ±zone touch bands
+//=============================
+fractalHighVal = ta.pivothigh(high, srHalfWidth, srHalfWidth)
+fractalLowVal  = ta.pivotlow(low,  srHalfWidth, srHalfWidth)
+
+var float lastFractalHigh    = na
+var float lastFractalLow     = na
+var int   lastFractalHighBar = na
+var int   lastFractalLowBar  = na
+
+if not na(fractalHighVal)
+    lastFractalHigh    := fractalHighVal
+    lastFractalHighBar := bar_index - srHalfWidth
+if not na(fractalLowVal)
+    lastFractalLow     := fractalLowVal
+    lastFractalLowBar  := bar_index - srHalfWidth
+
+_highAge   = na(lastFractalHighBar) ? na : bar_index - lastFractalHighBar
+_lowAge    = na(lastFractalLowBar)  ? na : bar_index - lastFractalLowBar
+_highValid = not na(lastFractalHigh) and (srLookback == 0 or (not na(_highAge) and _highAge <= srLookback))
+_lowValid  = not na(lastFractalLow)  and (srLookback == 0 or (not na(_lowAge)  and _lowAge  <= srLookback))
+
+supportLvl    = _lowValid  ? lastFractalLow  : na
+resistanceLvl = _highValid ? lastFractalHigh : na
+
+// LINE TOUCH (the wick reaches the pivot line) -- but only against a pivot price has NOT already
+// broken past. A fractal pivot is confirmed srHalfWidth bars LATE, so during an up-move the
+// "resistance" line still points at an OLDER, lower high that price has already exceeded; arming
+// against that stale line put the short dot ~20pts ABOVE resistance (15 Jul 01:29: high 29920.5 vs
+// a 29900 line price had traded above for minutes). Fix: a TOUCH requires the wick to reach the
+// line AND the bar to still be closing at/below it (within breakTol) -- i.e. price tagged the level
+// but did NOT close through it. If the close is clearly beyond the pivot, that level is BROKEN, not
+// being tested, so it no longer counts as resistance/support to fade.
+breakTol = input.float(5.0, "Break tolerance: touch is void if close is beyond the line by more than this (pts)", minval=0.0, step=0.5, group="S/R")
+bool touchResLine  = not na(resistanceLvl) and high >= resistanceLvl and close <= resistanceLvl + breakTol
+bool touchSuppLine = not na(supportLvl)    and low  <= supportLvl    and close >= supportLvl    - breakTol
+
+//=============================
+// TREND STATE MACHINE (arm on touch -> track the extreme -> fire on pullback -> LOCK)
+//
+//   FLAT  : no armed trend on this side.
+//   ARMED : a qualifying run touched the S/R line. We now TRACK the extreme (highest high while
+//           short-armed / lowest low while long-armed). The trend is still LIVE -- no signal --
+//           for as long as price keeps pushing; the extreme just extends.
+//   FIRE  : price has retraced pullbackPts off that extreme. The trend is confirmed OVER; drop the
+//           triangle HERE (the confirmation bar), then LOCK the side.
+//   LOCK  : after a fire we REMEMBER the fired extreme and BLOCK a new same-direction arm until
+//           price makes a genuinely NEW extreme past it (a fresh down-leg below the fired low for
+//           longs / above the fired high for shorts). Without this, the SAME continuous trend re-
+//           arms one bar after firing -- the run is still qualifying and still on the line -- and
+//           fires a SECOND triangle 20 bars later (07 Jul: fired 06:32, re-armed 06:33, fired
+//           again 06:54, all one move). live_trend.pine's re-entry lock; this is what enforces
+//           ONE triangle per trend.
+//=============================
+var bool  shortArmed = false   // an up-trend into resistance is live, watching for the pullback down
+var float shortExtreme = na    // highest high reached since the short arm
+var bool  longArmed  = false   // a down-trend into support is live, watching for the pullback up
+var float longExtreme = na     // lowest low reached since the long arm
+var float longLockLow  = na    // after a long fires: block re-arm until low < this (new down-leg)
+var float shortLockHigh = na   // after a short fires: block re-arm until high > this (new up-leg)
+
+bool shortSig = false
+bool longSig  = false
+bool shortArm = false          // true only on the bar the short side ARMS (for the arm dot)
+bool longArm  = false          // true only on the bar the long side ARMS
+
+// clear each side's lock once price has made a genuinely new extreme past the fired one
+if not na(shortLockHigh) and high > shortLockHigh
+    shortLockHigh := na
+if not na(longLockLow) and low < longLockLow
+    longLockLow := na
+
+// ---- SHORT side: up-run touched resistance ----
+if not shortArmed
+    // arm when a qualifying UP-run first tags the resistance line -- but NOT while locked
+    if hasUpRun and touchResLine and na(shortLockHigh)
+        shortArmed   := true
+        shortExtreme := high
+        shortArm     := true
+else
+    // live up-trend: extend the high, fire only on a pullbackPts drop off it
+    shortExtreme := math.max(shortExtreme, high)
+    if close <= shortExtreme - pullbackPts
+        shortSig     := true          // trend confirmed over -> fire the down-triangle now
+        shortLockHigh := shortExtreme // lock: no new short until price exceeds this high
+        shortArmed   := false
+        shortExtreme := na
+
+// ---- LONG side: down-run touched support ----
+if not longArmed
+    if hasDownRun and touchSuppLine and na(longLockLow)
+        longArmed   := true
+        longExtreme := low
+        longArm     := true
+else
+    longExtreme := math.min(longExtreme, low)
+    if close >= longExtreme + pullbackPts
+        longSig     := true           // trend confirmed over -> fire the up-triangle now
+        longLockLow := longExtreme    // lock: no new long until price drops below this low
+        longArmed   := false
+        longExtreme := na
+
+// pullback distance travelled off the extreme this bar (diagnostics)
+float shortPullback = shortArmed and not na(shortExtreme) ? shortExtreme - close : na
+float longPullback  = longArmed  and not na(longExtreme)  ? close - longExtreme  : na
+
+//=============================
+// S/R drawings -- pivot lines + shaded ±zone bands (from slope_analysis)
+//=============================
+_lineH = (showSRZones and _highValid) ? lastFractalHigh : na
+_lineL = (showSRZones and _lowValid)  ? lastFractalLow  : na
+_pHiTop = plot(na(_lineH) ? na : _lineH + srZoneWidth, "srHi zone top", color=na, display=display.all)
+_pHiBot = plot(na(_lineH) ? na : _lineH - srZoneWidth, "srHi zone bot", color=na, display=display.all)
+_pLoTop = plot(na(_lineL) ? na : _lineL + srZoneWidth, "srLo zone top", color=na, display=display.all)
+_pLoBot = plot(na(_lineL) ? na : _lineL - srZoneWidth, "srLo zone bot", color=na, display=display.all)
+plot(_lineH, "srHi pivot (resistance)", color=na(_lineH) ? na : color.new(color.red, 0),   linewidth=1, display=display.all)
+plot(_lineL, "srLo pivot (support)",    color=na(_lineL) ? na : color.new(color.green, 0), linewidth=1, display=display.all)
+fill(_pHiTop, _pHiBot, color=na(_lineH) ? na : color.new(color.red, 88),   title="srHi band")
+fill(_pLoTop, _pLoBot, color=na(_lineL) ? na : color.new(color.green, 88), title="srLo band")
+
+//=============================
+// Signal markers
+//=============================
+// ARM dot = where the trend arms (a qualifying run touches the S/R line). This is the START of a
+// tracked trend; the triangle later marks its pullback-confirmed END.
+//   GLOW  : stack translucent halo rings behind a bright opaque core (Pine has no real glow).
+//   SIZE  : scales with the RUN SIZE at the arm (bigger trend into S/R = bigger dot). Pine sizes
+//           are constant-only, so we route each arm to one of 3 tiers via bestRun on the arm bar.
+// bestRun on the arm bar IS this arm's run (longArm/shortArm are true only on the arm bar).
+bool armSmall = not na(bestRun) and bestRun <  armMidPts
+bool armMid   = not na(bestRun) and bestRun >= armMidPts and bestRun < armBigPts
+bool armBig   = not na(bestRun) and bestRun >= armBigPts
+
+// ARM dot color = the TREND DIRECTION being tracked (what price is doing NOW), not the eventual
+// trade. LONG side tracks a FALLING trend into support -> RED arm (price dropping). SHORT side
+// tracks a RISING trend into resistance -> GREEN arm (price rising). The triangles keep the TRADE
+// color (green=long, red=short), so arm and triangle differ by design.
+
+// LONG arm = falling trend into support -> RED, below the bar. Core tiny/small/normal per tier.
+plotshape(markArm and longArm and armSmall, "LONG arm S halo", shape.circle, location.belowbar, color=color.new(color.red, 75), size=size.small)
+plotshape(markArm and longArm and armSmall, "LONG arm S",      shape.circle, location.belowbar, color=color.new(color.red, 0),  size=size.tiny)
+plotshape(markArm and longArm and armMid,   "LONG arm M halo", shape.circle, location.belowbar, color=color.new(color.red, 75), size=size.normal)
+plotshape(markArm and longArm and armMid,   "LONG arm M",      shape.circle, location.belowbar, color=color.new(color.red, 0),  size=size.small)
+plotshape(markArm and longArm and armBig,   "LONG arm L halo", shape.circle, location.belowbar, color=color.new(color.red, 75), size=size.large)
+plotshape(markArm and longArm and armBig,   "LONG arm L",      shape.circle, location.belowbar, color=color.new(color.red, 0),  size=size.normal)
+
+// SHORT arm = rising trend into resistance -> GREEN, above the bar.
+plotshape(markArm and shortArm and armSmall, "SHORT arm S halo", shape.circle, location.abovebar, color=color.new(color.lime, 75), size=size.small)
+plotshape(markArm and shortArm and armSmall, "SHORT arm S",      shape.circle, location.abovebar, color=color.new(color.lime, 0),  size=size.tiny)
+plotshape(markArm and shortArm and armMid,   "SHORT arm M halo", shape.circle, location.abovebar, color=color.new(color.lime, 75), size=size.normal)
+plotshape(markArm and shortArm and armMid,   "SHORT arm M",      shape.circle, location.abovebar, color=color.new(color.lime, 0),  size=size.small)
+plotshape(markArm and shortArm and armBig,   "SHORT arm L halo", shape.circle, location.abovebar, color=color.new(color.lime, 75), size=size.large)
+plotshape(markArm and shortArm and armBig,   "SHORT arm L",      shape.circle, location.abovebar, color=color.new(color.lime, 0),  size=size.normal)
+
+// Triangle = trend END confirmed by pullback. LONG = down-trend into support reversed up;
+// SHORT = up-trend into resistance reversed down. Fired at the pullback-confirmation bar.
+plotshape(markLong  and longSig,  "LONG fade (down-run into support, pullback-confirmed)", shape.triangleup,   location.belowbar, color=color.new(color.lime, 0), size=size.small, text="L")
+plotshape(markShort and shortSig, "SHORT fade (up-run into resistance, pullback-confirmed)", shape.triangledown, location.abovebar, color=color.new(color.red,  0), size=size.small, text="S")
+
+//=============================
+// Version label -- bottom-right (same style as the other detectors)
+//=============================
+var table cityTable = table.new(position.bottom_right, 1, 1,
+     bgcolor      = color.new(color.black, 20),
+     border_width = 1,
+     border_color = color.new(color.gray, 50))
+if barstate.islast
+    table.cell(cityTable, 0, 0, "Nara", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+
+//=============================
+// PARAM columns -- self-document the export
+//=============================
+plot(srHalfWidth, "P_srHalfWidth", color=na, display=display.data_window)
+plot(srZoneWidth, "P_srZoneWidth", color=na, display=display.data_window)
+plot(srLookback,  "P_srLookback",  color=na, display=display.data_window)
+plot(winLen,      "P_winLen",      color=na, display=display.data_window)
+plot(runMinPts,   "P_runMinPts",   color=na, display=display.data_window)
+plot(minR2,       "P_minR2",       color=na, display=display.data_window)
+plot(pullbackPts, "P_pullbackPts", color=na, display=display.data_window)
+
+//=============================
+// Diagnostics + EVENT-EXPORT columns (data window)
+//=============================
+plot(bestSlope,     "ols slope (pts/bar)",   color=na, display=display.data_window)
+plot(bestR2,        "ols R2",                color=na, display=display.data_window)
+plot(bestRun,       "ols run (pts)",         color=na, display=display.data_window)
+plot(float(runDir), "run dir (+1/-1)",       color=na, display=display.data_window)
+plot(supportLvl,    "support (pivot low)",   color=na, display=display.data_window)
+plot(resistanceLvl, "resistance (pivot high)", color=na, display=display.data_window)
+plot(touchSuppLine ? 1 : 0, "touch support line (1/0)",    color=na, display=display.data_window)
+plot(touchResLine  ? 1 : 0, "touch resistance line (1/0)", color=na, display=display.data_window)
+plot(longArmed  ? 1 : 0, "long armed (trend live, 1/0)",  color=na, display=display.data_window)
+plot(shortArmed ? 1 : 0, "short armed (trend live, 1/0)", color=na, display=display.data_window)
+plot(longExtreme,  "long extreme (lowest low)",   color=na, display=display.data_window)
+plot(shortExtreme, "short extreme (highest high)", color=na, display=display.data_window)
+plot(longPullback,  "long pullback off ext (pts)",  color=na, display=display.data_window)
+plot(shortPullback, "short pullback off ext (pts)", color=na, display=display.data_window)
+plot(longLockLow,   "long lock (need low < this)",   color=na, display=display.data_window)
+plot(shortLockHigh, "short lock (need high > this)", color=na, display=display.data_window)
+
+// EVT_ rows: non-na ONLY on the arm bar / the signal (trend-end confirmation) bar. Filter to these.
+plot(longArm  ? 1  : na, "EVT_long_arm",   color=na, display=display.data_window)
+plot(shortArm ? -1 : na, "EVT_short_arm",  color=na, display=display.data_window)
+plot(longSig  ? 1  : na, "EVT_long",       color=na, display=display.data_window)
+plot(shortSig ? -1 : na, "EVT_short",      color=na, display=display.data_window)
+plot((longSig or shortSig) ? bestRun : na, "EVT_run_pts", color=na, display=display.data_window)
+plot((longSig or shortSig) ? bestR2 : na,  "EVT_r2",      color=na, display=display.data_window)
+plot((longSig or shortSig) ? close : na,   "EVT_px",      color=na, display=display.data_window)
+
+//=============================
+// Alerts
+//=============================
+alertcondition(longSig,  "Long fade (support + down-run)",  "Down-run hit support -- LONG fade")
+alertcondition(shortSig, "Short fade (resistance + up-run)", "Up-run hit resistance -- SHORT fade")
