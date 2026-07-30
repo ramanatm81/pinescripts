@@ -1,0 +1,414 @@
+//@version=6
+// =====================================================================================
+// SLOPE-TOUCH FADE — STRATEGY  ("Nara")
+//
+// Trades the slope_touch_fade.pine detector. The DETECTOR half is copied verbatim (arm on
+// S/R-line touch -> track extreme -> fire triangle on pullbackPts reversal -> re-entry lock).
+// The STRATEGY half adds what the detector lacks -- an EXIT:
+//
+//   ENTRY : on a triangle. LONG on a down-trend-into-support that reversed up; SHORT on an
+//           up-trend-into-resistance that reversed down. FLAT between trades (one at a time).
+//   STOP  : initial hard stop at the FADED EXTREME -- long stop just below the trend's extreme
+//           low (the point the pullback was measured from); short stop just above the extreme
+//           high. If price returns to the extreme, the fade failed.
+//   EXIT  : a TRAILING stop by trailPts off the best price reached since entry. Lets the reversal
+//           run (the tail is the edge in the other strategies) while the initial stop caps the
+//           downside until the trade moves our way.
+//   EOD   : flatten at session close (mirror slope_strategy / live_trend). No overnight carry.
+//
+// Detector is UNVALIDATED as a fade (priors: fades mostly lose). This strategy exists to get an
+// honest 5yr-vs-OOS number. Sweep trailPts and the stop offset; check 0-slip AND with-slip.
+// =====================================================================================
+strategy("Slope-Touch Fade Strategy", overlay=true, max_labels_count=500, max_bars_back=5000,
+     default_qty_type=strategy.fixed, default_qty_value=1, initial_capital=100000,
+     calc_on_every_tick=false, process_orders_on_close=true, slippage=0)
+
+//=============================
+// Inputs -- S/R
+//=============================
+srHalfWidth  = input.int(10,     "Fractal half-width (bars each side, 10=21-bar pivot)", minval=1, maxval=20, group="S/R")
+srLookback   = input.int(0,      "Pivot lookback (bars, 0=all)",                         minval=0, maxval=500, group="S/R")
+breakTol     = input.float(5.0,  "Break tolerance: touch void if close beyond the line by more than this (pts)", minval=0.0, step=0.5, group="S/R")
+
+//=============================
+// Inputs -- OLS trend measure (FIXED window)
+//=============================
+winLen     = input.int(150, "OLS window length (bars, FIXED)", minval=10, maxval=1000, group="Trend measure")
+runMinPts  = input.float(150.0, "Min run size to qualify the trend (pts, fit-line net move)", minval=1.0, step=5.0, group="Trend measure")
+minR2      = input.float(0.75,  "Min R-squared (straightness; 1 = perfect line)", minval=0.1, maxval=1.0, step=0.05, group="Trend measure")
+srcPrice   = input.source(close, "Price source for the fit", group="Trend measure")
+
+//=============================
+// Inputs -- pullback confirmation (trend-END trigger = the ENTRY)
+//=============================
+pullbackPts = input.float(50.0, "Pullback off the extreme that ENDS the trend & triggers entry (pts)", minval=1.0, step=5.0, group="Pullback confirm")
+
+//=============================
+// Inputs -- trade management (the missing exit half)
+//=============================
+enableLong  = input.bool(true, "Take LONG fades (support)",     group="Trade")
+enableShort = input.bool(true, "Take SHORT fades (resistance)", group="Trade")
+// EXITS. DEFAULT = pure SESSION-HOLD (both stops OFF) -- that is the validated winner: OOS +2682
+// USD, PF 3.27. The port confirmed EVERY stop config is worse (trail 80 -> -230, trail 150 ->
+// +2146, init-stop -> +1514) because stops chop the runners that carry the edge. The toggles below
+// are EXPERIMENTS you opt into, not the recommended mode. Same lesson as slope-exit-shortening.
+// BEST OOS config (validated port, +4674 USD / PF 4.20 vs the +3051 baseline): runMin150,
+// pullback50, trail200 ON + init-stop ON (buf10). OOS-only (one month) -- forward-watch before
+// trusting the number; the levers (smaller pullback, add init-stop) are on a broad sweep plateau.
+enableTrail    = input.bool(true,  "Enable TRAILING stop", group="Trade")
+trailPts       = input.float(200.0, "Trailing stop distance off best price (pts)", minval=1.0, step=5.0, group="Trade")
+enableInitStop = input.bool(true,  "Enable INITIAL stop at the faded extreme", group="Trade")
+stopBufPts     = input.float(10.0, "Initial stop buffer BEYOND the faded extreme (pts)", minval=0.0, step=1.0, group="Trade")
+
+//=============================
+// Inputs -- Display (arm dots, same as the detector)
+//=============================
+markArm    = input.bool(true, "Plot glowing ARM dot (where the trend arms = S/R-line touch)", group="Display")
+armMidPts  = input.float(180.0, "Arm dot: run below this = SMALL dot (pts)", minval=1.0, step=10.0, group="Display")
+armBigPts  = input.float(260.0, "Arm dot: run above this = LARGE dot (pts)", minval=1.0, step=10.0, group="Display")
+
+//=============================
+// Inputs -- SESSION scaffolding. The BLOCK LOGIC is Chicago time (real windows, mirrors
+// slope_strategy / backtest.py exactly). Labels ALSO show LONDON time because the chart is
+// London (London = CT + 6h: BST is UTC+1, CT is UTC-5). Windows are Chicago minutes-since-midnight:
+//   EOD flatten  900..960  (15:00-16:00 CT = 21:00-22:00 LDN)  -- always on, flattens + blocks
+//   NY open      510..540  (08:30-09:00 CT = 14:30-15:00 LDN)
+//   London open  120..150  (02:00-02:30 CT = 08:00-08:30 LDN)
+// Per the fade's rule these blocks FLATTEN and block entries (unlike slope, which only blocks
+// entries). Keeps the "aesthetics of slope": no fades taken into the NY/London open bursts.
+//=============================
+blockNYOpen = input.bool(true, "Block NY open (14:30-15:00 LDN / 08:30-09:00 CT): flatten + no entry",     group="Session")
+blockLNOpen = input.bool(true, "Block London open (08:00-08:30 LDN / 02:00-02:30 CT): flatten + no entry", group="Session")
+
+//=============================
+// OLS helper (numerically stable; identical to the detector)
+//=============================
+olsScan(int N) =>
+    float yRef = srcPrice[N - 1]
+    float sx  = 0.0
+    float sy  = 0.0
+    float sxx = 0.0
+    float syy = 0.0
+    float sxy = 0.0
+    for i = 0 to N - 1
+        x = float(N - 1 - i)
+        y = srcPrice[i] - yRef
+        sx  += x
+        sy  += y
+        sxx += x * x
+        syy += y * y
+        sxy += x * y
+    fN    = float(N)
+    varX  = sxx - sx * sx / fN
+    varY  = syy - sy * sy / fN
+    covXY = sxy - sx * sy / fN
+    float slope = na
+    float r2    = na
+    if varX > 0 and varY > 0
+        slope := covXY / varX
+        r2    := (covXY * covXY) / (varX * varY)
+    [slope, r2]
+
+//=============================
+// SESSION-GAP CLEAN COUNTER. The OLS looks back winLen BARS -- but across a holiday/weekend the
+// previous bar can be days earlier (05 Jul reopen: the 150-bar window reached back to Fri 07-03,
+// spanning a 53-HOUR gap). Fitting a line through Friday's prices glued onto Sunday's gives garbage
+// slope/run/R2 and armed a bogus trade. FIX: count CONTIGUOUS bars since the last >60min gap; the
+// OLS only qualifies once we have winLen clean bars, so the window never straddles a session break.
+var int barsSinceGap = 0
+bool _gapNow = bar_index > 0 and (time - time[1]) / 60000.0 > 60
+barsSinceGap := _gapNow ? 1 : barsSinceGap + 1
+bool windowClean = barsSinceGap >= winLen
+
+//=============================
+// FIXED-window OLS measure (only meaningful on a clean, gap-free window)
+//=============================
+float bestSlope = na
+float bestR2    = na
+if bar_index >= winLen - 1 and windowClean
+    [s, r2] = olsScan(winLen)
+    bestSlope := s
+    bestR2    := r2
+float bestRun = na(bestSlope) ? na : math.abs(bestSlope) * float(winLen - 1)
+
+bool  qualified  = not na(bestSlope) and not na(bestR2) and bestR2 >= minR2 and not na(bestRun) and bestRun >= runMinPts
+int   runDir     = not qualified ? 0 : (bestSlope > 0 ? 1 : -1)
+bool  hasDownRun = qualified and runDir < 0
+bool  hasUpRun   = qualified and runDir > 0
+
+//=============================
+// S/R fractal pivots
+//=============================
+fractalHighVal = ta.pivothigh(high, srHalfWidth, srHalfWidth)
+fractalLowVal  = ta.pivotlow(low,  srHalfWidth, srHalfWidth)
+
+var float lastFractalHigh    = na
+var float lastFractalLow     = na
+var int   lastFractalHighBar = na
+var int   lastFractalLowBar  = na
+
+if not na(fractalHighVal)
+    lastFractalHigh    := fractalHighVal
+    lastFractalHighBar := bar_index - srHalfWidth
+if not na(fractalLowVal)
+    lastFractalLow     := fractalLowVal
+    lastFractalLowBar  := bar_index - srHalfWidth
+
+_highAge   = na(lastFractalHighBar) ? na : bar_index - lastFractalHighBar
+_lowAge    = na(lastFractalLowBar)  ? na : bar_index - lastFractalLowBar
+_highValid = not na(lastFractalHigh) and (srLookback == 0 or (not na(_highAge) and _highAge <= srLookback))
+_lowValid  = not na(lastFractalLow)  and (srLookback == 0 or (not na(_lowAge)  and _lowAge  <= srLookback))
+
+supportLvl    = _lowValid  ? lastFractalLow  : na
+resistanceLvl = _highValid ? lastFractalHigh : na
+
+// LINE TOUCH void if price closed clearly beyond the line (stale/broken pivot) -- see detector.
+bool touchResLine  = not na(resistanceLvl) and high >= resistanceLvl and close <= resistanceLvl + breakTol
+bool touchSuppLine = not na(supportLvl)    and low  <= supportLvl    and close >= supportLvl    - breakTol
+
+//=============================
+// TREND STATE MACHINE (arm -> track -> fire -> lock). Identical to the detector, plus we CAPTURE
+// the faded extreme on the fire bar (fadedExtremeLong/Short) so the trade can set its initial stop.
+//=============================
+var bool  shortArmed = false
+var float shortExtreme = na
+var bool  longArmed  = false
+var float longExtreme = na
+var float longLockLow  = na
+var float shortLockHigh = na
+
+bool shortSig = false
+bool longSig  = false
+bool shortArm = false          // true only on the bar the short side ARMS (arm dot)
+bool longArm  = false          // true only on the bar the long side ARMS
+float fadedExtremeShort = na   // the extreme HIGH the faded up-trend reached (short entry stop ref)
+float fadedExtremeLong  = na   // the extreme LOW  the faded down-trend reached (long entry stop ref)
+
+// GAP RESET: a session break (weekend/holiday) ends any live arm and clears the locks. Without
+// this a Friday arm survives the weekend and fires a stale pullback on the Sunday reopen (the
+// dubious 05 Jul 23:04 short). Mirror of live_trend ending its trend at the gap edge.
+if _gapNow
+    shortArmed   := false
+    longArmed    := false
+    shortExtreme := na
+    longExtreme  := na
+    shortLockHigh := na
+    longLockLow  := na
+
+if not na(shortLockHigh) and high > shortLockHigh
+    shortLockHigh := na
+if not na(longLockLow) and low < longLockLow
+    longLockLow := na
+
+// SHORT side
+if not shortArmed
+    if hasUpRun and touchResLine and na(shortLockHigh)
+        shortArmed   := true
+        shortExtreme := high
+        shortArm     := true
+else
+    shortExtreme := math.max(shortExtreme, high)
+    if close <= shortExtreme - pullbackPts
+        shortSig          := true
+        fadedExtremeShort := shortExtreme
+        shortLockHigh     := shortExtreme
+        shortArmed        := false
+        shortExtreme      := na
+
+// LONG side
+if not longArmed
+    if hasDownRun and touchSuppLine and na(longLockLow)
+        longArmed   := true
+        longExtreme := low
+        longArm     := true
+else
+    longExtreme := math.min(longExtreme, low)
+    if close >= longExtreme + pullbackPts
+        longSig          := true
+        fadedExtremeLong := longExtreme
+        longLockLow      := longExtreme
+        longArmed        := false
+        longExtreme      := na
+
+//=============================
+// SESSION windows -- computed in Chicago minutes-since-midnight, identical to backtest.py.
+// (LDN = CT + 6h, shown for the London chart.)
+//   eodClose 900..960 (15:00-16:00 CT = 21:00-22:00 LDN)
+//   nyOpen   510..540 (08:30-09:00 CT = 14:30-15:00 LDN)
+//   lnOpen   120..150 (02:00-02:30 CT = 08:00-08:30 LDN)
+//=============================
+_ctMin    = hour(time, "America/Chicago") * 60 + minute(time, "America/Chicago")
+eodClosed = _ctMin >= 900 and _ctMin < 960
+nyBlock   = blockNYOpen and _ctMin >= 510 and _ctMin < 540
+lnBlock   = blockLNOpen and _ctMin >= 120 and _ctMin < 150
+// HOLIDAY / WEEKEND / EARLY-CLOSE gap (live_trend's _gapEdge): a real session break shows up as a
+// >60min jump between consecutive bars. The clock-window EOD check MISSES an early close (e.g. the
+// Fri before July 4th) because there are simply no bars in 15:00-16:00 CT -- so a trade rode the
+// whole holiday weekend (05 Jul). Treat any >60min bar gap as a flatten edge too.
+_gapEdge  = (time - time[1]) / 60000.0 > 60
+// per the fade rule: EOD + NY-open + London-open + holiday-gap all FLATTEN and block entries
+bool sessionFlat  = eodClosed or nyBlock or lnBlock or _gapEdge
+
+//=============================
+// TRADE MANAGEMENT
+//   Enter flat->position on a triangle (blocked during any session-flat window).
+//   Initial stop = beyond the faded extreme. Trailing stop = trailPts off the best price reached.
+//=============================
+// SELF-TRACKED position state. We do NOT gate the manage/exit/plot logic on strategy.position_size
+// -- with process_orders_on_close=true that flag lags one bar (it stays 0 on the entry bar), which
+// meant the whole manage block never ran and strategy.exit was NEVER called (the real "no trail
+// stops at all" bug: 29 entries, 0 stop lines). tradeDir is set the instant we place the entry and
+// drives everything, so the stop exists from the entry bar onward.
+var int   tradeDir     = 0     // +1 long, -1 short, 0 flat (OUR truth, not the broker's lagged flag)
+var float entryPrice   = na
+var float initialStop  = na    // hard stop beyond the faded extreme
+var float bestSinceEntry = na  // highest high (long) / lowest low (short) since entry -> trail anchor
+
+// ---- OPPOSITE-SIGNAL: CLOSE + REVERSE ----
+// An opposite triangle closes the current trade here; because the opposite signal is still true,
+// the ENTRY block below re-enters it the same bar -> a REVERSAL (verified vs TV trade-list: every
+// "opposite" exit is immediately followed by a same-bar entry the other way, +3051 exact).
+bool oppLong  = tradeDir > 0 and shortSig
+bool oppShort = tradeDir < 0 and longSig
+if oppLong or oppShort
+    strategy.close_all(comment="opposite")
+    tradeDir := 0
+
+bool flat = tradeDir == 0
+
+// ---- ENTRIES (flat only, not during a session-flat window) ----
+if flat and not sessionFlat
+    if longSig and enableLong
+        strategy.entry("L", strategy.long)
+        tradeDir       := 1
+        entryPrice     := close
+        initialStop    := fadedExtremeLong - stopBufPts   // just below the faded extreme low
+        bestSinceEntry := high
+    else if shortSig and enableShort
+        strategy.entry("S", strategy.short)
+        tradeDir       := -1
+        entryPrice     := close
+        initialStop    := fadedExtremeShort + stopBufPts  // just above the faded extreme high
+        bestSinceEntry := low
+
+// ---- MANAGE OPEN POSITION (driven by tradeDir, runs on the entry bar and every bar after) ----
+// Build the stop from whichever pieces are enabled; remember which is binding (stopKind) for the
+// exit label. Plot both candidate levels (initStopLine, trailStopLine) so the trail is VISIBLE.
+float stopLevel     = na
+float initStopLine  = na
+float trailStopLine = na
+string stopKind     = na
+if tradeDir > 0
+    bestSinceEntry := math.max(bestSinceEntry, high)
+    float sL = na
+    if enableInitStop
+        initStopLine := initialStop
+        sL := initialStop
+        stopKind := "init"
+    if enableTrail
+        trailStopLine := bestSinceEntry - trailPts
+        if na(sL) or trailStopLine > sL      // trail tighter (higher) for a long -> binding
+            sL := trailStopLine
+            stopKind := "trail"
+    stopLevel := sL
+    if not na(stopLevel)
+        strategy.exit("L-exit", from_entry="L", stop=stopLevel, comment=stopKind)
+else if tradeDir < 0
+    bestSinceEntry := math.min(bestSinceEntry, low)
+    float sS = na
+    if enableInitStop
+        initStopLine := initialStop
+        sS := initialStop
+        stopKind := "init"
+    if enableTrail
+        trailStopLine := bestSinceEntry + trailPts
+        if na(sS) or trailStopLine < sS      // trail tighter (lower) for a short -> binding
+            sS := trailStopLine
+            stopKind := "trail"
+    stopLevel := sS
+    if not na(stopLevel)
+        strategy.exit("S-exit", from_entry="S", stop=stopLevel, comment=stopKind)
+
+// ---- SESSION FLATTEN (EOD / NY open / London open / holiday gap) ----
+if sessionFlat and tradeDir != 0
+    strategy.close_all(comment="session")
+    tradeDir := 0
+
+// ---- SYNC tradeDir when the BROKER closed us out (a stop-exit fired) ----
+// After the manage block, if strategy.position_size has gone flat but our tradeDir still thinks we
+// are in a trade, the stop (init/trail) filled -- clear our state. This is the ONLY place we read
+// the broker flag, and only to detect a stop-out we didn't initiate ourselves. Guard on barstate so
+// it doesn't clear on the entry bar (position_size lags to 0 there under process_orders_on_close).
+if tradeDir != 0 and strategy.position_size == 0 and not (longSig or shortSig) and bar_index > 0 and strategy.position_size[1] != 0
+    tradeDir := 0
+
+// reset per-trade state only when truly flat by OUR tracking
+if tradeDir == 0
+    entryPrice     := na
+    initialStop    := na
+    bestSinceEntry := na
+
+//=============================
+// Visuals -- S/R lines + glowing arm dots + entry triangles (same visual language as the detector)
+//=============================
+plot(resistanceLvl, "resistance (pivot high)", color=na(resistanceLvl) ? na : color.new(color.red, 40),   linewidth=1)
+plot(supportLvl,    "support (pivot low)",     color=na(supportLvl)    ? na : color.new(color.green, 40), linewidth=1)
+// ACTIVE stop, colored by trade direction so the two sides are distinct:
+//   FUCHSIA (below price) = a LONG trade's stop
+//   ORANGE  (above price) = a SHORT trade's stop
+// aqua (thin) = the TRAIL candidate (best - trailPts), when the trail toggle is on.
+plot(tradeDir > 0 ? stopLevel : na, "long stop",  color=color.new(color.fuchsia, 0), style=plot.style_linebr, linewidth=2)
+plot(tradeDir < 0 ? stopLevel : na, "short stop", color=color.new(color.orange,  0), style=plot.style_linebr, linewidth=2)
+plot(tradeDir != 0 ? trailStopLine : na, "trail candidate", color=color.new(color.aqua, 0), style=plot.style_linebr, linewidth=1)
+
+// ARM dot (from the detector): glowing, size-tiered by run, colored by the trend direction being
+// tracked. LONG side = falling trend into support -> RED below bar; SHORT side = rising trend into
+// resistance -> GREEN above bar. Triangles keep the TRADE color (green=long, red=short).
+bool armSmall = not na(bestRun) and bestRun <  armMidPts
+bool armMid   = not na(bestRun) and bestRun >= armMidPts and bestRun < armBigPts
+bool armBig   = not na(bestRun) and bestRun >= armBigPts
+plotshape(markArm and longArm and armSmall, "LONG arm S halo", shape.circle, location.belowbar, color=color.new(color.red, 75), size=size.small)
+plotshape(markArm and longArm and armSmall, "LONG arm S",      shape.circle, location.belowbar, color=color.new(color.red, 0),  size=size.tiny)
+plotshape(markArm and longArm and armMid,   "LONG arm M halo", shape.circle, location.belowbar, color=color.new(color.red, 75), size=size.normal)
+plotshape(markArm and longArm and armMid,   "LONG arm M",      shape.circle, location.belowbar, color=color.new(color.red, 0),  size=size.small)
+plotshape(markArm and longArm and armBig,   "LONG arm L halo", shape.circle, location.belowbar, color=color.new(color.red, 75), size=size.large)
+plotshape(markArm and longArm and armBig,   "LONG arm L",      shape.circle, location.belowbar, color=color.new(color.red, 0),  size=size.normal)
+plotshape(markArm and shortArm and armSmall, "SHORT arm S halo", shape.circle, location.abovebar, color=color.new(color.lime, 75), size=size.small)
+plotshape(markArm and shortArm and armSmall, "SHORT arm S",      shape.circle, location.abovebar, color=color.new(color.lime, 0),  size=size.tiny)
+plotshape(markArm and shortArm and armMid,   "SHORT arm M halo", shape.circle, location.abovebar, color=color.new(color.lime, 75), size=size.normal)
+plotshape(markArm and shortArm and armMid,   "SHORT arm M",      shape.circle, location.abovebar, color=color.new(color.lime, 0),  size=size.small)
+plotshape(markArm and shortArm and armBig,   "SHORT arm L halo", shape.circle, location.abovebar, color=color.new(color.lime, 75), size=size.large)
+plotshape(markArm and shortArm and armBig,   "SHORT arm L",      shape.circle, location.abovebar, color=color.new(color.lime, 0),  size=size.normal)
+
+// Entry triangles (trade color). When one fires while in the opposite trade it now CLOSES to flat,
+// so the triangle also marks that exit -- no longer a contradiction.
+plotshape(longSig  and enableLong,  "LONG entry",  shape.triangleup,   location.belowbar, color=color.new(color.lime, 0), size=size.small, text="L")
+plotshape(shortSig and enableShort, "SHORT entry", shape.triangledown, location.abovebar, color=color.new(color.red,  0), size=size.small, text="S")
+
+//=============================
+// Version label -- bottom-right
+//=============================
+var table cityTable = table.new(position.bottom_right, 1, 1,
+     bgcolor      = color.new(color.black, 20),
+     border_width = 1,
+     border_color = color.new(color.gray, 50))
+if barstate.islast
+    table.cell(cityTable, 0, 0, "Nara", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+
+//=============================
+// PARAM + EVENT columns (self-documenting export)
+//=============================
+plot(winLen,      "P_winLen",      color=na, display=display.data_window)
+plot(runMinPts,   "P_runMinPts",   color=na, display=display.data_window)
+plot(minR2,       "P_minR2",       color=na, display=display.data_window)
+plot(pullbackPts, "P_pullbackPts", color=na, display=display.data_window)
+plot(trailPts,    "P_trailPts",    color=na, display=display.data_window)
+plot(stopBufPts,  "P_stopBufPts",  color=na, display=display.data_window)
+plot(breakTol,    "P_breakTol",    color=na, display=display.data_window)
+
+plot(bestRun,      "ols run (pts)",   color=na, display=display.data_window)
+plot(bestR2,       "ols R2",          color=na, display=display.data_window)
+plot(stopLevel,    "active stop lvl", color=na, display=display.data_window)
+plot(longSig  ?  1 : na, "EVT_long_entry",  color=na, display=display.data_window)
+plot(shortSig ? -1 : na, "EVT_short_entry", color=na, display=display.data_window)
+plot((longSig or shortSig) ? close : na, "EVT_entry_px", color=na, display=display.data_window)
