@@ -33,31 +33,29 @@ breakTol     = input.float(5.0,  "Break tolerance: touch void if close beyond th
 //=============================
 // Inputs -- OLS trend measure (FIXED window)
 //=============================
-winLen     = input.int(150, "OLS window length (bars, FIXED)", minval=10, maxval=1000, group="Trend measure")
-runMinPts  = input.float(150.0, "Min run size to qualify the trend (pts, fit-line net move)", minval=1.0, step=5.0, group="Trend measure")
+winLen     = input.int(90, "OLS window length (bars, FIXED)", minval=10, maxval=1000, group="Trend measure")
+runMinPts  = input.float(100.0, "Min run size to qualify the trend (pts, fit-line net move)", minval=1.0, step=5.0, group="Trend measure")
 minR2      = input.float(0.75,  "Min R-squared (straightness; 1 = perfect line)", minval=0.1, maxval=1.0, step=0.05, group="Trend measure")
 srcPrice   = input.source(close, "Price source for the fit", group="Trend measure")
 
 //=============================
 // Inputs -- pullback confirmation (trend-END trigger = the ENTRY)
 //=============================
-pullbackPts = input.float(50.0, "Pullback off the extreme that ENDS the trend & triggers entry (pts)", minval=1.0, step=5.0, group="Pullback confirm")
+pullbackPts = input.float(70.0, "Pullback off the ARM DOT that ENDS the trend & triggers entry (pts)", minval=1.0, step=5.0, group="Pullback confirm")
 
 //=============================
 // Inputs -- trade management (the missing exit half)
 //=============================
 enableLong  = input.bool(true, "Take LONG fades (support)",     group="Trade")
 enableShort = input.bool(true, "Take SHORT fades (resistance)", group="Trade")
-// EXITS. DEFAULT = pure SESSION-HOLD (both stops OFF) -- that is the validated winner: OOS +2682
-// USD, PF 3.27. The port confirmed EVERY stop config is worse (trail 80 -> -230, trail 150 ->
-// +2146, init-stop -> +1514) because stops chop the runners that carry the edge. The toggles below
-// are EXPERIMENTS you opt into, not the recommended mode. Same lesson as slope-exit-shortening.
-// BEST OOS config (validated port, +4674 USD / PF 4.20 vs the +3051 baseline): runMin150,
-// pullback50, trail200 ON + init-stop ON (buf10). OOS-only (one month) -- forward-watch before
-// trusting the number; the levers (smaller pullback, add init-stop) are on a broad sweep plateau.
-enableTrail    = input.bool(true,  "Enable TRAILING stop", group="Trade")
+// EXITS. DEFAULT = pure SESSION-HOLD (both stops OFF) -- the validated mode. With FREEZE-AT-DOT
+// pullback + runMin100/pull70, the port shows 5yr +3919 pt / PF 1.16 (567 trades), OOS +370 / PF
+// 1.24. Stops are worse: they chop the runners that carry the edge (same lesson as
+// slope-exit-shortening). CAVEAT: the 5yr net is tail-carried (top-10 trades ~= net) -- treat as a
+// hypothesis to forward-watch, not a proven edge. The toggles below are EXPERIMENTS you opt into.
+enableTrail    = input.bool(false, "Enable TRAILING stop", group="Trade")
 trailPts       = input.float(200.0, "Trailing stop distance off best price (pts)", minval=1.0, step=5.0, group="Trade")
-enableInitStop = input.bool(true,  "Enable INITIAL stop at the faded extreme", group="Trade")
+enableInitStop = input.bool(false, "Enable INITIAL stop at the faded extreme", group="Trade")
 stopBufPts     = input.float(10.0, "Initial stop buffer BEYOND the faded extreme (pts)", minval=0.0, step=1.0, group="Trade")
 
 //=============================
@@ -201,13 +199,16 @@ if not na(longLockLow) and low < longLockLow
     longLockLow := na
 
 // SHORT side
+// PULLBACK FROM THE DOT: shortExtreme is FROZEN at the arm bar's high (the dot). It is NOT tracked
+// to a deeper high as the trend extends -- the pullback (and the initial stop) are measured from
+// where the trend ARMED, so we "wait out from the dot". A deeper extension means price must recover
+// all the way back to (dot - pullback) to trigger, a stronger reversal condition.
 if not shortArmed
     if hasUpRun and touchResLine and na(shortLockHigh)
         shortArmed   := true
-        shortExtreme := high
+        shortExtreme := high           // frozen reference = the arm dot's high
         shortArm     := true
 else
-    shortExtreme := math.max(shortExtreme, high)
     if close <= shortExtreme - pullbackPts
         shortSig          := true
         fadedExtremeShort := shortExtreme
@@ -219,10 +220,9 @@ else
 if not longArmed
     if hasDownRun and touchSuppLine and na(longLockLow)
         longArmed   := true
-        longExtreme := low
+        longExtreme := low             // frozen reference = the arm dot's low
         longArm     := true
 else
-    longExtreme := math.min(longExtreme, low)
     if close >= longExtreme + pullbackPts
         longSig          := true
         fadedExtremeLong := longExtreme
@@ -263,16 +263,47 @@ var int   tradeDir     = 0     // +1 long, -1 short, 0 flat (OUR truth, not the 
 var float entryPrice   = na
 var float initialStop  = na    // hard stop beyond the faded extreme
 var float bestSinceEntry = na  // highest high (long) / lowest low (short) since entry -> trail anchor
+// ---- alert / webhook state (same scheme as slope_strategy) ----
+var int    tradeSeq    = 0     // monotonic trade counter (uniqueness seed)
+var string tradeId     = ""    // pseudo-GUID for the current trade — shared by its entry & exit alerts
+var string exitReason  = ""    // reason of the last exit — set at each exit site, read by the exit alert
+var int    exitedDir   = 0     // direction just exited (1=long,-1=short) — for the exit alert side
+var string exitTradeId = ""    // id of the trade that just exited (captured before a same-bar reversal overwrites tradeId)
+
+// 24-bit hash + seq suffix -> a stable id shared by a trade's entry and exit alerts (from slope_strategy)
+makeTradeId(seq) =>
+    _t  = int(time / 1000) % 1000000
+    _px = int(close * 100) % 100000
+    _h  = (_t * 131 + seq * 7919 + _px * 31) % 16777216
+    _h := (_h * 2654435761) % 16777216
+    _h := (_h + seq * 11400714819323) % 16777216
+    _h := int(_h % 16777216)
+    _hex = ""
+    _digits = "0123456789abcdef"
+    _v = _h
+    for _i = 0 to 5
+        _nib = int(_v % 16)
+        _hex := str.substring(_digits, _nib, _nib + 1) + _hex
+        _v := math.floor(_v / 16)
+    _hex + "-" + str.tostring(seq)
 
 // ---- OPPOSITE-SIGNAL: CLOSE + REVERSE ----
 // An opposite triangle closes the current trade here; because the opposite signal is still true,
 // the ENTRY block below re-enters it the same bar -> a REVERSAL (verified vs TV trade-list: every
 // "opposite" exit is immediately followed by a same-bar entry the other way, +3051 exact).
+// reversedBar: an opposite signal closed the old trade AND the entry block re-opened the opposite
+// on the SAME bar. tradeDir is non-zero at both bar-ends (e.g. +1[1] -> -1), so the transition-based
+// entry/exit alert conditions below would BOTH miss it -- reversedBar forces both alerts to fire.
+bool reversedBar = false
 bool oppLong  = tradeDir > 0 and shortSig
 bool oppShort = tradeDir < 0 and longSig
 if oppLong or oppShort
     strategy.close_all(comment="opposite")
+    exitReason  := "opposite"
+    exitedDir   := tradeDir
+    exitTradeId := tradeId
     tradeDir := 0
+    reversedBar := true
 
 bool flat = tradeDir == 0
 
@@ -284,12 +315,16 @@ if flat and not sessionFlat
         entryPrice     := close
         initialStop    := fadedExtremeLong - stopBufPts   // just below the faded extreme low
         bestSinceEntry := high
+        tradeSeq += 1
+        tradeId := makeTradeId(tradeSeq)
     else if shortSig and enableShort
         strategy.entry("S", strategy.short)
         tradeDir       := -1
         entryPrice     := close
         initialStop    := fadedExtremeShort + stopBufPts  // just above the faded extreme high
         bestSinceEntry := low
+        tradeSeq += 1
+        tradeId := makeTradeId(tradeSeq)
 
 // ---- MANAGE OPEN POSITION (driven by tradeDir, runs on the entry bar and every bar after) ----
 // Build the stop from whichever pieces are enabled; remember which is binding (stopKind) for the
@@ -332,6 +367,9 @@ else if tradeDir < 0
 // ---- SESSION FLATTEN (EOD / NY open / London open / holiday gap) ----
 if sessionFlat and tradeDir != 0
     strategy.close_all(comment="session")
+    exitReason  := "session"
+    exitedDir   := tradeDir
+    exitTradeId := tradeId
     tradeDir := 0
 
 // ---- SYNC tradeDir when the BROKER closed us out (a stop-exit fired) ----
@@ -340,6 +378,9 @@ if sessionFlat and tradeDir != 0
 // the broker flag, and only to detect a stop-out we didn't initiate ourselves. Guard on barstate so
 // it doesn't clear on the entry bar (position_size lags to 0 there under process_orders_on_close).
 if tradeDir != 0 and strategy.position_size == 0 and not (longSig or shortSig) and bar_index > 0 and strategy.position_size[1] != 0
+    exitReason  := na(stopKind) ? "stop" : stopKind   // "init" or "trail" (which stop filled)
+    exitedDir   := tradeDir
+    exitTradeId := tradeId
     tradeDir := 0
 
 // reset per-trade state only when truly flat by OUR tracking
@@ -412,3 +453,47 @@ plot(stopLevel,    "active stop lvl", color=na, display=display.data_window)
 plot(longSig  ?  1 : na, "EVT_long_entry",  color=na, display=display.data_window)
 plot(shortSig ? -1 : na, "EVT_short_entry", color=na, display=display.data_window)
 plot((longSig or shortSig) ? close : na, "EVT_entry_px", color=na, display=display.data_window)
+
+//=============================
+// Alerts — JSON payloads for webhook REST API (same scheme as slope_strategy)
+// In the TradingView alert dialog: paste your webhook URL, set message to {{alert_message}}.
+// Entry/exit fire on OUR OWN tradeDir transition (never on strategy.position_size, which lags
+// under process_orders_on_close), so a fast enter+stop-out never gets missed.
+//=============================
+
+// EXIT alert FIRST (so on a reversal bar the close of the old trade is emitted before the new
+// entry). Fires on our state transition to flat OR on a reversal bar (where tradeDir ends non-zero
+// but a trade DID close). reason = opposite/session/init/trail/stop. Uses exitTradeId (the id of
+// the trade that closed, captured before a same-bar reversal overwrites tradeId).
+bool exitFired = (tradeDir == 0 and tradeDir[1] != 0) or reversedBar
+if exitFired
+    _exitSide = exitedDir == 1 ? "long" : "short"
+    alert('{"event":"exit","side":"' + _exitSide + '","id":"' + exitTradeId + '"' +
+          ',"reason":"' + exitReason + '"' +
+          ',"price":' + str.tostring(close, "0.00") +
+          ',"symbol":"' + syminfo.ticker + '"' +
+          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London") + '"' +
+          '}', alert.freq_once_per_bar)
+
+// ENTRY alert — long. Fires on flat->long transition OR a reversal INTO long. sl = initial stop
+// (faded extreme -/+ buffer). No TP (session-hold / trailing exit).
+if tradeDir == 1 and (tradeDir[1] == 0 or reversedBar)
+    alert('{"event":"entry","side":"long","id":"' + tradeId + '","price":' + str.tostring(close, "0.00") +
+          ',"sl":' + str.tostring(initialStop, "0.00") +
+          ',"sl_pts":' + str.tostring(math.abs(close - initialStop), "0.00") +
+          ',"run":' + str.tostring(bestRun, "0.00") +
+          ',"r2":' + str.tostring(bestR2, "0.000") +
+          ',"symbol":"' + syminfo.ticker + '"' +
+          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London") + '"' +
+          '}', alert.freq_once_per_bar)
+
+// ENTRY alert — short. Fires on flat->short transition OR a reversal INTO short.
+if tradeDir == -1 and (tradeDir[1] == 0 or reversedBar)
+    alert('{"event":"entry","side":"short","id":"' + tradeId + '","price":' + str.tostring(close, "0.00") +
+          ',"sl":' + str.tostring(initialStop, "0.00") +
+          ',"sl_pts":' + str.tostring(math.abs(close - initialStop), "0.00") +
+          ',"run":' + str.tostring(bestRun, "0.00") +
+          ',"r2":' + str.tostring(bestR2, "0.000") +
+          ',"symbol":"' + syminfo.ticker + '"' +
+          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London") + '"' +
+          '}', alert.freq_once_per_bar)

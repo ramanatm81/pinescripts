@@ -27,3 +27,13 @@ output*.xlsx
 positions.xlsx
 results.txt
 ohlcv/mnq_5yr.csv
+
+# replay_tool: keep source (py/html/js/css), ignore built artifacts + deps
+replay_tool/node_modules/
+replay_tool/frontend/node_modules/
+replay_tool/*.parquet
+replay_tool/run_*.json
+replay_tool/frontend/package-lock.json
+
+# backtest run artifacts (regenerable from scripts; large-ish)
+backtest/slope_fade_5yr_*.xlsx

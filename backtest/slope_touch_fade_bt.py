@@ -138,10 +138,15 @@ def ols(close, i, N):
 
 
 def detect(bars, win_len=WIN_LEN, run_min=RUN_MIN, min_r2=MIN_R2, pullback=PULLBACK,
-           break_tol=BREAK_TOL, sr_half=SR_HALF):
+           break_tol=BREAK_TOL, sr_half=SR_HALF, return_arms=False):
     """Run the expensive detector ONCE. Returns per-bar signal arrays (config-invariant for the
     trail x stop_buf sweep). long_sig[i]/short_sig[i] are the triangle fires; faded_ext_*[i] is
-    the extreme to reference for the initial stop on that entry."""
+    the extreme to reference for the initial stop on that entry.
+
+    return_arms=False (default) preserves the exact 4-tuple all callers expect. return_arms=True
+    ALSO returns long_arm[i]/short_arm[i] -- the bar where the OLS trend touches S/R and ARMS (the
+    red/green dot in the .pine), which fires BEFORE the pullback triangle. Read-only observation:
+    setting it True does not change long_sig/short_sig/fext_* at all."""
     high = [b[2] for b in bars]; low = [b[3] for b in bars]; close = [b[4] for b in bars]
     n = len(bars)
     # If the file exported Pine's exact S/R lines (strategy export), USE THEM -- my pivots() differs
@@ -168,15 +173,17 @@ def detect(bars, win_len=WIN_LEN, run_min=RUN_MIN, min_r2=MIN_R2, pullback=PULLB
     short_sig = [False] * n
     fext_long = [None] * n
     fext_short = [None] * n
+    long_arm = [False] * n     # bar the long arm fires (trend-into-support detected, pre-pullback)
+    short_arm = [False] * n    # bar the short arm fires (trend-into-resistance detected)
 
     sA = lA = False
     sE = lE = None
     lock_low = lock_high = None
     bars_since_gap = 0    # contiguous bars since the last >60min session break
     for i in range(n):
-        # SESSION-GAP handling: a >60min gap (weekend/holiday) means the winLen-bar OLS window would
-        # straddle the break and fit garbage (the bogus 05 Jul short). Count clean bars; the OLS only
-        # qualifies with winLen contiguous bars, and the gap CLEARS the arm/lock state.
+        # SESSION-GAP handling: a >60min gap (daily maintenance break, weekend, holiday) resets the
+        # OLS window -- CORRECT for a day-trader: each session's trend detection starts fresh, not
+        # contaminated by the prior day's prices across the overnight break.
         gap_now = i > 0 and (epoch[i] - epoch[i - 1]) / 60.0 > 60
         bars_since_gap = 1 if gap_now else bars_since_gap + 1
         window_clean = bars_since_gap >= win_len
@@ -202,22 +209,27 @@ def detect(bars, win_len=WIN_LEN, run_min=RUN_MIN, min_r2=MIN_R2, pullback=PULLB
             lock_high = None
         if lock_low is not None and low[i] < lock_low:
             lock_low = None
+        # PULLBACK FROM THE DOT: sE/lE are FROZEN at the arm bar's high/low (the dot) -- no longer
+        # tracked to a deeper extreme. Pullback (and the initial stop via fext_*) measured from where
+        # the trend armed. Mirrors the .pine freeze.
         if not sA:
             if has_up and t_res and lock_high is None:
-                sA, sE = True, high[i]
+                sA, sE = True, high[i]       # frozen ref = arm dot's high
+                short_arm[i] = True          # arm fired this bar (red dot at resistance)
         else:
-            sE = max(sE, high[i])
             if close[i] <= sE - pullback:
                 short_sig[i] = True; fext_short[i] = sE
                 lock_high, sA, sE = sE, False, None
         if not lA:
             if has_down and t_sup and lock_low is None:
-                lA, lE = True, low[i]
+                lA, lE = True, low[i]        # frozen ref = arm dot's low
+                long_arm[i] = True           # arm fired this bar (green dot at support)
         else:
-            lE = min(lE, low[i])
             if close[i] >= lE + pullback:
                 long_sig[i] = True; fext_long[i] = lE
                 lock_low, lA, lE = lE, False, None
+    if return_arms:
+        return long_sig, short_sig, fext_long, fext_short, long_arm, short_arm
     return long_sig, short_sig, fext_long, fext_short
 
 

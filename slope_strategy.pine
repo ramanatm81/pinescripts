@@ -25,11 +25,12 @@ tExpHardSlope    = input.float(1.0, "Slope 'against' threshold for hard exit",  
 dojiPct      = input.float(10.0,"Doji body % of range (excluded from R²)", minval=1.0, maxval=49.0, step=1.0, group="R² Filter")
 cooldownBars    = input.int(10, "Cooldown bars after exit — ETH (0 = none)", minval=0,  maxval=50,           group="R² Filter")
 cooldownBarsRTH = input.int(10, "Cooldown bars after exit — RTH (0 = none)", minval=0,  maxval=50,           group="R² Filter")
-deepSlope    = input.float(3.0, "Deep slope threshold (D↑/D↓ label)",              minval=0.5, step=0.1,    group="R² Filter")
+deepSlope    = input.float(3.0, "Deep slope threshold (Du/Dd label)",              minval=0.5, step=0.1,    group="R² Filter")
 barrierNeedsSlopeFlip = input.bool(true, "Barrier clears only if slope also flipped toward the trade (not just price recovery)", group="R² Filter")
 barrierFlipSlope      = input.float(0.0, "  Slope-flip threshold for barrier clear", step=0.1, group="R² Filter")
 enableBodyFilter = input.bool(false, "Block entry if signal bar body < min size",                          group="R² Filter")
 minBodyPts       = input.float(10.0, "Min body size (pts)",               minval=0.5, step=0.5,            group="R² Filter")
+skipAfter2Trails = input.bool(false, "Skip next entry after 2 consecutive TRAIL wins (skip one, then resume)", group="R² Filter")
 enableSRFilter   = input.bool(true,  "Block entries near S/R pivots",                            group="S/R Filter")
 srHalfWidth      = input.int(10,     "Fractal half-width (bars each side, 10=21-bar pivot)", minval=1, maxval=20, group="S/R Filter")
 srZoneWidth      = input.float(25.0, "Zone width (pts either side of pivot)", minval=1.0, step=0.5, group="S/R Filter")
@@ -221,6 +222,8 @@ var int    tradeSeq    = 0     // monotonic trade counter (uniqueness seed)
 var string tradeId     = ""    // pseudo-GUID for the current trade — shared by its entry & exit alerts
 var string exitReason  = ""    // reason of the last exit — set at each exit site, read by the exit alert
 var int    exitedDir   = 0     // direction that was just exited (1=long,-1=short) — for the exit alert side
+var int    trailWinStreak = 0  // consecutive TRAIL-exit wins among TAKEN trades (for skipAfter2Trails)
+var bool   skipNextEntry  = false // armed when streak hits 2 — blocks exactly one entry, then resumes
 
 // Deterministic per-trade id, guaranteed unique. Built from a scrambled hash of
 // the entry bar time + monotonic counter, rendered as hex. The seq term alone
@@ -510,13 +513,23 @@ if enableTExpHard and inTrade and strategy.position_size != 0 and barsInTrade >=
 canTrade  = not inTrade and cooldown == 0 and not eodClose and not nyOpenBlock and not lnOpenBlock and not preNYBlock and not ethOpenBlock and time >= startDate and time <= endDate and not na(legSlope)
 bigEnough = not enableBodyFilter or (math.abs(close - open) >= minBodyPts)
 
-bullEntry = canTrade and bigEnough and not inFractalDrought and legSlope < -slopeEntry and slExitDir != 1  and not srBlockLong  and not vwapZoneBlock
-bearEntry = canTrade and bigEnough and not inFractalDrought and legSlope >  slopeEntry and slExitDir != -1 and not srBlockShort and not vwapZoneBlock
+bullSignal = canTrade and bigEnough and not inFractalDrought and legSlope < -slopeEntry and slExitDir != 1  and not srBlockLong  and not vwapZoneBlock
+bearSignal = canTrade and bigEnough and not inFractalDrought and legSlope >  slopeEntry and slExitDir != -1 and not srBlockShort and not vwapZoneBlock
+
+// skipAfter2Trails: if armed, skip exactly one taken entry on the FIRST bar a
+// signal would have fired, then consume the flag, reset the streak, and resume.
+skipThisEntry = skipNextEntry and (bullSignal or bearSignal)
+if skipThisEntry
+    skipNextEntry  := false
+    trailWinStreak := 0
+
+bullEntry = bullSignal and not skipThisEntry
+bearEntry = bearSignal and not skipThisEntry
 
 if bullEntry
     tp  = close + tpPts * tpMult
     _slPrice = close - (enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts)
-    strategy.entry("Long",  strategy.long,  comment="S↑")
+    strategy.entry("Long",  strategy.long,  comment="Su")
     strategy.exit("Exit-Long",  "Long",  stop=_slPrice, limit=tp)  // stop pins fill at SL price — no gap slippage
     slExitDir    := 0
     slBarrier    := na
@@ -534,7 +547,7 @@ if bullEntry
     tradeSeq += 1
     tradeId := makeTradeId(tradeSeq)
     label.new(bar_index, low,
-              text      = _isDeep ? "D↑" : "S↑",
+              text      = _isDeep ? "Du" : "Su",
               style     = label.style_label_up,
               color     = _isDeep ? color.new(color.orange, 10) : color.new(color.green, 10),
               textcolor = color.white,
@@ -543,7 +556,7 @@ if bullEntry
 else if bearEntry
     tp  = close - tpPts * tpMult
     _slPrice = close + (enableSmaSL ? (close < smaVal ? slBelowSma : slAboveSma) : slPts)
-    strategy.entry("Short", strategy.short, comment="S↓")
+    strategy.entry("Short", strategy.short, comment="Sd")
     strategy.exit("Exit-Short", "Short", stop=_slPrice, limit=tp)  // stop pins fill at SL price — no gap slippage
     slExitDir    := 0
     slBarrier    := na
@@ -561,7 +574,7 @@ else if bearEntry
     tradeSeq += 1
     tradeId := makeTradeId(tradeSeq)
     label.new(bar_index, high,
-              text      = _isDeep ? "D↓" : "S↓",
+              text      = _isDeep ? "Dd" : "Sd",
               style     = label.style_label_down,
               color     = _isDeep ? color.new(color.orange, 10) : color.new(color.red, 10),
               textcolor = color.white,
@@ -627,6 +640,14 @@ if posClosed
     isTP    = not isTrail and not isTExp and not isTHrd and not isBlk and not isEOD and strategy.netprofit > strategy.netprofit[1]
     isSL    = not isTrail and not isTExp and not isTHrd and not isBlk and not isEOD and not isTP
     wasLong = tradeDir[1] == 1
+
+    // Trail-win streak tracking (for skipAfter2Trails). A TRAIL exit in profit
+    // extends the streak; any other closed trade resets it. When it reaches 2,
+    // arm skipNextEntry so the NEXT entry is skipped once, then resume.
+    tradeWasTrailWin = isTrail and strategy.closedtrades.profit(strategy.closedtrades - 1) > 0
+    trailWinStreak := tradeWasTrailWin ? trailWinStreak + 1 : 0
+    if skipAfter2Trails and trailWinStreak >= 2
+        skipNextEntry := true
 
     if isEOD
         label.new(bar_index, wasLong ? low : high,

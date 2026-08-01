@@ -29,7 +29,7 @@ strategy("Trend Strategy (N-floor)", overlay=true, max_labels_count=500, max_bar
 //=============================
 winMin     = input.int(60,  "Scan window MIN (bars)", minval=5,  maxval=1000, group="Trend detection")
 winMax     = input.int(240, "Scan window MAX (bars)", minval=5,  maxval=1000, group="Trend detection")
-winStep    = input.int(10,  "Scan step (bars)",       minval=1,  maxval=50,   group="Trend detection")
+winStep    = input.int(20,  "Scan step (bars) -- 20 halves compute vs 10 with near-identical detection", minval=1,  maxval=50,   group="Trend detection")
 // MAX winning-N cap: skip entries whose winning window N > maxWinN. Big-N latches (>130) span a
 // multi-hour move that can be net-down while the recent hour bounces up -- producing shorts on
 // "long-looking" price (e.g. 23-Jul 09:18, N=170 short). OOS: the winN>130 tail nets ~0 (wins and
@@ -52,15 +52,15 @@ reEntryFrac= input.float(0.7,   "Re-entry block: same-dir blocked until this fra
 // AGAINST the trend (from the dot close), CANCEL the latch -- and CLOSE any trade entered on it
 // (false start). A cancel does NOT arm the lock but blocks same-dir re-latch for cancelCool bars.
 // 0 mins = off. Sweep-validated: keep confirmAdvPts >= 40 (30 clips runners).
-confirmMins  = input.int(0,     "Confirm window (bars): cancel latch if it reverses within this (0=off)", minval=0, maxval=120, group="Trend break")
-confirmAdvPts= input.float(40.0,"Confirm: cancel if adverse move >= this (pts) inside the window", minval=1.0, step=5.0, group="Trend break")
+confirmMins  = input.int(0,     "EARLY cancel: kill a false start within its first N bars (0=off)", minval=0, maxval=120, group="Trend break")
+confirmAdvPts= input.float(40.0,"EARLY cancel: ...if it moves this far AGAINST inside those N bars (pts)", minval=1.0, step=5.0, group="Trend break")
 // UN-TIMED ADVERSE STOP (replaces the confirm window; synced from live_trend.pine). Cancel the
 // latch / exit the trade if price moves >= adverseStopPts AGAINST the dot close at ANY age --
 // catches SLOW failures the fixed confirm window misses (crosses 40pt only at bar 31+). Active
 // only UNTIL the trend PROVES itself (favorable travel from dot >= provenPts); after that only
 // the pullback break exits, so a deep runner's normal pullback won't trigger it. 0 = OFF.
-adverseStopPts= input.float(40.0,"Adverse stop: cancel if it moves this far vs the dot (0=off, un-timed)", minval=0.0, step=5.0, group="Trend break")
-provenPts     = input.float(80.0,"Adverse stop turns OFF once trend travels this far in its favor", minval=1.0, step=5.0, group="Trend break")
+adverseStopPts= input.float(40.0,"ADVERSE stop (any age, until proven): stop out if it moves this far vs the dot (0=off)", minval=0.0, step=5.0, group="Trend break")
+provenPts     = input.float(80.0,"PROVEN level: adverse stop turns off + double-top arms once trend travels this far in favor", minval=1.0, step=5.0, group="Trend break")
 cancelCool   = input.int(10,    "Cooldown bars blocking same-dir re-latch after a cancel", minval=0, maxval=200, group="Trend break")
 
 // DOUBLE-BOTTOM / DOUBLE-TOP EXIT (strategy only). Once a trade is PROVEN, remember the trend's
@@ -69,6 +69,14 @@ cancelCool   = input.int(10,    "Cooldown bars blocking same-dir re-latch after 
 // the move is stalling at a double bottom/top -> CLOSE the trade to lock the profit. Breaking
 // through = a new extreme (trend continuing) -> the reference just updates, no exit. No time
 // gate -- the away-then-back requirement (dbAwayPts) alone defines the double bottom.
+// BREAK-EVEN LOCK: once an OPEN trade has been at least beArmPts in favor (peak MFE from the
+// actual fill), move a stop to break-even (the entry fill). A trade that proved it can move
+// beArmPts and then rolls all the way back to entry exits FLAT instead of becoming a loss.
+// Rationale (16 Jul 08:59 short: +85 MFE then rolled to -66 break): never give back a trade
+// that went >= beArmPts favorable. False starts (never reached beArmPts) are NOT protected and
+// can still lose -- that is intended. Checked on CLOSE so a wick to entry does not scratch it.
+enableBE   = input.bool(true,  "Break-even lock after trade goes this far in favor", group="Break-even")
+beArmPts   = input.float(40.0, "Arm break-even once favorable excursion reaches this (pts)", minval=1.0, step=5.0, group="Break-even")
 enableDblEx  = input.bool(true, "Enable double-bottom/top exit (proven trades)", group="Double-bottom exit")
 dbAwayPts    = input.float(30.0,"Price must move this far AWAY from the extreme first (pts)", minval=1.0, step=5.0, group="Double-bottom exit")
 dbTolPts     = input.float(8.0, "Retest tolerance: within this many pts of the extreme = a touch", minval=0.5, step=0.5, group="Double-bottom exit")
@@ -187,6 +195,11 @@ var float tPullExt   = na      // pullback extreme (the W's middle peak/trough) 
 var bool  tRiding    = false   // in double-bottom RIDE hold-mode (holding for the continuation)
 bool  dblExit = false          // this bar produced a double-bottom/top exit
 bool  wickExit = false         // this bar produced a rejection-wick exit
+// break-even lock state (measured from the ACTUAL position fill, not the dot)
+var float bePeakFav = 0.0      // best favorable excursion since this position opened
+var bool  beArmed   = false    // has this position been beArmPts in favor at least once
+bool  beExit  = false          // this bar produced a break-even exit
+var string cancelReason = "cancel"  // which cancel rule fired (early / adverse / stale) for the trade list
 bool  rideStart = false        // this bar a double-bottom formed and RIDE mode began (marker)
 int   exitDir = 0              // direction of the trade the dbl/wick exit closed (marker placement)
 int   rideDir = 0              // direction of the trade that started riding (marker placement)
@@ -306,6 +319,7 @@ else
     _favNow = tDir > 0 ? (close - tDotPrice) : (tDotPrice - close)
     _staleCancel = enableStale and _age == staleBars and _favNow < staleFavPts
     _cancel  = _confirmCancel or _adverseStop or _staleCancel
+    cancelReason := _adverseStop ? "adverse" : _confirmCancel ? "early" : _staleCancel ? "stale" : cancelReason
     // double-bottom/top exit: proven trade, price moved away (dbAwayPts) then RETESTED the extreme
     // (within dbTolPts, not broken through) -> stalling at a double bottom/top, close to lock
     // profit. Must NOT be a new-extreme bar -- a retest comes BACK to the extreme, it doesn't make
@@ -411,22 +425,42 @@ if (wickLong or wickShort) and tState == 0
     tRiding  := false
     tPullExt := na
 
+// BREAK-EVEN LOCK: track favorable excursion from the ACTUAL fill; arm at beArmPts; once armed,
+// exit flat if price closes back to entry. Reset when flat. _posDir = current position side.
+_posDir = strategy.position_size > 0 ? 1 : (strategy.position_size < 0 ? -1 : 0)
+if _posDir == 0
+    bePeakFav := 0.0
+    beArmed   := false
+else
+    _fillPx = strategy.position_avg_price
+    _favNowBE = _posDir > 0 ? (high - _fillPx) : (_fillPx - low)
+    bePeakFav := math.max(bePeakFav, _favNowBE)
+    if bePeakFav >= beArmPts
+        beArmed := true
+    _closeFav = _posDir > 0 ? (close - _fillPx) : (_fillPx - close)
+    beExit := enableBE and beArmed and _closeFav <= 0
+
 // exit on the trend break (only closes if a position is open). The double-bottom and rejection-
-// wick exits ride the same trendBreak but get their own comments for the trade list.
+// wick exits ride the same trendBreak but get their own comments for the trade list. A double-top
+// or wick (a WIN) takes precedence over BE; otherwise the BE lock fires before a break so a proven
+// mover that rolls back to entry exits FLAT instead of riding the 150pt pullback down to a loss.
 if wickExit
     strategy.close("Long",  comment="wick")
     strategy.close("Short", comment="wick")
 else if dblExit
     strategy.close("Long",  comment="dbl-top")
     strategy.close("Short", comment="dbl-bot")
+else if beExit
+    strategy.close("Long",  comment="be")
+    strategy.close("Short", comment="be")
 else if trendBreak
     strategy.close("Long",  comment="break")
     strategy.close("Short", comment="break")
 
 // exit on a confirmation-window CANCEL (the entry was a false start that reversed immediately)
 if trendCancel
-    strategy.close("Long",  comment="cancel")
-    strategy.close("Short", comment="cancel")
+    strategy.close("Long",  comment=cancelReason)
+    strategy.close("Short", comment=cancelReason)
 
 // EOD FLATTEN safety net: the EOD trend-end above already fires trendBreak (which closes the
 // position), but this guarantees flat at the close even if no trend was live. No re-entry.
@@ -515,6 +549,8 @@ plot(tradeShort ? 1 : 0, "P_tradeShort", color=na, display=display.data_window)
 plot(enableSessFilt ? 1 : 0, "P_enableSessFilt", color=na, display=display.data_window)
 plot(blockStartHr,  "P_blockStartHr", color=na, display=display.data_window)
 plot(blockEndHr,    "P_blockEndHr",   color=na, display=display.data_window)
+plot(enableBE ? 1 : 0, "P_enableBE",  color=na, display=display.data_window)
+plot(beArmPts,      "P_beArmPts",     color=na, display=display.data_window)
 
 //=============================
 // Diagnostics (data window)

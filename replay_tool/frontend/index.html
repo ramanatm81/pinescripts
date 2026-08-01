@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Replay Backtest — Nara (slope-touch fade)</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header id="topbar">
+  <div class="brand">Replay Backtest</div>
+  <label>Run
+    <select id="runSelect"></select>
+  </label>
+  <span id="fidelity" class="badge"></span>
+
+  <div id="filterBar">
+    <div class="segmented" id="filterMode">
+      <button data-mode="month" class="active">Month</button>
+      <button data-mode="range">Date range</button>
+      <button data-mode="contract">Contract</button>
+    </div>
+    <span id="filterControls">
+      <select id="monthSelect" class="fctl"></select>
+      <span id="rangeCtl" class="fctl hidden">
+        <input type="date" id="rangeStart"> <span class="dim">→</span> <input type="date" id="rangeEnd">
+        <button id="rangeApply">Apply</button>
+      </span>
+      <select id="contractSelect" class="fctl hidden"></select>
+    </span>
+  </div>
+
+  <div id="summary" class="summary"></div>
+</header>
+
+<div id="main">
+  <section id="left">
+    <div id="chart"></div>
+
+    <div id="controls">
+      <button id="btnFirst" title="Jump to start">⏮</button>
+      <button id="btnStepBack" title="Step back">◀</button>
+      <button id="btnPlay" title="Play/Pause">▶</button>
+      <button id="btnStepFwd" title="Step forward">▶</button>
+      <button id="btnLast" title="Jump to end">⏭</button>
+      <label class="speed">Speed
+        <select id="speed">
+          <option value="1">1×</option>
+          <option value="5" selected>5×</option>
+          <option value="20">20×</option>
+          <option value="100">100×</option>
+          <option value="500">max</option>
+        </select>
+      </label>
+      <label class="winlen">Window
+        <select id="winLen">
+          <option value="300">300 bars</option>
+          <option value="750" selected>750 bars</option>
+          <option value="1500">1500 bars</option>
+          <option value="3000">3000 bars</option>
+        </select>
+      </label>
+      <button id="btnPrevTrade" title="Previous trade">⟨ Trade</button>
+      <button id="btnNextTrade" title="Next trade">Trade ⟩</button>
+    </div>
+
+    <div id="scrubRow">
+      <input type="range" id="scrub" min="0" max="100" value="0" step="1">
+      <div id="scrubLabel" class="mono"></div>
+    </div>
+  </section>
+
+  <aside id="right">
+    <div class="panel" id="statePanel">
+      <h3>Current bar <span class="dim">· times London</span></h3>
+      <div id="stateBody" class="kv"></div>
+    </div>
+
+    <div class="panel" id="paramsPanel">
+      <h3>Run parameters</h3>
+      <div id="paramsBody" class="kv"></div>
+    </div>
+
+    <div class="panel" id="tradesPanel">
+      <h3>Trades <span id="tradeCount" class="dim"></span></h3>
+      <div id="tradeTableWrap">
+        <table id="tradeTable">
+          <thead><tr><th>#</th><th>dir</th><th>entry</th><th>exit</th><th>pts</th><th>MFE</th><th>MAE</th><th>reason</th><th>cum$</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </aside>
+</div>
+
+<div id="loading" class="loading hidden">loading…</div>
+
+<script src="/static/vendor/lightweight-charts.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

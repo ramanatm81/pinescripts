@@ -73,6 +73,12 @@ def run(bars, p):
     # Post-trail skip: after a trade closes via TRAIL, skip the next N entry signals
     # (any direction) that the strategy would otherwise take, then resume. 0 = off.
     skipAfterTrail  = p.get("skipAfterTrail", 0) or 0
+    # Revenge-long block: after a SHORT closes at a LOSS, block LONG entries for the
+    # next N minutes (wall-clock, not bars). A long that would fire inside the window
+    # is fully dropped; longs after the window are allowed. Shorts unaffected. 0 = off.
+    revengeLongBlockMin = p.get("revengeLongBlockMin", 0) or 0
+    # optional dict the caller can pass to receive out-of-band counters
+    _out = p.get("_out", None)
     # Block new entries during these CT hours (set of ints 0-23). Open-trade mgmt unaffected.
     blockHoursCT    = p.get("blockHoursCT", None)
     lookback        = p.get("lookback", 10)
@@ -122,7 +128,7 @@ def run(bars, p):
     breachFadeSL    = p.get("breachFadeSL", True)   # True = manage like normal (SMA stop + TP); False = no SL, exit only on opposite signal
 
     # --- state ---
-    inTrade=False; tradeDir=0; entryPrice=None; entrySlope=None
+    inTrade=False; tradeDir=0; entryPrice=None; entrySlope=None; entryDt=None
     bestPrice=None; trailStop=None; cooldown=0; barsInTrade=0; activeSL=None
     delayPending=0; delayDir=0   # delayed extreme-above-SMA entry: bars left, direction
     bigLossBlock=0               # bars left of the all-directions block after a big loss above SMA
@@ -132,6 +138,8 @@ def run(bars, p):
     deepBestPrice=None; deepBlockDir=0; entryWasDeep=False; exitBestPrice=None
     deepLossBlockDir=0
     trailSkipLeft=0   # entry signals still to skip after a TRAIL exit
+    revengeBlockUntil=None  # datetime until which longs are blocked after a losing short
+    revengeBlockedCount=0   # count of longs actually suppressed by the rule
 
     slopeBuf=[]; legSlope=None; legSlopeAngle=None
     trBuf=[]; atrVal=None; prevClose=None
@@ -247,11 +255,15 @@ def run(bars, p):
             legSlopeAngle = round(math.degrees(math.atan(legSlope/atrVal)),1)
 
         def close_trade(exit_price, reason):
-            nonlocal deepLossBlockDir, deepBlockDir, deepBestPrice, bigLossBlock, beArmed, trailSkipLeft
+            nonlocal deepLossBlockDir, deepBlockDir, deepBestPrice, bigLossBlock, beArmed, trailSkipLeft, revengeBlockUntil
             beArmed=False
             pnl = (exit_price-entryPrice) if tradeDir==1 else (entryPrice-exit_price)
             wasLong = (tradeDir==1)
-            trades.append((tradeDir, entryPrice, exit_price, pnl, reason, entryWasDeep, dt))
+            trades.append((tradeDir, entryPrice, exit_price, pnl, reason, entryWasDeep, dt, entryDt))
+            # revenge-long block: a SHORT closing at a loss arms a wall-clock window
+            # during which new LONG entries are suppressed.
+            if revengeLongBlockMin>0 and (not wasLong) and pnl < 0:
+                revengeBlockUntil = dt + timedelta(minutes=revengeLongBlockMin)
             # post-trail skip: arm the counter so the next N would-be entries are skipped
             if skipAfterTrail>0 and reason=="TRAIL":
                 trailSkipLeft = skipAfterTrail
@@ -367,11 +379,11 @@ def run(bars, p):
             thrdRevPending=False; deepBlockDir=0; entryWasDeep=False
             slAmt = (slBelowSma if (smaVal is not None and c<smaVal) else slAboveSma) if enableSmaSL else slPts
             if thrdRevDir==1:
-                tradeDir=1; entryPrice=c; entrySlope=legSlope; inTrade=True; activeSL=slAmt
+                tradeDir=1; entryPrice=c; entrySlope=legSlope; entryDt=dt; inTrade=True; activeSL=slAmt
                 trailStop=None; bestPrice=None
                 slExitDir=0; slEntryPrice=None; barrierBuf=None
             elif thrdRevDir==-1:
-                tradeDir=-1; entryPrice=c; entrySlope=legSlope; inTrade=True; activeSL=slAmt
+                tradeDir=-1; entryPrice=c; entrySlope=legSlope; entryDt=dt; inTrade=True; activeSL=slAmt
                 trailStop=None; bestPrice=None
                 slExitDir=0; slEntryPrice=None; barrierBuf=None
 
@@ -385,7 +397,8 @@ def run(bars, p):
         _calmOk = (calmSkipMult<=0.0) or (atrVal is not None and atrLong is not None and atrVal >= calmSkipMult*atrLong)
         _hourBlocked = (blockHoursCT is not None and (ctmins//60) in blockHoursCT)
         canTrade = (not inTrade and cooldown==0 and not eodClose and not nyOpenBlock
-                    and not lnOpenBlock and not preNYBlock and not ethOpenBlock and legSlope is not None
+                    and not lnOpenBlock and not preNYBlock and not ethOpenBlock
+                    and legSlope is not None
                     and _calmOk and not _hourBlocked)
         bigEnough = (not enableBodyFilter) or (abs(c-o) >= minBodyPts)
         isDeepSignal = legSlope is not None and abs(legSlope) >= deepSlope
@@ -409,14 +422,14 @@ def run(bars, p):
             if shortDue and breachTradeDir!=-1:
                 if inTrade:  # reverse an open position first
                     close_trade(c,"BF-rev")
-                tradeDir=-1; entryPrice=c; entrySlope=legSlope; inTrade=True; breachTradeDir=-1
+                tradeDir=-1; entryPrice=c; entrySlope=legSlope; entryDt=dt; inTrade=True; breachTradeDir=-1
                 activeSL = _slAmt if breachFadeSL else 1e9   # 1e9 = effectively no SL
                 trailStop=None; bestPrice=None; slExitDir=0; slEntryPrice=None; barrierBuf=None
                 entryWasDeep=False; barsInTrade=0
             elif longDue and breachTradeDir!=1:
                 if inTrade:
                     close_trade(c,"BF-rev")
-                tradeDir=1; entryPrice=c; entrySlope=legSlope; inTrade=True; breachTradeDir=1
+                tradeDir=1; entryPrice=c; entrySlope=legSlope; entryDt=dt; inTrade=True; breachTradeDir=1
                 activeSL = _slAmt if breachFadeSL else 1e9
                 trailStop=None; bestPrice=None; slExitDir=0; slEntryPrice=None; barrierBuf=None
                 entryWasDeep=False; barsInTrade=0
@@ -430,12 +443,21 @@ def run(bars, p):
         else:
             _trigLong  = legSlope is not None and legSlope < -slopeEntry
             _trigShort = legSlope is not None and legSlope >  slopeEntry
+        # revenge-long window: block LONG entries while within N min of a losing short's exit
+        revengeBlk = (revengeLongBlockMin>0 and revengeBlockUntil is not None and dt < revengeBlockUntil)
         bullEntry = (canTrade and not breachActive and bigEnough and not inFractalDrought and _trigLong
                      and slExitDir!=1 and not srBlock and (not inDeepBlock or isDeepSignal)
-                     and not deepLossBlockLong and not vwapBlock and not bigBlk)
+                     and not deepLossBlockLong and not vwapBlock and not bigBlk and not revengeBlk)
         bearEntry = (canTrade and not breachActive and bigEnough and not inFractalDrought and _trigShort
                      and slExitDir!=-1 and not srBlock and (not inDeepBlock or isDeepSignal)
                      and not deepLossBlockShort and not vwapBlock and not bigBlk)
+
+        # count a long that WOULD have entered this bar but for the revenge window
+        if revengeBlk and (canTrade and not breachActive and bigEnough and not inFractalDrought
+                           and _trigLong and slExitDir!=1 and not srBlock
+                           and (not inDeepBlock or isDeepSignal) and not deepLossBlockLong
+                           and not vwapBlock and not bigBlk):
+            revengeBlockedCount += 1
 
         # Post-trail skip: consume a would-be entry signal (either direction) and suppress it.
         # A skipped signal does NOT become a delayed entry either — it's fully dropped.
@@ -456,7 +478,7 @@ def run(bars, p):
             slAmt = (slBelowSma if (smaVal is not None and c<smaVal) else slAboveSma) if enableSmaSL else slPts
             if extremeSlope>0 and extremeSL>0 and legSlope is not None and abs(legSlope)>=extremeSlope:
                 slAmt = extremeSL
-            tradeDir=1; entryPrice=c; entrySlope=legSlope; inTrade=True; activeSL=slAmt
+            tradeDir=1; entryPrice=c; entrySlope=legSlope; entryDt=dt; inTrade=True; activeSL=slAmt
             trailStop=None; bestPrice=None
             slExitDir=0; slEntryPrice=None; barrierBuf=None
             entryWasDeep=isDeepSignal; deepBlockDir=0; deepLossBlockDir=0
@@ -464,7 +486,7 @@ def run(bars, p):
             slAmt = (slBelowSma if (smaVal is not None and c<smaVal) else slAboveSma) if enableSmaSL else slPts
             if extremeSlope>0 and extremeSL>0 and legSlope is not None and abs(legSlope)>=extremeSlope:
                 slAmt = extremeSL
-            tradeDir=-1; entryPrice=c; entrySlope=legSlope; inTrade=True; activeSL=slAmt
+            tradeDir=-1; entryPrice=c; entrySlope=legSlope; entryDt=dt; inTrade=True; activeSL=slAmt
             trailStop=None; bestPrice=None
             slExitDir=0; slEntryPrice=None; barrierBuf=None
             entryWasDeep=isDeepSignal; deepBlockDir=0; deepLossBlockDir=0
@@ -485,7 +507,7 @@ def run(bars, p):
                     slAmt = (slBelowSma if (smaVal is not None and c<smaVal) else slAboveSma) if enableSmaSL else slPts
                     if extremeSlope>0 and extremeSL>0 and abs(legSlope)>=extremeSlope:
                         slAmt = extremeSL
-                    tradeDir=delayDir; entryPrice=c; entrySlope=legSlope; inTrade=True; activeSL=slAmt
+                    tradeDir=delayDir; entryPrice=c; entrySlope=legSlope; entryDt=dt; inTrade=True; activeSL=slAmt
                     trailStop=None; bestPrice=None
                     slExitDir=0; slEntryPrice=None; barrierBuf=None
                     entryWasDeep=isDeepSignal; deepBlockDir=0; deepLossBlockDir=0
@@ -521,6 +543,8 @@ def run(bars, p):
         # Detect: last trade appended this bar.
         # (handled by checking trades growth — simpler: set on each close above)
 
+    if _out is not None:
+        _out["revengeBlockedCount"] = revengeBlockedCount
     return trades
 
 def stats(trades):
