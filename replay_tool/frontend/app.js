@@ -115,7 +115,7 @@ function showLoading(on) { $("loading").classList.toggle("hidden", !on); }
 // Fetch a window [lo,hi) of frames as an array of per-bar objects (backend returns columnar).
 async function fetchWindow(lo, hi) {
   lo = Math.max(0, lo); hi = Math.min(state.nBars, hi);
-  const cols = "i,time,o,h,l,c,res,supp,run,r2,pos,entry_px,stop_level,stop_kind," +
+  const cols = "i,time,o,h,l,c,res,supp,anchor,run,r2,pos,entry_px,stop_level,stop_kind," +
                "cum_usd,unreal_usd,entry_dir,exit_reason,exit_px,long_sig,short_sig,long_arm,short_arm";
   const d = await api(`/run/${state.tag}/frames?from=${lo}&to=${hi}&cols=${cols}`);
   const n = d.n, out = new Array(n);
@@ -246,14 +246,25 @@ function renderState(frame) {
   const posCls = f.pos > 0 ? "long" : f.pos < 0 ? "short" : "";
   const unreal = f.unreal_usd;
   const at = tradeAt(f.i);      // the trade active on this bar (for its full MFE/MAE)
+  // Per-strategy label for the `run` frame column (OLS run for slope, displacement for WDF, ...).
+  const strat = (state.meta.cfg && state.meta.cfg.strategy) || "";
+  const runLabel = strat === "window_displacement_fade" ? "displacement" : "OLS run";
+  // res/supp are the generic "two horizontal levels" channel: OR-high/low for ORB, the two drive
+  // trigger rails for open-drive, S/R lines otherwise.
+  const isORB = strat === "opening_range_breakout";
+  const isOD = strat === "open_drive";
+  const hiLbl = isORB ? "OR high" : isOD ? "drive-up lvl" : "resistance";
+  const loLbl = isORB ? "OR low" : isOD ? "drive-dn lvl" : "support";
   const rows = [
     ["time", ldnFull(f.time)],
     ["bar #", f.i],
     ["close", fmt(f.c)],
-    ["resistance", fmt(f.res)],
-    ["support", fmt(f.supp)],
-    ["OLS run", `${fmt(f.run, 1)} pt`],
-    ["OLS R²", fmt(f.r2, 3)],
+    // S/R and R² only make sense for strategies that populate them -- hide when null.
+    ...(f.res != null ? [[hiLbl, fmt(f.res)]] : []),
+    ...(f.supp != null ? [[loLbl, fmt(f.supp)]] : []),
+    ...(f.anchor != null ? [["RTH open", fmt(f.anchor)]] : []),
+    ...(f.run != null ? [[runLabel, `${fmt(f.run, 1)} pt`]] : []),
+    ...(f.r2 != null ? [["OLS R²", fmt(f.r2, 3)]] : []),
     ["position", `<span class="${posCls}">${posTxt}</span>`],
     ["entry px", fmt(f.entry_px)],
     ["stop", f.stop_level != null ? `${fmt(f.stop_level)} (${f.stop_kind})` : "—"],
@@ -264,17 +275,29 @@ function renderState(frame) {
   ];
   $("stateBody").innerHTML = rows.map(([k, v]) => `<div class="k">${k}</div><div class="v">${v}</div>`).join("");
 }
+// Pretty labels for known cfg keys (any strategy's). Unknown keys are humanized automatically,
+// so a new strategy's params show up with no code change -- the panel is driven by the run's cfg.
+const PARAM_LABELS = {
+  strategy: "strategy",
+  win_len: "window (bars)", thr: "displacement thr", tp: "take-profit (pt)", sl: "stop-loss (pt)",
+  prev_block: "prev filter on", prev_win: "prev window (bars)", prev_thr: "prev reverse >(pt)",
+  block_after_tp: "block after TP", min_r2: "min R²",
+  // slope-touch-fade keys (kept so its runs still read well):
+  run_min: "min run (pt)", pullback: "pullback (pt)", break_tol: "break tol", sr_half: "S/R half",
+  enable_trail: "trail on", trail: "trail (pt)", enable_init: "init stop on", stop_buf: "stop buf",
+  block_ny: "block NY", block_ln: "block LN", mult: "$/pt",
+};
+const humanize = (k) => k.replace(/_/g, " ");
+const fmtParam = (v) =>
+  v === true ? "true" : v === false ? "false" : (v == null ? "—" : v);
 function renderParams() {
-  const cfg = state.meta.cfg;
-  const order = [
-    ["win_len", "OLS window"], ["run_min", "min run (pt)"], ["min_r2", "min R²"],
-    ["pullback", "pullback (pt)"], ["break_tol", "break tol"], ["sr_half", "S/R half"],
-    ["enable_trail", "trail on"], ["trail", "trail (pt)"],
-    ["enable_init", "init stop on"], ["stop_buf", "stop buf"],
-    ["block_ny", "block NY"], ["block_ln", "block LN"], ["mult", "$/pt"],
-  ];
-  $("paramsBody").innerHTML = order.map(([k, label]) =>
-    `<div class="k">${label}</div><div class="v">${cfg[k]}</div>`).join("");
+  const cfg = state.meta.cfg || {};
+  // Render EVERY key present in the run's cfg, in its own order; strategy name first if present.
+  const keys = Object.keys(cfg);
+  keys.sort((a, b) => (a === "strategy" ? -1 : b === "strategy" ? 1 : 0));
+  $("paramsBody").innerHTML = keys.map((k) =>
+    `<div class="k">${PARAM_LABELS[k] || humanize(k)}</div><div class="v">${fmtParam(cfg[k])}</div>`
+  ).join("");
 }
 function renderSummary() {
   const s = state.meta.stats;
@@ -456,6 +479,103 @@ async function applyFilterFromControls() {
   }
 }
 
+// ---- New Run modal: build the param form from /params/{strategy}, POST /simulate, poll, load ----
+async function apiPost(path, body) {
+  const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body) });
+  if (!r.ok) throw new Error(`${path} -> ${r.status} ${await r.text()}`);
+  return r.json();
+}
+const newrun = { schema: null };
+
+async function openNewRun() {
+  const strats = await api("/strategies");
+  const mS = $("mStrategy");
+  mS.innerHTML = strats.map(s => `<option value="${s.strategy}">${s.label}</option>`).join("");
+  mS.onchange = () => buildParamForm(mS.value);
+  await buildParamForm(mS.value);
+  $("mStatus").textContent = ""; $("mStatus").className = "mstatus";
+  $("newRunModal").classList.remove("hidden");
+}
+function closeNewRun() { $("newRunModal").classList.add("hidden"); }
+
+async function buildParamForm(strategy) {
+  const schema = await api(`/params/${strategy}`);
+  newrun.schema = schema;
+  const groups = {};
+  for (const f of schema.params) (groups[f.group] = groups[f.group] || []).push(f);
+  let html = "";
+  for (const [g, fields] of Object.entries(groups)) {
+    html += `<div class="mgroup">${g}</div>`;
+    for (const f of fields) {
+      const id = `mp_${f.name}`;
+      if (f.type === "bool") {
+        html += `<div class="mfield"><label for="${id}">${f.label}</label>` +
+          `<input type="checkbox" id="${id}" ${f.default ? "checked" : ""}></div>`;
+      } else {
+        const step = f.step != null ? f.step : (f.type === "int" ? 1 : "any");
+        const mn = f.min != null ? `min="${f.min}"` : "";
+        const mx = f.max != null ? `max="${f.max}"` : "";
+        html += `<div class="mfield"><label for="${id}">${f.label}</label>` +
+          `<input type="number" id="${id}" value="${f.default}" step="${step}" ${mn} ${mx}></div>`;
+      }
+    }
+  }
+  $("mParams").innerHTML = html;
+}
+
+function collectParams() {
+  const out = {};
+  for (const f of newrun.schema.params) {
+    const el = $(`mp_${f.name}`);
+    if (f.type === "bool") out[f.name] = el.checked;
+    else out[f.name] = f.type === "int" ? parseInt(el.value, 10) : parseFloat(el.value);
+  }
+  return out;
+}
+
+async function generateRun() {
+  const btn = $("btnGenerate"), st = $("mStatus");
+  const body = {
+    strategy: $("mStrategy").value,
+    dataset: $("mDataset").value,
+    start: $("mStart").value || null,   // <input type=month> gives "YYYY-MM"
+    end: $("mEnd").value || null,
+    params: collectParams(),
+  };
+  btn.disabled = true; st.className = "mstatus"; st.textContent = "generating… (first run warms up ~10s)";
+  try {
+    let res = await apiPost("/simulate", body);
+    if (res.state !== "done") {
+      // poll the job
+      for (let i = 0; i < 120; i++) {
+        await new Promise(r => setTimeout(r, 700));
+        const j = await api(`/job/${res.job_id}`);
+        if (j.state === "done") { res = { ...res, ...j }; break; }
+        if (j.state === "error") throw new Error(j.error || "simulation failed");
+        st.textContent = `generating… (${j.state})`;
+      }
+    }
+    if (res.state !== "done" && !res.tag) throw new Error("timed out");
+    st.textContent = res.cached ? "loaded existing run" : "done";
+    await refreshRunsAndLoad(res.tag);
+    closeNewRun();
+  } catch (e) {
+    st.className = "mstatus err"; st.textContent = e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function refreshRunsAndLoad(tag) {
+  const runs = (await api("/runs")).filter(r => !r.error).sort((a, b) => a.n_bars - b.n_bars);
+  const sel = $("runSelect");
+  sel.innerHTML = runs
+    .map(r => `<option value="${r.tag}">${r.tag} · ${r.n_trades} trades · $${fmt(r.stats?.usd, 0)}</option>`).join("");
+  sel.value = tag;
+  await loadRun(tag);
+}
+
 // ---- wiring ----
 async function init() {
   const runs = (await api("/runs")).filter(r => !r.error)
@@ -464,6 +584,12 @@ async function init() {
   sel.innerHTML = runs
     .map(r => `<option value="${r.tag}">${r.tag} · ${r.n_trades} trades · $${fmt(r.stats?.usd, 0)}</option>`).join("");
   sel.onchange = () => loadRun(sel.value);
+
+  // New Run modal wiring
+  $("btnNewRun").onclick = () => openNewRun().catch(e => alert("open failed: " + e.message));
+  $("btnCloseModal").onclick = closeNewRun;
+  $("btnGenerate").onclick = generateRun;
+  $("newRunModal").onclick = (e) => { if (e.target.id === "newRunModal") closeNewRun(); };
 
   $("btnPlay").onclick = () => state.playing ? pause() : play();
   $("btnStepFwd").onclick = () => { pause(); seekTo(state.cur + 1); };

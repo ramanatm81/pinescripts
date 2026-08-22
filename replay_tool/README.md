@@ -43,6 +43,43 @@ Current runs (regenerate any time):
 
 ---
 
+## Strategies (the "+ New Run" form)
+
+The UI generates runs itself: **+ New Run** → pick a strategy → the parameter form is built
+automatically from that strategy's schema → pick a dataset and optional date range → Generate.
+No exporter needed for these.
+
+| strategy | label | engine | oracle |
+|----------|-------|--------|--------|
+| `window_displacement_fade` | Window Displacement Fade | `wdf_sim.py` | `backtest/window_displacement_fade_bt.py` |
+| `opening_range_breakout` | Opening-Range Breakout (Sapporo) | `orb_sim.py` | `backtest/orb_bt.py` |
+| `open_drive` | Open-Drive Momentum (Otaru) | `open_drive_sim.py` | `backtest/open_drive_bt.py` |
+
+**Oracle gate:** the first time a strategy generates in a session, the backend runs its `verify()`
+and refuses to write the run unless the numba sim matches the pure-Python port trade-for-trade.
+That gate is the whole point — speed never overrides the port.
+
+Verify by hand:
+```bash
+cd replay_tool
+.venv/bin/python open_drive_sim.py --dataset 5yr --verify   # exact match on 934 trades
+```
+
+### Adding a strategy
+One registry entry in `backend.py` (`schema` / `build` / `verify` / `tag_prefix`) plus a
+`<name>_sim.py` exposing `build_run(dataset, cfg, start, end)` and `verify(dataset, cfg)`.
+The frontend form is data-driven from the schema, so no frontend change is needed for new params.
+A new *frame column* (like open-drive's `anchor`) does need three edits: the sim emits it,
+`frames_export.write_parquet` lists it in BOTH `cols` and the `pa.schema`, and `app.js` adds it to
+the `cols` string in `fetchWindow`. Miss the `pa.schema` one and the column is silently dropped.
+
+### Open-Drive chart reading
+`res`/`supp` carry the two drive-trigger rails (RTH open ± trigger), `anchor` is the RTH open
+itself, and `stop_level` is the ATR stop once in a position. Entries are resting-stop fills, so the
+entry marker sits at the rail (or at the bar open when the bar gapped through it).
+
+---
+
 ## Create / run a DIFFERENT run for the UI
 
 Run the exporter — it writes `run_<tag>.parquet`, and the UI picks it up automatically (refresh the

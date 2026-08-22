@@ -292,6 +292,9 @@ def write_parquet(frames, trades, meta, out_path, rows_per_group=1440):
         "o": [f["o"] for f in frames], "h": [f["h"] for f in frames],
         "l": [f["l"] for f in frames], "c": [f["c"] for f in frames],
         "res": [f["res"] for f in frames], "supp": [f["supp"] for f in frames],
+        # open_drive carries the RTH-open anchor alongside its two trigger rails; other strategies
+        # do not emit it, so default to None rather than KeyError.
+        "anchor": [f.get("anchor") for f in frames],
         "run": [f["run"] for f in frames], "r2": [f["r2"] for f in frames],
         "long_sig": [f["long_sig"] for f in frames],
         "short_sig": [f["short_sig"] for f in frames],
@@ -311,7 +314,7 @@ def write_parquet(frames, trades, meta, out_path, rows_per_group=1440):
     schema = pa.schema([
         ("i", pa.int32()), ("time", pa.string()),
         ("o", pa.float64()), ("h", pa.float64()), ("l", pa.float64()), ("c", pa.float64()),
-        ("res", pa.float64()), ("supp", pa.float64()),
+        ("res", pa.float64()), ("supp", pa.float64()), ("anchor", pa.float64()),
         ("run", pa.float64()), ("r2", pa.float64()),
         ("long_sig", pa.bool_()), ("short_sig", pa.bool_()),
         ("long_arm", pa.bool_()), ("short_arm", pa.bool_()),
