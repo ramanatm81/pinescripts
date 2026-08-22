@@ -1,0 +1,655 @@
+//@version=6
+// =====================================================================================
+// OPEN-DRIVE MOMENTUM -- STRATEGY  ("Otaru")
+//
+// Premise, in one line: once the RTH session has travelled a fixed distance from the open, it
+// keeps going more often than it reverts -- so go WITH the move and hold it to the close.
+//
+//   TRIGGER : resting STOP orders at RTH-open +/- trigPts, armed AT THE OPEN (settleMin 0). There is
+//             no opening-range dependency -- price hitting +/-trigPts is the whole trigger, whenever
+//             it happens. Whichever side fills first cancels the other. One trade/day, no re-entry.
+//   ENTRY   : long if price drove UP through +trigPts, short if it drove DOWN through -trigPts.
+//             This is momentum, NOT a fade. The fade of this exact setup was tested and loses.
+//             Use a STOP, never a LIMIT -- a limit at these levels fills only on the move AGAINST
+//             you and never on the drive itself, which inverts the strategy.
+//   EXIT    : ATR stop (1.0x trailing daily ATR, frozen at entry) or EOD flatten, whichever first.
+//             No take-profit -- adding one costs net.
+//   FILTER  : optional pre-open slope gate (see below). OFF by default.
+//
+// STOPS: FIXED LOSES, ATR-SCALED WINS. This corrects an earlier version of this file that shipped
+// with no stop at all and asserted stops always hurt. That was true only of FIXED-point stops --
+// cat=100 -> exTop10 -1,252; cat=150 -> -3,468 -- because a fixed number of points means something
+// different on a 400pt-range day than on a 150pt one. Scaled to the day's own ATR, the same idea
+// pays. An 81-cell TP x SL sweep at 2pt slip: all 81 cells have POSITIVE exTop10, 44 beat the
+// no-stop baseline, and the best net of any of them is stop-only at 1.0x ATR.
+//   AVOID slMult <= 0.5: that whole column collapses (WR 39%, exTop10 near zero) -- it is the
+//   fixed-stop failure mode reappearing as a too-tight adaptive stop.
+//
+// HONEST NUMBERS -- from backtest/open_drive_bt.py, the reference port. 5yr MNQ 1-min, resting
+// STOP-order fills (level, or bar open when the bar gapped through), no cat stop, 1 trade/day:
+//   DEFAULT trig120 settle0 SL1.0xATR, 2pt : +16,346  exTop10 +8,130  top10 50%  n=934  5/6 yrs
+//           same, 1pt slip                   : +17,280  exTop10 +9,054  top10 48%  n=934  5/6 yrs
+//           NO stop (the old default), 2pt   : +15,708  exTop10 +7,491  top10 52%  n=934  5/6 yrs
+//           trig100 settle0 SL1.0xATR, 1pt   : +12,884  exTop10 +4,537  top10 65%  n=1066
+//
+// slMult surface (2pt): 0.5 +10,542/+2,326 | 0.75 +13,531/+5,315 | 1.0 +16,346/+8,130 |
+//                       1.25 +15,935/+7,718 | 1.5 +15,892/+7,676 | 2.0 +15,083/+6,867
+// atrDays surface (2pt): 7 +15,815 | 10 +15,570 | 14 +16,346 | 20 +15,425 | 30 +15,630 -- flat.
+// Exit mix: session 892 (95.5%) +29,684 avg +33.3 | atrstop 42 (4.5%) -13,338 avg -317.6.
+// The stop fires on only 4.5% of trades; it caps 42 disasters and leaves the other 95% untouched.
+//
+// SETTLE WINDOW: arming at the open (settleMin 0) BEATS delaying. The decay is monotonic --
+// 0:+15,708  15:+13,595  30:+13,611  45:+12,369  60:+11,126  90:+8,430 (exTop10 +7,491 -> +585).
+// The trade COUNT barely changes (934 vs 931 -- only 3 days trade that otherwise would not), because
+// at 120pt the move rarely completes inside 30 min. What the delay costs is ENTRY PRICE on the other
+// days: 288 trades enter inside the first 30 min and are worth +7,701. Waiting means entering the
+// same move later and worse. There is NO opening-range dependency in this strategy.
+// Quote the 2pt row, not the 1pt one: stop orders fill during fast moves, where slippage is worse
+// than a close fill. The edge survives to 5pt (+8,537, exTop10 +856).
+//
+// READ exTop10 BEFORE net. The slope-gated config's exTop10 is NEGATIVE -- its top 10 trades are
+// 101% of net, the tail-luck signature -- which is why the gate is OFF by default despite its
+// prettier win rate. 2021 is negative in every config (-1,150 at default); the edge is 2022-2026.
+//
+// TWO KNOWN WEAKNESSES, not hidden:
+//   1. The recent half is tail-dependent. 2021-23 exTop10 +1,134; 2024-26 exTop10 -994 despite
+//      +6,516 net. The clean half is the OLD one, which is the wrong way round.
+//   2. The short side fails the tail test on its own: short-only +3,497 but exTop10 -2,858, 4/6 yrs.
+//      Long-only is +5,645 with exTop10 only +4. Neither side is independently strong; the combined
+//      result is better than either, which is a thin thing to rest on.
+//
+// This is a MODEST edge -- roughly +2,300 pts/yr at 1 contract before commissions -- not a
+// Sapporo-class one. Trade it sized accordingly.
+//
+// FILL MODEL: this uses a resting STOP order, so intrabar fills are real and modelled. The trap is
+// assuming a stop ALWAYS fills at its level -- it does not. 22.8% of entries here come on bars that
+// gapped through, filling at the bar open, worse than the level. A naive always-fill-at-level study
+// of this idea shows +24,188; modelling the gap-throughs gives +12,761 at the same slip. Roughly 2x
+// inflation from that one assumption. Reproduce it: python3 backtest/open_drive_bt.py --fillcheck
+//
+// SLOPE GATE (optional, OFF by default): only trade days whose 13:30-14:30 LDN (07:30-08:30 CT,
+// the hour into the cash open) net slope is at least slopeMin pts/bar. Steepness of that hour
+// predicts the day's RANGE, monotonically and strongly (|slope|>=2.0 -> RTH range 150% of baseline;
+// <0.25 -> 86%), but predicts DIRECTION not at all (continuation 46-50%, a coin flip). So the gate
+// selects wide-range days, which is why per-trade average roughly doubles when it is on. It does
+// NOT add net -- turning it on REDUCES total net AND breaks exTop10 at trig150. Use it only if you
+// want fewer setups to watch manually, and accept that it makes the result tail-dependent.
+//
+// ANCHOR: the trigger measures from the RTH OPEN price, not the OR edge. "OR edge + 100" was
+// tested and is worse at every buffer (+7,578, exTop10 +553, top10 93% -- tail-carried), and the
+// whole OR-anchored family loses to the open-anchored one. Reason: the OR high sits a median 43pt
+// above the open, so "OR edge + 100" is really ~143pt from the open plus day-to-day jitter from
+// the variable OR width -- it lands in the decaying zone past trig120 AND adds noise.
+//
+// TESTED AND REJECTED on this same engine -- do not re-propose without new evidence:
+//   - Fading the drive (the natural "it's exhausted" read): ALL 36 configs negative, -1,486 to
+//     -14,942, WR 34-50%. Wide-range days are TREND days; the range gets spent in one direction.
+//   - Fading a steep slope into an ORB break: all cells negative except a n=93 corner that fails
+//     threshold, lookback, per-year and OOS checks.
+//   - Catastrophic / fixed stops of any size: see WHY NO STOP above.
+//
+// NOT YET VALIDATED AGAINST TRADINGVIEW. backtest/open_drive_bt.py is written to match this file
+// bar-for-bar, but Pine only runs on TV -- the port<->pine chain is NOT closed until you export
+// from TV and diff. Treat every number above as port-only until then.
+// =====================================================================================
+strategy("Open-Drive Momentum Strategy", overlay=true, max_labels_count=500, max_bars_back=5000,
+     default_qty_type=strategy.fixed, default_qty_value=1, initial_capital=100000,
+     calc_on_every_tick=false, process_orders_on_close=true, slippage=0)
+
+//=============================
+// Inputs -- trigger
+//=============================
+trigPts     = input.float(120.0, "Drive trigger: distance from RTH open to enter (pts)", minval=5.0, step=5.0, group="Trigger")
+// settleMin 0 = arm at the open. Delaying is strictly worse (see SETTLE WINDOW in the header);
+// the input exists only so the decay can be re-measured, not because 30 was ever right.
+settleMin   = input.int(0,    "Delay arming by N min after the open (0 = arm immediately)", minval=0, maxval=180, group="Trigger")
+entryEndMin = input.int(330,  "No new entry after this many min past open", minval=10, maxval=390, group="Trigger")
+
+//=============================
+// Inputs -- ATR-SCALED STOP. A per-trade stop at slMult * (trailing daily ATR), frozen at entry.
+//
+// This REPLACES the earlier "no stop at all" design, and the distinction is the whole point:
+// FIXED-point stops lose here (cat=100 -> exTop10 -1,252; cat=150 -> -3,468), because the same
+// number of points is a scratch on a wild day and a disaster stop on a quiet one. A stop scaled to
+// the day's own ATR adapts, and it is the ONE exit that improves BOTH metrics at once (5yr, 2pt):
+//     no stop (old default) : net +15,765  exTop10 +7,548  top10 52%
+//     SL 1.0x ATR (this)    : net +16,403  exTop10 +8,187  top10 50%   <- +638 net AND +639 exTop10
+// It IMPROVES but does not fix the side asymmetry: short-only exTop10 -1,162 -> -749 (still
+// NEGATIVE, 5/6 yrs), long-only +801 -> +1,232 (6/6 yrs). The short leg remains the weak half.
+// (An earlier note here claimed short-only went positive -- that was the TP+SL variant, which is
+// not what ships. Stop-only leaves shorts tail-dependent.)
+//
+// Adding a TAKE-PROFIT on top does NOT pay: TP1.0x/SL1.0x is +15,052 (-713 net) and TP0.75x/SL1.0x
+// is +14,390 (-1,375 net). They buy exTop10 (~+9,900) at the cost of net. Target left OFF.
+// AVOID slMult <= 0.5 -- the whole SL0.25 column collapses to WR 39% and exTop10 near zero, which is
+// the fixed-stop failure mode returning. The good plateau is slMult 1.0-1.5.
+//=============================
+useAtrStop = input.bool(true, "ATR stop: cap loss at slMult * trailing daily ATR", group="ATR stop")
+slMult     = input.float(1.0, "Stop distance = this * daily ATR (avoid <= 0.5)", minval=0.25, step=0.25, group="ATR stop")
+atrDays    = input.int(14,   "Daily-ATR lookback (days, trailing/past-only)", minval=1, maxval=60, group="ATR stop")
+
+//=============================
+// Inputs -- side
+//=============================
+enableLong  = input.bool(true, "Take UPWARD drives (long)",   group="Side")
+enableShort = input.bool(true, "Take DOWNWARD drives (short)", group="Side")
+
+//=============================
+// Inputs -- pre-open slope gate. Measured over the 60 min ENDING at the RTH open (07:30-08:30 CT =
+// 13:30-14:30 LDN). Gate is on |slope| -- steepness in EITHER direction -- because the hour predicts
+// range, not direction. Setting this > 0 trades fewer, wider days at a higher per-trade average and
+// a LOWER total net. See the header block.
+//=============================
+useSlopeGate = input.bool(false, "Slope gate: only trade steep pre-open hours", group="Pre-open slope gate")
+slopeMin     = input.float(0.75, "Min |pre-open slope| to trade the day (pts/bar)", minval=0.0, step=0.05, group="Pre-open slope gate")
+
+//=============================
+// Inputs -- webhook event names. Set these to whatever your consumer routes on. Defaults are the
+// open-drive-specific names so one endpoint can host several strategies without collision.
+//
+// WHICH EVENT TO ACT ON, if you execute externally (TradingView is only the signal source):
+//   levelsopendrive  -- fires ~1 min after the RTH open (close of the 08:30 CT bar), once per day.
+//                        Carries long_level and short_level. PLACE YOUR TWO RESTING STOP ORDERS HERE.
+//                        The levels are fixed for the session; they never move after this event.
+//   entryopendrive   -- fires when a level was hit, at that bar's close. Two jobs for the consumer:
+//                        (1) reconcile the fill, and (2) CANCEL THE OPPOSITE RESTING STOP. The
+//                        payload names it explicitly: "cancel_side" and "cancel_level". This is
+//                        ONE TRADE PER DAY -- if the other stop is left live and price reverses
+//                        through it, you get an unwanted opposite position that the backtest never
+//                        takes, so your live P&L would diverge from every number in this header.
+//                        (Inside TradingView the cancel is automatic; your external book has to be
+//                        told, which is what these two fields are for.)
+//   exitopendrive    -- position closed. Read "reason" to know WHY:
+//                          "session" -- EOD flatten (95.5% of exits) or a session gap.
+//                          "atrstop" -- the ATR protective stop filled (4.5%). "stop_hit":true, and
+//                                       "price" is the STOP LEVEL, not the bar close.
+//                          "exit"    -- closed with no stop set (first atrDays of a chart only).
+//                        In every case: flatten if you are still holding, and cancel any unfilled
+//                        entry stop. "pnl_pts" carries the round-trip result in points.
+// Roughly 27.5% of days never hit either level, so no entry event arrives -- your resting orders
+// simply expire. Cancel them at entryEndMin (default 330 min past the open = 20:00 LDN).
+//
+// IMPORTANT IF YOU PLACE A MARKET ORDER ON THE ENTRY EVENT: the payload is emitted at the BAR CLOSE,
+// which is up to ~59s AFTER the resting stop already filled (see FILL TIMING below the inputs).
+// Sending a market order on receipt opens a SECOND position on top of the stop fill. Either
+//   (a) do not place the resting stop live -- let the webhook be the only entry, and accept the
+//       ~59s of extra slippage, which the backtest does NOT charge; or
+//   (b) keep the resting stop and treat this event as a confirmation only.
+// The payload carries "fill_mode":"resting_stop" and "already_filled":true so the consumer can see
+// that the position exists already. (There is no exact fill-timestamp field: Pine cannot report the
+// intrabar moment a resting stop filled -- only that it had filled by this bar's close.)
+//=============================
+entryEventName = input.string("entryopendrive", "Entry event name (webhook JSON \"event\")", group="Webhook")
+exitEventName  = input.string("exitopendrive",  "Exit event name (webhook JSON \"event\")",  group="Webhook")
+armedEventName = input.string("levelsopendrive", "Levels event name -- place your stop orders on THIS", group="Webhook")
+
+//=============================
+// Inputs -- manual-trading alerts. These emit extra alert() events ("armed", "approaching") through
+// the same alert you create for the strategy. Turn off to get fills only.
+//=============================
+useManualAlerts = input.bool(true, "Emit armed / approaching alerts (manual trading)", group="Alerts")
+warnPts         = input.float(40.0, "Warn when price is this close to a level (pts)", minval=1.0, step=5.0, group="Alerts")
+
+//=============================
+// SESSION windows -- Chicago minutes-since-midnight (LDN = CT + 6h).
+//   RTH open : 510 (08:30 CT = 14:30 LDN)     EOD : 900..960 (15:00-16:00 CT = 21:00-22:00 LDN)
+// hour()/minute() with an explicit tz are DST-AWARE. A fixed -5/-6 offset is NOT and silently
+// shifts the whole session by an hour for ~40% of the year (this bug corrupted an earlier ORB run).
+//=============================
+_ctMin        = hour(time, "America/Chicago") * 60 + minute(time, "America/Chicago")
+rthOpenMin    = 510
+_minSinceOpen = _ctMin - rthOpenMin
+_gapEdge      = (time - time[1]) / 60000.0 > 60
+eodClosed     = _ctMin >= 900 and _ctMin < 960
+bool newDay   = (_minSinceOpen == 0) or (_minSinceOpen >= 0 and _minSinceOpen[1] < 0) or _gapEdge
+// Entry is allowed only after the settle window and before the cutoff.
+bool inEntryWindow = _minSinceOpen >= settleMin and _minSinceOpen < entryEndMin and not eodClosed
+
+//=============================
+// RTH OPEN PRICE -- the anchor everything measures from. Captured on the first bar at/after the
+// open and frozen for the day. This is the OPEN of that bar, not its close.
+//=============================
+var float rthOpenPx = na
+var bool  tookTrade = false
+
+if newDay
+    rthOpenPx := na
+    tookTrade := false
+
+// Capture on the first bar at/after the open. The fallback window is NOT tied to settleMin (with
+// settleMin 0 that would be an empty range and a feed gap at 08:30 would silently skip the day) --
+// it is a fixed 60-min grace so any first-bar-of-session still anchors. 5yr MNQ has no missing
+// 08:30 bar, but a live feed hiccup should degrade to a late anchor, not to no trade.
+if _minSinceOpen >= 0 and _minSinceOpen < 60 and na(rthOpenPx)
+    rthOpenPx := open
+
+//=============================
+// PRE-OPEN SLOPE (07:30-08:30 CT). Accumulated live across the hour: capture the first close of the
+// window, then at each bar the running slope = (close - firstClose) / 60. Frozen at the open and
+// held for the whole session, so the gate reads only PRE-open data -- no lookahead.
+//
+// preSlopeReady guards the na case (a day whose pre-open hour is missing bars -- holidays, feed
+// gaps). When it is not ready the gate BLOCKS the day rather than passing it, matching the port.
+//=============================
+var float preFirstClose = na
+var float preSlope      = na
+var bool  preSlopeReady = false
+var int   preBarCount   = 0
+
+// The pre-open hour runs from -60 to -1 minutes relative to the open.
+bool inPreWindow = _minSinceOpen >= -60 and _minSinceOpen < 0
+
+if newDay
+    // a new session begins: the slope computed over the hour just past is what this day uses
+    preFirstClose := na
+    preBarCount   := 0
+
+if inPreWindow
+    if na(preFirstClose)
+        preFirstClose := close
+        preBarCount   := 0
+    preBarCount += 1
+    preSlope      := (close - preFirstClose) / 60.0
+    preSlopeReady := preBarCount >= 55        // require a near-complete hour
+
+// Gate passes when the gate is off, or the hour is complete and steep enough in EITHER direction.
+bool slopeOK = not useSlopeGate or (preSlopeReady and not na(preSlope) and math.abs(preSlope) >= slopeMin)
+
+//=============================
+// TRAILING DAILY ATR (past-only). Accumulate the running day's high/low; at each new-day boundary
+// push the COMPLETED day's range into a rolling buffer and set curDayATR = mean of the last atrDays
+// completed ranges. curDayATR is therefore FIXED for the whole day and uses only PAST days -- no
+// lookahead. na until atrDays full days have passed (those days simply trade without a stop).
+// Same scheme as orb_strategy.pine, and backtest/open_drive_bt.py mirrors it exactly.
+//=============================
+var float dayHi     = na
+var float dayLo     = na
+var float curDayATR = na
+var array<float> dayRanges = array.new<float>(0)
+
+if newDay
+    if not na(dayHi) and not na(dayLo)
+        array.push(dayRanges, dayHi - dayLo)
+        if array.size(dayRanges) > atrDays
+            array.shift(dayRanges)
+    curDayATR := array.size(dayRanges) >= atrDays ? array.avg(dayRanges) : na
+    dayHi := high
+    dayLo := low
+else
+    dayHi := na(dayHi) ? high : math.max(dayHi, high)
+    dayLo := na(dayLo) ? low  : math.min(dayLo,  low)
+
+//=============================
+// DRIVE LEVELS. The entry is a resting STOP order at open +/- trigPts, not a close-based trigger.
+//
+// ORDER TYPE MATTERS -- use a STOP, never a limit. A buy STOP at open+trigPts fills when price
+// drives UP through the level, which is the setup. A buy LIMIT at the same price fills only when
+// price trades DOWN into it -- it would fill exactly when the move goes against you and never on
+// the drive itself, inverting the strategy.
+//
+// Stop orders fill at the level when a bar trades through it, and at the bar's OPEN when the bar
+// gaps past it. That gap case is 22.8% of entries on 5yr MNQ and is why a naive "always fill at
+// the level" study overstates this idea by ~2x (+24,188 vs +12,761 at 1pt slip). Pine models the
+// gap case correctly on its own; do not try to hand-fill at the level.
+//=============================
+float driveUpLvl = na(rthOpenPx) ? na : rthOpenPx + trigPts
+float driveDnLvl = na(rthOpenPx) ? na : rthOpenPx - trigPts
+float fromOpen   = na(rthOpenPx) ? na : close - rthOpenPx
+
+bool armLong  = inEntryWindow and enableLong  and not tookTrade and slopeOK and not na(driveUpLvl)
+bool armShort = inEntryWindow and enableShort and not tookTrade and slopeOK and not na(driveDnLvl)
+
+//=============================
+// TRADE MANAGEMENT -- self-tracked state. Do NOT gate on strategy.position_size: under
+// process_orders_on_close it lags a bar. tradeDir is our truth (same scheme as orb_strategy).
+//=============================
+var int    tradeDir    = 0
+var float  entryPrice  = na
+var float  stopLevel   = na    // ATR stop, frozen at entry
+var int    tradeSeq    = 0
+var string tradeId     = ""
+var string exitReason  = ""
+var int    exitedDir   = 0
+var string exitTradeId = ""
+var float  exitPrice   = na
+
+makeTradeId(seq) =>
+    _t  = int(time / 1000) % 1000000
+    _px = int(close * 100) % 100000
+    _h  = (_t * 131 + seq * 7919 + _px * 31) % 16777216
+    _h := (_h * 2654435761) % 16777216
+    _h := (_h + seq * 11400714819323) % 16777216
+    _h := int(_h % 16777216)
+    _hex = ""
+    _digits = "0123456789abcdef"
+    _v = _h
+    for _i = 0 to 5
+        _nib = int(_v % 16)
+        _hex := str.substring(_digits, _nib, _nib + 1) + _hex
+        _v := math.floor(_v / 16)
+    _hex + "-" + str.tostring(seq)
+
+bool flat = tradeDir == 0
+
+// ---- ENTRIES (flat only). tookEntry* mark an ACTUAL fill, so markers never print for a signal
+// that did not become a trade.
+// Orders are PLACED while flat and armed, and rest until price reaches the level. tradeDir flips
+// only once the broker reports the fill (next block), because with a resting stop we do not know on
+// the placing bar whether it filled -- unlike a close-triggered entry.
+if flat
+    if armLong
+        strategy.entry("L", strategy.long,  stop=driveUpLvl)
+    else
+        strategy.cancel("L")
+    if armShort
+        strategy.entry("S", strategy.short, stop=driveDnLvl)
+    else
+        strategy.cancel("S")
+else
+    // once filled, kill the opposite resting order -- one trade per day, no reversal
+    strategy.cancel("L")
+    strategy.cancel("S")
+
+// ---- DETECT the fill (position appeared where we had none) ----
+bool tookEntryLong  = tradeDir == 0 and strategy.position_size > 0
+bool tookEntryShort = tradeDir == 0 and strategy.position_size < 0
+if tookEntryLong or tookEntryShort
+    tradeDir   := tookEntryLong ? 1 : -1
+    entryPrice := strategy.opentrades.entry_price(strategy.opentrades - 1)
+    // freeze the ATR stop from the ENTRY-day ATR; na (first atrDays of chart) = no stop
+    stopLevel  := (useAtrStop and not na(curDayATR)) ?
+         (tookEntryLong ? entryPrice - slMult * curDayATR : entryPrice + slMult * curDayATR) : na
+    tookTrade  := true
+    tradeSeq   += 1
+    tradeId    := makeTradeId(tradeSeq)
+    strategy.cancel("L")
+    strategy.cancel("S")
+
+// ---- ATR STOP: a resting protective order, refreshed every bar we are in a position. There is no
+// take-profit by design (adding one costs net -- see the ATR stop input block).
+if tradeDir > 0 and not na(stopLevel)
+    strategy.exit("L-exit", from_entry="L", stop=stopLevel, comment="atrstop")
+else if tradeDir < 0 and not na(stopLevel)
+    strategy.exit("S-exit", from_entry="S", stop=stopLevel, comment="atrstop")
+
+// ---- EXIT: EOD flatten (and the ATR stop above).
+// exitJustFired is a BAR-LOCAL flag (not var): it is true only on the bar the position closed, and
+// the alert block below gates on it. Do NOT gate the exit alert on `tradeDir == 0 and tradeDir[1]
+// != 0` instead -- exitedDir/exitReason are var and persist, so that form would misfire if the
+// state were ever re-entered on the same bar.
+bool exitJustFired = false
+bool sessionFlat = eodClosed or _gapEdge
+if sessionFlat and tradeDir != 0
+    strategy.close_all(comment="session")
+    exitReason    := "session"
+    exitedDir     := tradeDir
+    exitTradeId   := tradeId
+    exitPrice     := close
+    tradeDir      := 0
+    exitJustFired := true
+
+// ---- SYNC when the BROKER closed us out -- i.e. the ATR stop filled. This is the stop-hit path
+// (4.5% of trades) and it emits a normal exit payload with reason "atrstop".
+//
+// exitPrice is the STOP LEVEL, not close. A protective stop fills AT its level intrabar; the bar
+// may then travel far past it before closing, so reporting `close` would overstate the loss by
+// however far the bar ran after the fill. On a fast bar that is a large error. (When the stop was
+// never set -- the first atrDays of a chart -- fall back to close and label it "exit".)
+if tradeDir != 0 and strategy.position_size == 0 and bar_index > 0 and strategy.position_size[1] != 0
+    exitReason    := na(stopLevel) ? "exit" : "atrstop"
+    exitedDir     := tradeDir
+    exitTradeId   := tradeId
+    exitPrice     := na(stopLevel) ? close : stopLevel
+    tradeDir      := 0
+    exitJustFired := true
+
+// entryPrice is cleared only AFTER the alert block has read it -- see the bottom of this file.
+// Clearing it here would blank the price on the very bar the exit payload needs it.
+
+//=============================
+// PLOTS -- the anchor and the two trigger rails, so the setup is readable on the chart.
+//=============================
+bool showLevels = _minSinceOpen >= 0 and not eodClosed and not na(rthOpenPx)
+plot(showLevels ? rthOpenPx   : na, "RTH open",     color=color.new(color.gray, 30),   linewidth=1, style=plot.style_linebr)
+plot(showLevels ? driveUpLvl  : na, "drive-up lvl", color=color.new(color.teal, 40),   linewidth=1, style=plot.style_linebr)
+plot(showLevels ? driveDnLvl  : na, "drive-dn lvl", color=color.new(color.maroon, 40), linewidth=1, style=plot.style_linebr)
+
+plotshape(tookEntryLong,  title="LONG entry",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.teal, 0),   size=size.small, text="L")
+plotshape(tookEntryShort, title="SHORT entry", style=shape.triangledown, location=location.abovebar, color=color.new(color.maroon, 0), size=size.small, text="S")
+
+// Tint the background on days the slope gate has qualified, so it is obvious at a glance which
+// sessions are tradeable before the trigger fires.
+bgcolor(useSlopeGate and slopeOK and _minSinceOpen >= 0 and not eodClosed ? color.new(color.teal, 94) : na, title="qualified day")
+
+//=============================
+// P_ PARAM COLUMNS -- every input mirrored into the data window so an exported CSV is
+// self-documenting. Never guess what settings produced a chart; read these first.
+//=============================
+plot(trigPts,                "P_trigPts",      color=na, display=display.data_window)
+plot(settleMin,              "P_settleMin",    color=na, display=display.data_window)
+plot(entryEndMin,            "P_entryEndMin",  color=na, display=display.data_window)
+plot(enableLong  ? 1 : 0,    "P_enableLong",   color=na, display=display.data_window)
+plot(enableShort ? 1 : 0,    "P_enableShort",  color=na, display=display.data_window)
+plot(useSlopeGate ? 1 : 0,   "P_useSlopeGate", color=na, display=display.data_window)
+plot(slopeMin,               "P_slopeMin",     color=na, display=display.data_window)
+plot(useManualAlerts ? 1 : 0,"P_useManualAlerts", color=na, display=display.data_window)
+plot(warnPts,                "P_warnPts",      color=na, display=display.data_window)
+plot(useAtrStop ? 1 : 0,     "P_useAtrStop",   color=na, display=display.data_window)
+plot(slMult,                 "P_slMult",       color=na, display=display.data_window)
+plot(atrDays,                "P_atrDays",      color=na, display=display.data_window)
+plot(curDayATR,              "daily ATR",      color=na, display=display.data_window)
+plot(stopLevel,              "active stop",    color=na, display=display.data_window)
+
+// Diagnostics -- the live state the entry logic reads.
+plot(rthOpenPx,              "RTH open px",    color=na, display=display.data_window)
+plot(fromOpen,               "pts from open",  color=na, display=display.data_window)
+plot(preSlope,               "pre-open slope", color=na, display=display.data_window)
+plot(preSlopeReady ? 1 : 0,  "preSlopeReady",  color=na, display=display.data_window)
+plot(slopeOK ? 1 : 0,        "slopeOK",        color=na, display=display.data_window)
+
+// EVT_ columns -- ground truth for the port diff. Export these and compare bar-for-bar.
+plot(tookEntryLong  ? 1 : 0, "EVT_long_entry",  color=na, display=display.data_window)
+plot(tookEntryShort ? 1 : 0, "EVT_short_entry", color=na, display=display.data_window)
+plot(tookEntryLong or tookEntryShort ? entryPrice : na, "EVT_entry_px", color=na, display=display.data_window)
+
+//=============================
+// STATS TABLE -- build name lives here (and in the snapshot filename), never in strategy().
+//=============================
+var table stats = table.new(position.top_right, 2, 6, border_width=1)
+if barstate.islast
+    float netPts = strategy.netprofit / syminfo.pointvalue
+    int   nTrades = strategy.closedtrades
+    float wr = nTrades > 0 ? strategy.wintrades / nTrades * 100 : 0.0
+    table.cell(stats, 0, 0, "Otaru",        text_color=color.white, bgcolor=color.new(color.teal, 20), text_size=size.small)
+    table.cell(stats, 1, 0, "open-drive",   text_color=color.white, bgcolor=color.new(color.teal, 20), text_size=size.small)
+    table.cell(stats, 0, 1, "net pts",      text_size=size.small)
+    table.cell(stats, 1, 1, str.tostring(netPts, "#.0"), text_size=size.small)
+    table.cell(stats, 0, 2, "trades",       text_size=size.small)
+    table.cell(stats, 1, 2, str.tostring(nTrades), text_size=size.small)
+    table.cell(stats, 0, 3, "win %",        text_size=size.small)
+    table.cell(stats, 1, 3, str.tostring(wr, "#.0"), text_size=size.small)
+    table.cell(stats, 0, 4, "trigger",      text_size=size.small)
+    table.cell(stats, 1, 4, str.tostring(trigPts, "#") + "pt", text_size=size.small)
+    table.cell(stats, 0, 5, "slope gate",   text_size=size.small)
+    table.cell(stats, 1, 5, useSlopeGate ? str.tostring(slopeMin, "#.##") : "off", text_size=size.small)
+
+//=============================
+// ALERTS -- JSON payloads for webhook REST execution. Same schema as orb_strategy.pine and
+// slope_touch_fade_strategy.pine so one webhook consumer handles all three.
+//
+// SETUP in TradingView: right-click the chart -> Add alert -> Condition = this strategy,
+// paste your webhook URL, and set Message to exactly:  {{alert_message}}
+// Leave the alert on "Once Per Bar" -- the payloads below are emitted at most once per bar and the
+// script is process_orders_on_close, so a bar-close alert is the correct granularity.
+//
+// FREQUENCY: alert.freq_once_per_bar, NOT once_per_bar_close. Under process_orders_on_close the
+// strategy's own fills are evaluated at the close, but a RESTING STOP fills intrabar -- so the
+// entry alert must be able to fire on the bar the stop was hit, not one bar later.
+//
+// ORDER: the exit payload is emitted BEFORE any entry payload, so a consumer replaying the stream
+// in order never opens a new position while the old one is still recorded as live. This strategy is
+// one-trade-per-day so a flip cannot occur, but the ordering costs nothing and matches the others.
+//
+// FILL TIMING -- read this before placing market orders on the entry event.
+// The entry payload is gated on tradeDir flipping, and tradeDir flips off strategy.position_size,
+// which under process_orders_on_close updates at the BAR CLOSE. A resting stop, however, fills
+// INTRABAR. So the sequence on a 1-min chart is:
+//     15:47:18  price touches the level -> broker fills the stop
+//     15:47:59  bar closes -> position_size updates -> THIS ALERT FIRES
+// The payload therefore describes a fill that has ALREADY happened ("already_filled":true), and
+// "price" is that real fill price, not the current market. A consumer that market-orders on this
+// event doubles the position unless the resting stop was never placed live.
+//
+// If you want the alert to be the ONLY entry (no resting stop live), the honest expectation is
+// ~59s worse entry than every number in the header, because the backtest fills at the stop level.
+// Setting calc_on_every_tick=true makes this fire within a tick or two of the touch, but it changes
+// backtest behaviour and breaks the port<->pine diff -- do not enable it before that diff is closed.
+//
+// SCHEMA -- identical field order to orb_strategy.pine and slope_touch_fade_strategy.pine:
+//   entry : event, side, id, price, sl, tp, sl_pts, <strategy-specific>, symbol, bar_time
+//   exit  : event, side, id, reason, price, symbol, bar_time
+// Strategy-specific fields sit between sl_pts and symbol (orb puts none there; slope_touch_fade
+// puts run/r2; this one puts trigger/rth_open). Everything else is byte-identical in shape, so one
+// consumer parses all three.
+//
+// NOTE ON sl/tp: "sl"/"sl_pts" now carry the REAL ATR stop, and "atr" carries the day's ATR so the
+// consumer can re-derive it. "tp" stays null -- there is no target by design. On the first atrDays
+// of a chart the ATR is not ready and sl/sl_pts emit null; those trades run to EOD unprotected.
+// (Historic note: an earlier version emitted all three as literal null,
+// so the fields are PRESENT and null rather than absent -- the consumer's schema stays identical
+// across strategies. A consumer that requires a stop must supply its own; do not read null as
+// "field missing".
+//
+// (These are written as a literal, not via _slStr(). Pine cannot type-infer a bare `na` passed to
+// a user-defined function -- `_slStr(na)` is a compile error. The other strategies pass real float
+// variables to that helper, which is why it works there and not here.)
+//=============================
+_slStr(v) => na(v) ? "null" : str.tostring(v, "0.00")
+
+// EXIT alert FIRST. reason = session (EOD/gap flatten) or exit (broker-side close). Uses
+// exitTradeId -- the id of the trade that just CLOSED, not the current one -- and exitPrice, both
+// captured at the moment of the close. Gated on the bar-local exitJustFired flag.
+if exitJustFired
+    _exitSide = exitedDir == 1 ? "long" : "short"
+    alert('{"event":"' + exitEventName + '","side":"' + _exitSide + '","id":"' + exitTradeId + '"' +
+          ',"reason":"' + exitReason + '"' +
+          ',"price":' + str.tostring(exitPrice, "0.00") +
+          ',"entry_price":' + _slStr(entryPrice) +
+          ',"pnl_pts":' + (na(entryPrice) ? "null" :
+               str.tostring((exitPrice - entryPrice) * exitedDir, "0.00")) +
+          ',"stop_hit":' + (exitReason == "atrstop" ? "true" : "false") +
+          ',"symbol":"' + syminfo.ticker + '"' +
+          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London") + '"' +
+          '}', alert.freq_once_per_bar)
+
+// ENTRY alerts. Gated on the tradeDir TRANSITION (0 -> +/-1), which is the same condition the
+// fill-detection block uses, so the payload cannot fire on a bar where no fill occurred.
+// price is the ACTUAL fill (strategy.opentrades.entry_price), not close -- a resting stop fills at
+// its level or at the bar open on a gap-through, and both differ from the bar close.
+if tradeDir == 1 and tradeDir[1] == 0
+    alert('{"event":"' + entryEventName + '","side":"long","id":"' + tradeId + '","price":' + str.tostring(entryPrice, "0.00") +
+          ',"sl":' + _slStr(stopLevel) + ',"tp":null' +
+          ',"sl_pts":' + (na(stopLevel) ? "null" : str.tostring(math.abs(entryPrice - stopLevel), "0.00")) +
+          ',"atr":' + _slStr(curDayATR) +
+          ',"trigger":' + str.tostring(driveUpLvl, "0.00") +
+          ',"rth_open":' + str.tostring(rthOpenPx, "0.00") +
+          ',"fill_mode":"resting_stop","already_filled":true' +
+          ',"cancel_side":"short","cancel_level":' + str.tostring(driveDnLvl, "0.00") +
+          ',"symbol":"' + syminfo.ticker + '"' +
+          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London") + '"' +
+          '}', alert.freq_once_per_bar)
+
+if tradeDir == -1 and tradeDir[1] == 0
+    alert('{"event":"' + entryEventName + '","side":"short","id":"' + tradeId + '","price":' + str.tostring(entryPrice, "0.00") +
+          ',"sl":' + _slStr(stopLevel) + ',"tp":null' +
+          ',"sl_pts":' + (na(stopLevel) ? "null" : str.tostring(math.abs(entryPrice - stopLevel), "0.00")) +
+          ',"atr":' + _slStr(curDayATR) +
+          ',"trigger":' + str.tostring(driveDnLvl, "0.00") +
+          ',"rth_open":' + str.tostring(rthOpenPx, "0.00") +
+          ',"fill_mode":"resting_stop","already_filled":true' +
+          ',"cancel_side":"long","cancel_level":' + str.tostring(driveUpLvl, "0.00") +
+          ',"symbol":"' + syminfo.ticker + '"' +
+          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London") + '"' +
+          '}', alert.freq_once_per_bar)
+
+//=============================
+// MANUAL-TRADING ALERTS -- heads-up payloads for discretionary execution.
+//
+// NOTE: alertcondition() does NOT work in a strategy() script -- TradingView warns "alert condition
+// has no effect" and silently emits nothing. Only alert() works here. So the pre-trade notifications
+// below are alert() calls, which means they arrive through the SAME single alert you create for this
+// strategy; they are distinguished by the "event" field, not by separate alert-dialog entries.
+//
+// A consumer that only wants fills should ignore any event that is not "entry" or "exit".
+// Set useManualAlerts=false to silence these and emit fills only.
+//=============================
+bool armedNow = not na(rthOpenPx) and not tookTrade and inEntryWindow and slopeOK
+
+// APPROACHING -- price within warnPts of a level and no trade yet. Fires at most once per day per
+// side, so a slow grind toward the level does not spam one alert per bar.
+var bool warnedUp = false
+var bool warnedDn = false
+if newDay
+    warnedUp := false
+    warnedDn := false
+
+bool nearUp = useManualAlerts and armedNow and not warnedUp and not na(driveUpLvl) and
+     driveUpLvl - close <= warnPts and driveUpLvl - close > 0
+bool nearDn = useManualAlerts and armedNow and not warnedDn and not na(driveDnLvl) and
+     close - driveDnLvl <= warnPts and close - driveDnLvl > 0
+
+if nearUp
+    warnedUp := true
+    alert('{"event":"approaching","side":"long"' +
+          ',"price":' + str.tostring(close, "0.00") +
+          ',"level":' + str.tostring(driveUpLvl, "0.00") +
+          ',"away":' + str.tostring(driveUpLvl - close, "0.00") +
+          ',"symbol":"' + syminfo.ticker + '"' +
+          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London") + '"' +
+          '}', alert.freq_once_per_bar)
+
+if nearDn
+    warnedDn := true
+    alert('{"event":"approaching","side":"short"' +
+          ',"price":' + str.tostring(close, "0.00") +
+          ',"level":' + str.tostring(driveDnLvl, "0.00") +
+          ',"away":' + str.tostring(close - driveDnLvl, "0.00") +
+          ',"symbol":"' + syminfo.ticker + '"' +
+          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London") + '"' +
+          '}', alert.freq_once_per_bar)
+
+// ARMED -- the LEVELS payload. Fires once per day, on the close of the FIRST bar at/after the
+// settle point, which with settleMin 0 is the 08:30 CT / 14:30 LDN bar -- i.e. ~1 min after the
+// open. This is the event to place resting stop orders from: long_level and short_level are the
+// two prices, and they do not change for the rest of the session.
+//
+// NOT gated on useManualAlerts -- that switch is for the discretionary "approaching" pings. This
+// one is execution infrastructure and always fires.
+//
+// The gate is a var latch, not `_minSinceOpen == settleMin`. With settleMin 0 that comparison lands
+// on the same bar rthOpenPx is assigned, making it order-dependent within the bar; and if the exact
+// bar were ever missing from the feed the day would emit no levels at all. The latch fires on the
+// first bar where the levels genuinely exist, whenever that is.
+var bool armedSent = false
+if newDay
+    armedSent := false
+if not armedSent and not na(rthOpenPx) and _minSinceOpen >= settleMin and inEntryWindow and slopeOK
+    armedSent := true
+    alert('{"event":"' + armedEventName + '","side":"both"' +
+          ',"price":' + str.tostring(close, "0.00") +
+          ',"rth_open":' + str.tostring(rthOpenPx, "0.00") +
+          ',"long_level":' + str.tostring(driveUpLvl, "0.00") +
+          ',"short_level":' + str.tostring(driveDnLvl, "0.00") +
+          ',"slope_gate":' + (useSlopeGate ? "true" : "false") +
+          ',"pre_slope":' + _slStr(preSlope) +
+          ',"symbol":"' + syminfo.ticker + '"' +
+          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London") + '"' +
+          '}', alert.freq_once_per_bar)
+
+//=============================
+// DEFERRED STATE CLEAR -- runs last, after the alert block has read entryPrice/exitPrice for the
+// exit payload. Clearing these earlier blanks the price on the exact bar the payload needs it.
+//=============================
+if tradeDir == 0 and not exitJustFired
+    entryPrice := na
+    stopLevel  := na

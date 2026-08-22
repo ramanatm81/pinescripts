@@ -1,0 +1,81 @@
+//@version=6
+// Window Displacement Fade — over a rolling window, measure how far price has moved
+// (close - close[winLen]). If that displacement exceeds a threshold, fade it:
+//   rose too much  (disp >=  +thr)  -> SHORT
+//   fell too much  (disp <= -thr)   -> LONG
+// Fixed TP and SL (points). One position at a time, flat between trades, EOD flatten.
+strategy("Window Displacement Fade", overlay=true, initial_capital=100000,
+     default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=0,
+     calc_on_every_tick=false, process_orders_on_close=true)
+
+// ---- inputs ----
+winLen = input.int(30,   "Window (bars)",        minval=2,  group="Signal")
+thr    = input.float(130, "Displacement thresh",  minval=1,  group="Signal")
+tpPts  = input.float(70,  "Take-profit (pts)",    minval=1,  group="Exit")
+slPts  = input.float(50,  "Stop-loss (pts)",      minval=1,  group="Exit")
+blockAfterTP = input.bool(true, "Block next trade after a take-profit", group="Exit")
+eodOn  = input.bool(true, "EOD flatten 15:00-16:00 CT", group="Session")
+blkNY  = input.bool(true, "Block NY open 08:30-09:00 CT",  group="Session")
+blkLN  = input.bool(true, "Block LDN open 02:00-02:30 CT", group="Session")
+
+// ---- displacement over the rolling window ----
+disp = close - close[winLen]
+enoughBars = bar_index >= winLen
+
+// ---- session scaffolding (Chicago), EOD flatten only ----
+ct     = "America/Chicago"
+h      = hour(time, ct)
+m      = minute(time, ct)
+cm     = h * 60 + m
+eodFlat = eodOn and cm >= 900 and cm < 960     // 15:00-16:00 CT
+nyFlat  = blkNY and cm >= 510 and cm < 540     // 08:30-09:00 CT
+lnFlat  = blkLN and cm >= 120 and cm < 150     // 02:00-02:30 CT
+sessFlat = eodFlat or nyFlat or lnFlat         // all three flatten AND block, like the other ports
+blockNew = sessFlat
+
+// ---- block one entry after a take-profit win ----
+// detect a flat this bar that was a position last bar, closed for a profit (the TP leg).
+var bool skipNext = false
+justClosed = strategy.position_size == 0 and strategy.position_size[1] != 0
+wasWin     = strategy.closedtrades > 0 and strategy.closedtrades.profit(strategy.closedtrades - 1) > 0
+if justClosed and blockAfterTP and wasWin
+    skipNext := true
+
+// ---- signals: fade the displacement ----
+longSig  = enoughBars and disp <= -thr
+shortSig = enoughBars and disp >=  thr
+
+// enter flat->pos; if both somehow true, no trade (shouldn't happen: disp has one sign)
+wantEntry  = longSig or shortSig
+flatReady  = strategy.position_size == 0 and not blockNew
+blockedNow = skipNext           // this bar's skip state, captured before consuming
+if skipNext and wantEntry and flatReady
+    skipNext := false           // consume the skip on the first entry signal after the TP
+canEnter = flatReady and not blockedNow
+if canEnter and longSig and not shortSig
+    strategy.entry("L", strategy.long)
+if canEnter and shortSig and not longSig
+    strategy.entry("S", strategy.short)
+
+// ---- fixed TP/SL brackets ----
+if strategy.position_size > 0
+    ep = strategy.position_avg_price
+    strategy.exit("Lx", "L", limit=ep + tpPts, stop=ep - slPts)
+if strategy.position_size < 0
+    ep = strategy.position_avg_price
+    strategy.exit("Sx", "S", limit=ep - tpPts, stop=ep + slPts)
+
+// ---- session flatten (EOD, NY open, LDN open) ----
+if sessFlat and strategy.position_size != 0
+    strategy.close_all(comment="sess")
+
+// ---- plots / markers ----
+plotshape(longSig  and canEnter, "long",  shape.triangleup,   location.belowbar, color.new(color.lime, 0), size=size.tiny)
+plotshape(shortSig and canEnter, "short", shape.triangledown, location.abovebar, color.new(color.red, 0),  size=size.tiny)
+plot(disp, "displacement", color.new(color.gray, 60), display=display.data_window)
+
+// ---- P_ columns (self-documenting export) ----
+plot(winLen, "P_winLen", display=display.data_window)
+plot(thr,    "P_thr",    display=display.data_window)
+plot(tpPts,  "P_tpPts",  display=display.data_window)
+plot(slPts,  "P_slPts",  display=display.data_window)

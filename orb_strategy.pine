@@ -1,0 +1,532 @@
+//@version=6
+// =====================================================================================
+// OPENING-RANGE BREAKOUT -- STRATEGY  ("Sapporo")
+//
+// Trades the break of the US cash RTH opening range. Grounded in docs/rth_open_pierce_stats.md
+// (5yr MNQ): the 08:30-09:00 CT open range is ~102 pt median (~5x the overnight window), opens
+// COMMIT to one direction (both bands pierced same-open only 4% of days), and the open window is
+// only ~1/3 of the full-day range -- a break at the open is the opening leg of a big-range day.
+// So: define the range, trade the break, ride the day's direction, flat by EOD (no overnight).
+//
+//   RANGE : high/low of the first orMinutes after RTH open (08:30 CT / 14:30 LDN). One box/day.
+//   ENTRY : first bar that CLOSES beyond OR-high+buffer (long) or OR-low-buffer (short). One
+//           trade per day per side. Break window closes at breakEndMin (no chasing a late break).
+//   SLOPE ROUTER (optional, the doc's one monotonic filter, section 11): only take the break when
+//           the slope into it is steep enough (steep up-slope = runaway; flat/neg = reverts). Skips
+//           the limp breaks that revert. Router is OFF by default -- prove the baseline first.
+//   OR-SIZE FILTER (optional): only take the break when the OR width is >= orMinPts (tiny OR = no
+//           conviction). Vol-relative sizing left to the port sweep.
+//   REL-VOL DAY GATE (optional, OFF by default): skip the day entirely unless its opening-range
+//           volume is LOW vs its own recent baseline. Inverted vs the equity ORB literature -- see
+//           the input block below for the numbers and the caveat.
+//   EXIT  : one of {trailing stop, fixed TP+SL, OR-width targets, pure EOD hold} -- exitMode picks
+//           one. The docs say exit choice is likely the whole game; sweep it on this one engine.
+//   EOD   : flatten at session close (15:00 CT / 21:00 LDN). No overnight carry.
+//
+// UNVALIDATED. This file exists to get an honest 5yr-vs-OOS number at 1pt slip, exTop10, per-year,
+// long/short split. Do NOT claim an edge before the port chain agrees and the cost gate is cleared.
+// =====================================================================================
+strategy("Opening-Range Breakout Strategy", overlay=true, max_labels_count=500, max_bars_back=5000,
+     default_qty_type=strategy.fixed, default_qty_value=1, initial_capital=100000,
+     calc_on_every_tick=false, process_orders_on_close=true, slippage=0)
+
+//=============================
+// Inputs -- opening range definition
+//=============================
+orMinutes   = input.int(30,   "Opening-range length (min after RTH open)", minval=1, maxval=120, group="Opening range")
+breakEndMin = input.int(120,  "Break window ends this many min after open (no entry after)", minval=1, maxval=390, group="Opening range")
+breakBuf    = input.float(3.0, "Breakout buffer beyond OR edge (pts)", minval=0.0, step=0.5, group="Opening range")
+orMinPts    = input.float(0.0, "OR-size filter: only trade if OR width >= this (pts, 0 = off)", minval=0.0, step=5.0, group="Opening range")
+
+//=============================
+// Inputs -- side
+//=============================
+enableLong  = input.bool(true, "Take LONG breaks (break of OR high)",  group="Side")
+enableShort = input.bool(true, "Take SHORT breaks (break of OR low)",  group="Side")
+
+//=============================
+// Inputs -- slope router (docs/rth_open_pierce_stats.md section 11: slope at pierce separates
+// runaways (steep) from reverters (flat/neg). Take the break only if the slope into it is steep
+// enough in the break direction. slopeLen bars of simple net slope (pts/bar). OFF by default.
+//=============================
+useSlopeRouter = input.bool(false, "Slope router: require steep slope into the break", group="Slope router")
+slopeLen    = input.int(15,   "Slope window (bars into the break)", minval=2, maxval=120, group="Slope router")
+slopeMinPB  = input.float(1.0, "Min slope magnitude to take the break (pts/bar)", minval=0.0, step=0.25, group="Slope router")
+
+//=============================
+// Inputs -- TRAILING-30 CVD GATE (optional). Order-flow direction filter. From the 2025 Databento
+// trades-schema study (docs/orderflow_2025_test_plan.md): breaks whose trailing-30-min cumulative
+// volume delta runs HARD AGAINST the break direction are a clean loser bucket (removed 27 trades
+// averaging -120pt, 22% win, at the strong-disagreement threshold). Take the break only unless the
+// trailing-CVD opposes it by more than cvdThresh. CVD here is built from real aggressor up/down
+// volume via request.security_lower_tf (seconds bars) -- needs a data feed that provides it (CME
+// real-time on Premium does). OFF by default -- prove the baseline first; recalibrate cvdThresh on
+// the live TV delta scale (the study's 2000 was Databento contract-units, does NOT transfer).
+//   thresh=0 -> plain SIGN gate (skip any break the flow opposes).
+//   thresh>0 -> only skip breaks the flow opposes by MORE than thresh (the study's sweet spot).
+//=============================
+//=============================
+// Inputs -- RELATIVE-VOLUME DAY GATE (optional). Trade only days whose OPENING-RANGE volume is
+// low relative to its own recent history. rv = (volume inside today's OR window) / (mean OR-window
+// volume of the previous rvDays ACTIVE days). Take the break only when rv <= rvMax.
+//
+// NOTE THE SIGN -- this is INVERTED vs the equity ORB literature. Zarattini et al's "Stocks in Play"
+// filter trades the HIGH relative-volume names; on MNQ that loses (rv>=1.0 -> -964 net, 2/6 yrs;
+// rv>=1.1 -> -4,629 and 0/6 yrs). The LOW-rel-vol side is what pays here (5yr @1pt slip):
+//   baseline (gate off)  +7,970  exTop10 +1,314  PF 1.13  5/6 yrs
+//   rvMax 1.1, rvDays 10 +14,985 exTop10 +8,800  PF 1.43  6/6 yrs
+// Robust, not a tuned spike: all 60 cells of a 12-lookback x 5-threshold grid are positive and beat
+// baseline exTop10 (net +7,500..+14,985). Holds out of sample WITHIN the 5yr: fit-era 2021-23
+// +5,999 (PF 1.34) and test-era 2024-26 +8,986 (PF 1.54) at these defaults. Slippage-flat.
+// Mechanism: keeps ~62% of the "reached +70" edge bucket while cutting ~43% of the 8-70 popped-only
+// weakness -- it thins the loser bucket faster than the edge bucket, NOT a winner-cutter.
+//
+// HOLDOUT-CONFIRMED (2026-08-20) -- gate now ON by default at rvMax 1.05. Four independent tests:
+//   temporal split (fit 2021-23 -> chose 1.05, test 2024-26): +8,146 vs base +4,897, exTop10 -1,560
+//     -> +2,071, 3/3 yrs. Reversed split (fit 2024-26, test 2021-23): +2,925 delta.
+//   walk-forward (threshold refit each year from prior years only): +4,684 total, 5/5 yrs positive.
+//   random control: 200 random day-subsets at the same 58% keep rate -- real beats ALL 200, p=0.000.
+// Survives where the options/term-structure router died because rel-vol is a RATIO to its own
+// trailing mean, so it self-normalizes: yearly mean 1.000-1.041, fire rate 48-62% across 6 years.
+// Removed-trade W/L is correctly signed: removed bucket avg -12.5 pts/trade (it deletes losers).
+//
+// FRESH FORWARD BLOCK (Databento pull, 2026-06-24..08-19, 38 trades -- below the 50-trade floor,
+// so SUGGESTIVE not confirmatory): baseline -2,994, filtered -797, delta +2,197; removed bucket
+// -146/trade. Note ORB itself had its worst month on record in 2026-07 (WR 27.3%); the gate cut
+// that month's loss by 73%. Surrounding months are normal (~52% WR), so this reads as one bad
+// month, not decay -- but 2026-07 is worth watching.
+//=============================
+useRvGate = input.bool(true, "Rel-vol gate: only trade LOW opening-range-volume days", group="Rel-vol gate")
+rvMax     = input.float(1.05, "Max rel-vol to take the break (OR vol / prior-days mean)", minval=0.1, step=0.05, group="Rel-vol gate")
+rvDays    = input.int(10,   "Rel-vol baseline lookback (ACTIVE days, past-only)", minval=2, maxval=90, group="Rel-vol gate")
+
+useCvdGate = input.bool(false, "CVD gate: skip breaks with trailing-CVD against them", group="CVD gate")
+cvdWindow  = input.int(30,   "Trailing CVD window (bars = minutes on 1-min chart)", minval=1, maxval=120, group="CVD gate")
+cvdThresh  = input.float(0.0, "Reject only if against-flow magnitude exceeds this (0 = sign gate)", minval=0.0, step=100.0, group="CVD gate")
+cvdLtf     = input.timeframe("1S", "Lower timeframe for up/down volume classification", group="CVD gate")
+
+//=============================
+// Inputs -- exits (exitMode picks one). The docs flag exit choice as the whole game; sweep it.
+//   0 = TRAIL  : trailing stop trailPts off best price since entry (let the day run)
+//   1 = FIXED  : fixed take-profit tpPts / fixed stop slPts
+//   2 = ORMULT : TP = tpMult * OR width, SL = other side of the OR (slMult * OR width)
+//   3 = HOLD   : pure session-hold, flat at EOD, no stop (upper bound on the move)
+//=============================
+exitMode = input.int(0, "Exit mode (0=trail 1=fixed 2=OR-mult 3=EOD-hold)", minval=0, maxval=3, group="Exit")
+trailPts = input.float(150.0, "TRAIL: trailing stop distance (pts)", minval=1.0, step=5.0, group="Exit")
+tpPts    = input.float(120.0, "FIXED: take-profit (pts)",  minval=1.0, step=5.0, group="Exit")
+slPts    = input.float(80.0,  "FIXED: stop-loss (pts)",    minval=1.0, step=5.0, group="Exit")
+tpMult   = input.float(1.0,   "ORMULT: TP = this * OR width", minval=0.1, step=0.1, group="Exit")
+slMult   = input.float(1.0,   "ORMULT: SL = this * OR width (other side of OR)", minval=0.1, step=0.1, group="Exit")
+
+//=============================
+// Inputs -- CATASTROPHIC STOP (independent overlay, composes with ANY exit mode). A per-trade stop
+// at catMult * (trailing 14-day daily ATR) from entry. Volatility-scaled so it means the same thing
+// in a hot year and a calm one -- a FIXED-point stop does NOT (validated: fixed stops chop runners;
+// a wide k*ATR stop trims only the true disaster days). On EOD-hold this converts "ride to the
+// close" into "ride to the close UNLESS price runs catMult*ATR against you first". Default ON at
+// 1.5x: fires ~8 times in 5yr, improves net AND shrinks the worst-10 tail (Test A).
+//=============================
+useCatStop = input.bool(true, "Catastrophic stop: cap loss at catMult * trailing daily-ATR", group="Cat stop")
+catMult    = input.float(1.5, "Cat stop distance = this * 14-day daily ATR (pts)", minval=0.25, step=0.25, group="Cat stop")
+atrDays    = input.int(14,   "Daily-ATR lookback (days, trailing/past-only)", minval=1, maxval=60, group="Cat stop")
+
+//=============================
+// SESSION windows -- computed in Chicago minutes-since-midnight, identical to the other ports.
+// (LDN = CT + 6h, shown for the London chart.)
+//   RTH open  : 510 (08:30 CT = 14:30 LDN)
+//   eodClose  : 900..960 (15:00-16:00 CT = 21:00-22:00 LDN)
+//=============================
+_ctMin     = hour(time, "America/Chicago") * 60 + minute(time, "America/Chicago")
+rthOpenMin = 510   // 08:30 CT
+_minSinceOpen = _ctMin - rthOpenMin
+// HOLIDAY / WEEKEND / EARLY-CLOSE gap: a real session break shows up as a >60min jump between bars.
+_gapEdge   = (time - time[1]) / 60000.0 > 60
+eodClosed  = _ctMin >= 900 and _ctMin < 960
+// Are we inside the opening-range accumulation window (open .. open+orMinutes)?
+bool inORWindow = _minSinceOpen >= 0 and _minSinceOpen < orMinutes
+// Are we inside the window where a break may be TAKEN (open+orMinutes .. open+breakEndMin)?
+bool inBreakWindow = _minSinceOpen >= orMinutes and _minSinceOpen < breakEndMin
+// A NEW day resets the OR: the first bar at/after the RTH open, or any bar after a session gap.
+bool newDay = (_minSinceOpen == 0) or (_minSinceOpen >= 0 and _minSinceOpen[1] < 0) or _gapEdge
+
+//=============================
+// OPENING-RANGE accumulation. Track high/low across the OR window; freeze at window end. Reset each
+// day. orReady flips true once the OR window has fully passed (we have a complete box to break).
+//=============================
+var float orHigh   = na
+var float orLow    = na
+var bool  orReady  = false
+var bool  tookLong = false   // one long / one short per day
+var bool  tookShort = false
+
+if newDay
+    orHigh    := na
+    orLow     := na
+    orReady   := false
+    tookLong  := false
+    tookShort := false
+
+if inORWindow
+    orHigh := na(orHigh) ? high : math.max(orHigh, high)
+    orLow  := na(orLow)  ? low  : math.min(orLow,  low)
+
+// The bar that first steps PAST the OR window freezes the box and marks it ready.
+if _minSinceOpen >= orMinutes and not orReady and not na(orHigh)
+    orReady := true
+
+float orWidth = (na(orHigh) or na(orLow)) ? na : orHigh - orLow
+
+//=============================
+// TRAILING DAILY ATR (past-only). Accumulate the running day's high/low; at each new-day boundary
+// push the COMPLETED day's range into a rolling buffer and set curDayATR = mean of the last atrDays
+// completed ranges. curDayATR is therefore fixed for the whole day and uses only PAST days (no
+// lookahead), matching backtest/orb_bt.py daily_atr exactly. na until atrDays full days have passed.
+//=============================
+var float dayHi     = na
+var float dayLo     = na
+var float curDayATR = na
+var array<float> dayRanges = array.new<float>(0)
+
+if newDay
+    // finalize the day that just ended (dayHi/dayLo hold its full range from the prior bars)
+    if not na(dayHi) and not na(dayLo)
+        array.push(dayRanges, dayHi - dayLo)
+        if array.size(dayRanges) > atrDays
+            array.shift(dayRanges)                    // keep only the last atrDays completed ranges
+    curDayATR := array.size(dayRanges) >= atrDays ? array.avg(dayRanges) : na
+    dayHi := high
+    dayLo := low
+else
+    dayHi := na(dayHi) ? high : math.max(dayHi, high)
+    dayLo := na(dayLo) ? low  : math.min(dayLo,  low)
+
+//=============================
+// OPENING-RANGE RELATIVE VOLUME (past-only). Accumulate this day's OR-window volume; at the new-day
+// boundary push the COMPLETED day's OR volume into a rolling buffer of the last rvDays ACTIVE days,
+// then rv = today's OR volume / mean(buffer).
+//
+// "ACTIVE days" matters: weekend/holiday rows carry zero OR volume. Counting them as history drags
+// the baseline toward zero and inflates rv on every real day, so only days with OR volume > 0 are
+// pushed. (The first port of this returned zero trades at every threshold for exactly that reason.)
+//
+// Causality: the buffer holds only COMPLETED prior days, and today's own OR volume is fully known by
+// the time the break window opens (the OR window has closed), so the gate reads no future data.
+// curOrRelVol is fixed for the whole day. na until rvDays active days have accumulated.
+//=============================
+var float orVolAccum  = na    // this day's OR-window volume, accumulating
+var float lastOrVol   = na    // the completed day's OR volume, pushed at the next new-day edge
+var float curOrRelVol = na
+var array<float> orVolHist = array.new<float>(0)
+
+if newDay
+    if not na(lastOrVol) and lastOrVol > 0
+        array.push(orVolHist, lastOrVol)
+        if array.size(orVolHist) > rvDays
+            array.shift(orVolHist)                    // keep only the last rvDays ACTIVE days
+    orVolAccum  := 0.0
+    lastOrVol   := na
+    curOrRelVol := na          // must reset, else a day with no baseline inherits yesterday's ratio
+
+if inORWindow
+    orVolAccum := nz(orVolAccum) + volume
+    lastOrVol  := orVolAccum
+
+// Freeze the ratio once the OR window has closed and a full baseline exists.
+if _minSinceOpen >= orMinutes and array.size(orVolHist) >= rvDays and nz(orVolAccum) > 0
+    curOrRelVol := orVolAccum / array.avg(orVolHist)
+
+//=============================
+// SLOPE into the break (simple net slope over slopeLen bars, pts/bar). Positive = rising.
+//=============================
+float breakSlope = (close - close[slopeLen]) / slopeLen
+
+//=============================
+// TRAILING CVD (aggressor-based order flow). For this bar, request the lower-timeframe (seconds)
+// bars and sign each one's volume by its own direction (close>open = buying, close<open = selling) --
+// this is TradingView's up/down-volume classification, the real aggressor delta available with a CME
+// real-time feed. barDelta = this 1-min bar's net delta; trailCvd = rolling sum over cvdWindow bars.
+// Only computed when the gate is on (request.security_lower_tf is not free). Causal: seconds bars are
+// within the current bar, and math.sum uses only past+current bars.
+//=============================
+_udVol() =>
+    close > open ? volume : close < open ? -volume : 0.0
+// request.security_lower_tf must be called unconditionally at the top scope (not inside a ternary).
+// It returns an array of the per-LTF-bar signed volume; array.sum collapses it to this bar's delta.
+// na/empty (missing LTF data, last realtime bar) -> nz() folds it to 0 so the rolling sum survives.
+array<float> _udArr = request.security_lower_tf(syminfo.tickerid, cvdLtf, _udVol())
+float barDelta  = array.size(_udArr) > 0 ? array.sum(_udArr) : 0.0
+float trailCvd  = useCvdGate ? math.sum(barDelta, cvdWindow) : na
+
+//=============================
+// BREAK signals. Long = first close beyond OR-high+buffer inside the break window; short = mirror.
+// Gated by: orReady, break window, side toggle, one-per-day, OR-size filter, slope router.
+//=============================
+bool orSizeOK = orMinPts <= 0.0 or (not na(orWidth) and orWidth >= orMinPts)
+// CVD gate: a LONG break is rejected if trailing-CVD runs against it (negative) by more than thresh;
+// SHORT break rejected if trailing-CVD is positive by more than thresh. When the gate is off, both
+// pass. thresh=0 makes it a plain sign gate.
+bool cvdLongOK  = not useCvdGate or (not na(trailCvd) and trailCvd >= -cvdThresh)
+bool cvdShortOK = not useCvdGate or (not na(trailCvd) and trailCvd <=  cvdThresh)
+// REL-VOL gate: skip the whole day unless its OR volume is low vs its own recent baseline. Applies
+// to both sides equally (it is a DAY filter, not a side filter). Days without a full baseline
+// (curOrRelVol na -- the first rvDays of the chart) are SKIPPED, matching the port.
+bool rvOK = not useRvGate or (not na(curOrRelVol) and curOrRelVol <= rvMax)
+bool longBreak  = orReady and inBreakWindow and enableLong  and not tookLong  and orSizeOK and cvdLongOK and rvOK and
+     not na(orHigh) and close > orHigh + breakBuf and
+     (not useSlopeRouter or breakSlope >=  slopeMinPB)
+bool shortBreak = orReady and inBreakWindow and enableShort and not tookShort and orSizeOK and cvdShortOK and rvOK and
+     not na(orLow) and close < orLow - breakBuf and
+     (not useSlopeRouter or breakSlope <= -slopeMinPB)
+
+//=============================
+// TRADE MANAGEMENT -- self-tracked position state (same scheme as slope_touch_fade: do NOT gate on
+// strategy.position_size, which lags a bar under process_orders_on_close). tradeDir is our truth.
+//=============================
+var int   tradeDir       = 0     // +1 long, -1 short, 0 flat
+var float entryPrice     = na
+var float initialStop    = na    // fixed / OR-mult stop level
+var float tpLevel        = na    // fixed / OR-mult take-profit level
+var float catStop        = na    // catastrophic stop level (frozen at entry from entry-day ATR)
+var float bestSinceEntry = na    // trail anchor: highest high (long) / lowest low (short)
+// ---- alert / webhook state ----
+var int    tradeSeq    = 0
+var string tradeId     = ""
+var string exitReason  = ""
+var int    exitedDir   = 0
+var string exitTradeId = ""
+
+// 24-bit hash + seq suffix -> a stable id shared by a trade's entry and exit alerts.
+makeTradeId(seq) =>
+    _t  = int(time / 1000) % 1000000
+    _px = int(close * 100) % 100000
+    _h  = (_t * 131 + seq * 7919 + _px * 31) % 16777216
+    _h := (_h * 2654435761) % 16777216
+    _h := (_h + seq * 11400714819323) % 16777216
+    _h := int(_h % 16777216)
+    _hex = ""
+    _digits = "0123456789abcdef"
+    _v = _h
+    for _i = 0 to 5
+        _nib = int(_v % 16)
+        _hex := str.substring(_digits, _nib, _nib + 1) + _hex
+        _v := math.floor(_v / 16)
+    _hex + "-" + str.tostring(seq)
+
+bool flat = tradeDir == 0
+
+// ---- ENTRIES (flat only) ----
+// tookEntryLong/Short mark an ACTUAL fill this bar (a break signal alone is NOT a trade -- the
+// entry is gated on `flat`, so a long break that fires while already short is ignored). The entry
+// triangles plot from THESE, not from longBreak/shortBreak, so no phantom triangle prints for a
+// break that did not result in a trade (e.g. a green "L" at the OR high while short from earlier).
+bool tookEntryLong  = false
+bool tookEntryShort = false
+if flat
+    if longBreak
+        strategy.entry("L", strategy.long)
+        tookEntryLong  := true
+        tradeDir       := 1
+        entryPrice     := close
+        tookLong       := true
+        bestSinceEntry := high
+        // initial stop + TP by exit mode:
+        if exitMode == 1
+            initialStop := close - slPts
+            tpLevel     := close + tpPts
+        else if exitMode == 2
+            initialStop := orLow - slMult * orWidth       // other side of the OR
+            tpLevel     := close + tpMult * orWidth
+        else
+            initialStop := na                              // trail (0) / hold (3): no fixed stop
+            tpLevel     := na
+        // catastrophic stop (frozen at entry from entry-day ATR); na if disabled or ATR not ready
+        catStop := (useCatStop and not na(curDayATR)) ? close - catMult * curDayATR : na
+        tradeSeq += 1
+        tradeId := makeTradeId(tradeSeq)
+    else if shortBreak
+        strategy.entry("S", strategy.short)
+        tookEntryShort := true
+        tradeDir       := -1
+        entryPrice     := close
+        tookShort      := true
+        bestSinceEntry := low
+        if exitMode == 1
+            initialStop := close + slPts
+            tpLevel     := close - tpPts
+        else if exitMode == 2
+            initialStop := orHigh + slMult * orWidth
+            tpLevel     := close - tpMult * orWidth
+        else
+            initialStop := na
+            tpLevel     := na
+        catStop := (useCatStop and not na(curDayATR)) ? close + catMult * curDayATR : na
+        tradeSeq += 1
+        tradeId := makeTradeId(tradeSeq)
+
+// ---- MANAGE OPEN POSITION (driven by tradeDir; runs on entry bar and every bar after) ----
+// exitMode: 0=trail off best, 1=fixed stop+TP, 2=OR-mult stop+TP, 3=pure EOD hold (no stop/TP).
+float stopLevel     = na
+float trailStopLine = na
+string stopKind     = na
+if tradeDir > 0
+    bestSinceEntry := math.max(bestSinceEntry, high)
+    if exitMode == 0
+        trailStopLine := bestSinceEntry - trailPts
+        stopLevel := trailStopLine
+        stopKind  := "trail"
+    else if exitMode == 1 or exitMode == 2
+        stopLevel := initialStop
+        stopKind  := exitMode == 2 ? "ormult" : "fixed"
+    // catastrophic stop binds if it is TIGHTER (higher, for a long) than the mode stop -- and it
+    // applies alone when the mode has none (EOD-hold). "cat" only labels the exit if it is binding.
+    if not na(catStop) and (na(stopLevel) or catStop > stopLevel)
+        stopLevel := catStop
+        stopKind  := "cat"
+    if not na(stopLevel) or not na(tpLevel)
+        strategy.exit("L-exit", from_entry="L", stop=stopLevel, limit=tpLevel, comment=stopKind)
+else if tradeDir < 0
+    bestSinceEntry := math.min(bestSinceEntry, low)
+    if exitMode == 0
+        trailStopLine := bestSinceEntry + trailPts
+        stopLevel := trailStopLine
+        stopKind  := "trail"
+    else if exitMode == 1 or exitMode == 2
+        stopLevel := initialStop
+        stopKind  := exitMode == 2 ? "ormult" : "fixed"
+    if not na(catStop) and (na(stopLevel) or catStop < stopLevel)
+        stopLevel := catStop
+        stopKind  := "cat"
+    if not na(stopLevel) or not na(tpLevel)
+        strategy.exit("S-exit", from_entry="S", stop=stopLevel, limit=tpLevel, comment=stopKind)
+
+// ---- SESSION FLATTEN (EOD / holiday gap) ----
+bool sessionFlat = eodClosed or _gapEdge
+if sessionFlat and tradeDir != 0
+    strategy.close_all(comment="session")
+    exitReason  := "session"
+    exitedDir   := tradeDir
+    exitTradeId := tradeId
+    tradeDir := 0
+
+// ---- SYNC tradeDir when the BROKER closed us out (a stop or TP filled) ----
+if tradeDir != 0 and strategy.position_size == 0 and bar_index > 0 and strategy.position_size[1] != 0
+    exitReason  := na(stopKind) ? "exit" : stopKind
+    exitedDir   := tradeDir
+    exitTradeId := tradeId
+    tradeDir := 0
+
+// reset per-trade state only when truly flat by OUR tracking
+if tradeDir == 0
+    entryPrice     := na
+    initialStop    := na
+    tpLevel        := na
+    catStop        := na
+    bestSinceEntry := na
+
+//=============================
+// Visuals -- OR box edges + break levels + active stop + entry triangles
+//=============================
+// OR box (only draw once the box is complete). Grey while forming, solid once ready.
+plot(orReady ? orHigh : na, "OR high", color=color.new(color.teal, 0),  style=plot.style_linebr, linewidth=1)
+plot(orReady ? orLow  : na, "OR low",  color=color.new(color.teal, 0),  style=plot.style_linebr, linewidth=1)
+// break trigger levels (OR edge +/- buffer)
+plot(orReady ? orHigh + breakBuf : na, "break-up level",   color=color.new(color.teal, 60), style=plot.style_linebr, linewidth=1)
+plot(orReady ? orLow  - breakBuf : na, "break-down level", color=color.new(color.teal, 60), style=plot.style_linebr, linewidth=1)
+// active stop, colored by side: FUCHSIA (below) = long stop, ORANGE (above) = short stop
+plot(tradeDir > 0 ? stopLevel : na, "long stop",  color=color.new(color.fuchsia, 0), style=plot.style_linebr, linewidth=2)
+plot(tradeDir < 0 ? stopLevel : na, "short stop", color=color.new(color.orange,  0), style=plot.style_linebr, linewidth=2)
+// take-profit (fixed / OR-mult modes)
+plot(tradeDir != 0 and not na(tpLevel) ? tpLevel : na, "take-profit", color=color.new(color.yellow, 0), style=plot.style_linebr, linewidth=1)
+
+// Entry triangles (trade color). Plot ACTUAL fills (tookEntryLong/Short), not raw break signals --
+// a break that fires while already in a trade is ignored and must not print a phantom triangle.
+plotshape(tookEntryLong,  "LONG entry",  shape.triangleup,   location.belowbar, color=color.new(color.lime, 0), size=size.small, text="L")
+plotshape(tookEntryShort, "SHORT entry", shape.triangledown, location.abovebar, color=color.new(color.red,  0), size=size.small, text="S")
+
+//=============================
+// Version label -- bottom-right
+//=============================
+var table cityTable = table.new(position.bottom_right, 1, 1,
+     bgcolor      = color.new(color.black, 20),
+     border_width = 1,
+     border_color = color.new(color.gray, 50))
+if barstate.islast
+    table.cell(cityTable, 0, 0, "Sapporo", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.navy, 10))
+
+//=============================
+// PARAM + EVENT columns (self-documenting export). Read the P_ columns before interpreting a chart.
+//=============================
+plot(orMinutes,   "P_orMinutes",   color=na, display=display.data_window)
+plot(breakEndMin, "P_breakEndMin", color=na, display=display.data_window)
+plot(breakBuf,    "P_breakBuf",    color=na, display=display.data_window)
+plot(orMinPts,    "P_orMinPts",    color=na, display=display.data_window)
+plot(useSlopeRouter ? 1 : 0, "P_useSlopeRouter", color=na, display=display.data_window)
+plot(slopeLen,    "P_slopeLen",    color=na, display=display.data_window)
+plot(slopeMinPB,  "P_slopeMinPB",  color=na, display=display.data_window)
+plot(exitMode,    "P_exitMode",    color=na, display=display.data_window)
+plot(trailPts,    "P_trailPts",    color=na, display=display.data_window)
+plot(tpPts,       "P_tpPts",       color=na, display=display.data_window)
+plot(slPts,       "P_slPts",       color=na, display=display.data_window)
+plot(tpMult,      "P_tpMult",      color=na, display=display.data_window)
+plot(slMult,      "P_slMult",      color=na, display=display.data_window)
+plot(useCatStop ? 1 : 0, "P_useCatStop", color=na, display=display.data_window)
+plot(catMult,     "P_catMult",     color=na, display=display.data_window)
+plot(atrDays,     "P_atrDays",     color=na, display=display.data_window)
+plot(useRvGate ? 1 : 0, "P_useRvGate", color=na, display=display.data_window)
+plot(rvMax,       "P_rvMax",      color=na, display=display.data_window)
+plot(rvDays,      "P_rvDays",     color=na, display=display.data_window)
+plot(useCvdGate ? 1 : 0, "P_useCvdGate", color=na, display=display.data_window)
+plot(cvdWindow,   "P_cvdWindow",   color=na, display=display.data_window)
+plot(cvdThresh,   "P_cvdThresh",   color=na, display=display.data_window)
+
+plot(orWidth,     "OR width (pts)",  color=na, display=display.data_window)
+plot(breakSlope,  "slope into break", color=na, display=display.data_window)
+plot(trailCvd,    "trailing CVD",     color=na, display=display.data_window)
+plot(curDayATR,   "daily ATR (pts)",  color=na, display=display.data_window)
+plot(orVolAccum,  "OR volume",        color=na, display=display.data_window)
+plot(curOrRelVol, "OR rel-vol",       color=na, display=display.data_window)
+plot(catStop,     "cat stop lvl",     color=na, display=display.data_window)
+plot(stopLevel,   "active stop lvl",  color=na, display=display.data_window)
+plot(tookEntryLong  ?  1 : na, "EVT_long_entry",  color=na, display=display.data_window)
+plot(tookEntryShort ? -1 : na, "EVT_short_entry", color=na, display=display.data_window)
+plot((tookEntryLong or tookEntryShort) ? close : na, "EVT_entry_px", color=na, display=display.data_window)
+
+//=============================
+// Alerts -- JSON payloads for webhook REST API (same scheme as slope_touch_fade).
+// In the TradingView alert dialog: paste your webhook URL, set message to {{alert_message}}.
+//=============================
+// Entry payload carries only what a webhook needs to execute: side, id, fill price, and the
+// protective levels the strategy actually placed. sl/tp/sl_pts are the fixed / OR-mult stop+target;
+// in TRAIL and EOD-HOLD modes there is no resting protective order, so they emit JSON null.
+_slStr(v) => na(v) ? "null" : str.tostring(v, "0.00")
+
+// EXIT alert FIRST (so a same-bar flip emits the close before any new entry). reason =
+// session/stop/tp/trail/exit. Uses exitTradeId (id of the trade that closed).
+bool exitFired = (tradeDir == 0 and tradeDir[1] != 0)
+if exitFired
+    _exitSide = exitedDir == 1 ? "long" : "short"
+    alert('{"event":"exit","side":"' + _exitSide + '","id":"' + exitTradeId + '"' +
+          ',"reason":"' + exitReason + '"' +
+          ',"price":' + str.tostring(close, "0.00") +
+          ',"symbol":"' + syminfo.ticker + '"' +
+          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London") + '"' +
+          '}', alert.freq_once_per_bar)
+
+if tradeDir == 1 and tradeDir[1] == 0
+    alert('{"event":"entry","side":"long","id":"' + tradeId + '","price":' + str.tostring(close, "0.00") +
+          ',"sl":' + _slStr(initialStop) +
+          ',"tp":' + _slStr(tpLevel) +
+          ',"sl_pts":' + (na(initialStop) ? "null" : str.tostring(math.abs(entryPrice - initialStop), "0.00")) +
+          ',"symbol":"' + syminfo.ticker + '"' +
+          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London") + '"' +
+          '}', alert.freq_once_per_bar)
+
+if tradeDir == -1 and tradeDir[1] == 0
+    alert('{"event":"entry","side":"short","id":"' + tradeId + '","price":' + str.tostring(close, "0.00") +
+          ',"sl":' + _slStr(initialStop) +
+          ',"tp":' + _slStr(tpLevel) +
+          ',"sl_pts":' + (na(initialStop) ? "null" : str.tostring(math.abs(entryPrice - initialStop), "0.00")) +
+          ',"symbol":"' + syminfo.ticker + '"' +
+          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London") + '"' +
+          '}', alert.freq_once_per_bar)
