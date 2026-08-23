@@ -85,7 +85,7 @@ def _daily_atr(bars, ndays=14):
 def run(bars, trig_pts=120.0, settle_min=0, entry_end_min=330,
         use_slope_gate=False, slope_min=0.75,
         enable_long=True, enable_short=True, slip=1.0, fillmode="stop",
-        use_atr_stop=True, sl_mult=1.0, atr_days=14):
+        use_atr_stop=True, sl_mult=1.0, atr_days=3):
     """Returns list of trades: (dir, entry_px, exit_px, pts, entry_epoch, reason)."""
     trades = []
     n = len(bars)

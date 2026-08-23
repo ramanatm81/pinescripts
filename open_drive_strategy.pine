@@ -27,14 +27,16 @@
 //
 // HONEST NUMBERS -- from backtest/open_drive_bt.py, the reference port. 5yr MNQ 1-min, resting
 // STOP-order fills (level, or bar open when the bar gapped through), no cat stop, 1 trade/day:
-//   DEFAULT trig120 settle0 SL1.0xATR, 2pt : +16,346  exTop10 +8,130  top10 50%  n=934  5/6 yrs
-//           same, 1pt slip                   : +17,280  exTop10 +9,054  top10 48%  n=934  5/6 yrs
+//   DEFAULT trig120 settle0 SL1.0xATR atrDays3, 2pt : +13,594 exTop10 +5,378 top10 60% n=934 5/6
+//           same but atrDays 14 (better, unusable on TV) : +16,346 exTop10 +8,130 top10 50% 5/6
+//           atrDays 14, 1pt slip                         : +17,280 exTop10 +9,054 top10 48% 5/6
 //           NO stop (the old default), 2pt   : +15,708  exTop10 +7,491  top10 52%  n=934  5/6 yrs
 //           trig100 settle0 SL1.0xATR, 1pt   : +12,884  exTop10 +4,537  top10 65%  n=1066
 //
 // slMult surface (2pt): 0.5 +10,542/+2,326 | 0.75 +13,531/+5,315 | 1.0 +16,346/+8,130 |
 //                       1.25 +15,935/+7,718 | 1.5 +15,892/+7,676 | 2.0 +15,083/+6,867
-// atrDays surface (2pt): 7 +15,815 | 10 +15,570 | 14 +16,346 | 20 +15,425 | 30 +15,630 -- flat.
+// atrDays surface (2pt): 2 +13,083 | 3 +13,594 | 5 +14,999 | 7 +15,815 | 14 +16,346 |
+//                       20 +15,425 | 30 +15,630. Monotonic to 14, then flat. Default 3 for TV.
 // Exit mix: session 892 (95.5%) +29,684 avg +33.3 | atrstop 42 (4.5%) -13,338 avg -317.6.
 // The stop fires on only 4.5% of trades; it caps 42 disasters and leaves the other 95% untouched.
 //
@@ -126,7 +128,13 @@ entryEndMin = input.int(330,  "No new entry after this many min past open", minv
 //=============================
 useAtrStop = input.bool(true, "ATR stop: cap loss at slMult * trailing daily ATR", group="ATR stop")
 slMult     = input.float(1.0, "Stop distance = this * daily ATR (avoid <= 0.5)", minval=0.25, step=0.25, group="ATR stop")
-atrDays    = input.int(14,   "Daily-ATR lookback (days, trailing/past-only)", minval=1, maxval=60, group="ATR stop")
+// atrDays 3, not 14. The 14-day surface is slightly better on 5yr (+16,346 vs +13,594 net,
+// exTop10 +8,130 vs +5,378) BUT it needs 14 prior sessions of history before the stop exists at
+// all -- and a TradingView 1-min chart does not hold that much intraday history, so in practice
+// every trade you watch there would run with NO stop. A 3-day ATR warms up almost immediately.
+// The surface is monotonic 2->14 (2:+13,083 3:+13,594 5:+14,999 7:+15,815 14:+16,346), so this is
+// a known ~17% cost paid to make the stop actually exist on the platform you trade from.
+atrDays    = input.int(3,    "Daily-ATR lookback (days, trailing/past-only)", minval=1, maxval=60, group="ATR stop")
 
 //=============================
 // Inputs -- side

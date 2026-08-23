@@ -194,7 +194,7 @@ def _od_schema():
             dict(name="entry_end_min", label="no entry after (min)", type="int", default=330, min=10, max=390, group="Trigger"),
             dict(name="use_atr_stop", label="ATR stop on", type="bool", default=True, group="Exit"),
             dict(name="sl_mult", label="stop dist xATR (avoid <=0.5)", type="float", default=1.0, min=0.25, step=0.25, group="Exit"),
-            dict(name="atr_days", label="ATR lookback (days)", type="int", default=14, min=1, max=60, group="Exit"),
+            dict(name="atr_days", label="ATR lookback (days)", type="int", default=3, min=1, max=60, group="Exit"),
             dict(name="use_slope_gate", label="pre-open slope gate on", type="bool", default=False, group="Gate"),
             dict(name="slope_min", label="min |pre-open slope| (pt/bar)", type="float", default=0.75, min=0, step=0.05, group="Gate"),
             dict(name="enable_long", label="take longs", type="bool", default=True, group="Side"),

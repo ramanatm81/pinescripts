@@ -320,7 +320,7 @@ def verify(dataset, cfg):
 
 DEFAULT_CFG = dict(trig_pts=120.0, settle_min=0, entry_end_min=330,
                    use_slope_gate=False, slope_min=0.75,
-                   use_atr_stop=True, sl_mult=1.0, atr_days=14,
+                   use_atr_stop=True, sl_mult=1.0, atr_days=3,
                    enable_long=True, enable_short=True)
 
 

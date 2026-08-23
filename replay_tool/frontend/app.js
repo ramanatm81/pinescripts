@@ -146,12 +146,36 @@ function drawWindow() {
   const w = state.win; if (!w) return;
   const candles = [], resL = [], suppL = [];
   const tsIndex = new Map();      // epoch-seconds -> frame, for crosshair-hover lookups
+  // Rails are PER-DAY levels. Two things make them readable over a multi-day window:
+  //  1. break the line between sessions (a whitespace point) so yesterday's rail does not slope
+  //     across the night into today's -- lightweight-charts joins consecutive points otherwise.
+  //  2. once a side has filled, the OPPOSITE rail is dead for that day -- stop drawing it, so the
+  //     chart shows only the level that actually mattered.
+  let prevDay = null, sideTaken = 0, prevTs = null;
   for (const f of w.frames) {
     const t = toTs(f.time);
     candles.push({ time: t, open: f.o, high: f.h, low: f.l, close: f.c });
-    if (f.res != null) resL.push({ time: t, value: f.res });
-    if (f.supp != null) suppL.push({ time: t, value: f.supp });
+    const day = (f.time || "").slice(0, 10);   // CT date -- the RTH session key
+    if (day !== prevDay) {
+      // Break the line between sessions. lightweight-charts joins consecutive points, so without
+      // this you get one long line spanning days at levels that were never simultaneously live --
+      // yesterday's rail drawn straight through today's chart. A whitespace point is {time} with
+      // NO `value` key. The bars here are contiguous 1-min data (no overnight hole), so the cut
+      // slot is prevTs+1 -- one second after the last bar of the old day, which no bar occupies.
+      // Do NOT gate this on a time gap between sessions: there is none, and the break never fires.
+      if (prevDay !== null && prevTs !== null) {
+        resL.push({ time: prevTs + 1 });
+        suppL.push({ time: prevTs + 1 });
+      }
+      prevDay = day; sideTaken = 0;
+    }
+    if (f.entry_dir) sideTaken = f.entry_dir;
+    const showUp = sideTaken >= 0;         // up rail dies once a SHORT filled
+    const showDn = sideTaken <= 0;         // down rail dies once a LONG filled
+    if (f.res != null && showUp) resL.push({ time: t, value: f.res });
+    if (f.supp != null && showDn) suppL.push({ time: t, value: f.supp });
     tsIndex.set(t, f);
+    prevTs = t;
   }
   state.tsIndex = tsIndex;
   candle.setData(candles);
