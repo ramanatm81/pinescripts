@@ -201,7 +201,15 @@ slopeMin     = input.float(0.75, "Min |pre-open slope| to trade the day (pts/bar
 //                                       "price" is the STOP LEVEL, not the bar close.
 //                          "exit"    -- closed with no stop set (first atrDays of a chart only).
 //                        In every case: flatten if you are still holding, and cancel any unfilled
-//                        entry stop. "pnl_pts" carries the round-trip result in points.
+//                        entry stop. "pnl_pts" carries the round-trip result in points for the
+//                        ORIGINAL unit; "add_filled" / "add_price" say whether a scale-in unit was
+//                        also in the position (flatten it too -- close_all covers it inside TV).
+//   addlevelopendrive -- SCALE-IN ONLY (useScaleIn). Fires on the bar the add limit is first armed
+//                        and again on every bar the level MOVES (it tracks the running peak, so it
+//                        ratchets toward the peak as the trade extends). PLACE / REPLACE YOUR
+//                        RESTING LIMIT AT "add_level". Cancel it on exitopendrive.
+//   addfillopendrive  -- the scale-in limit filled, at that bar's close. Same timing caveat as the
+//                        entry event: "already_filled":true, the position is now qty+addQty units.
 // Roughly 27.5% of days never hit either level, so no entry event arrives -- your resting orders
 // simply expire. Cancel them at entryEndMin (default 330 min past the open = 20:00 LDN).
 //
@@ -218,6 +226,8 @@ slopeMin     = input.float(0.75, "Min |pre-open slope| to trade the day (pts/bar
 entryEventName = input.string("entryopendrive", "Entry event name (webhook JSON \"event\")", group="Webhook")
 exitEventName  = input.string("exitopendrive",  "Exit event name (webhook JSON \"event\")",  group="Webhook")
 armedEventName = input.string("levelsopendrive", "Levels event name -- place your stop orders on THIS", group="Webhook")
+addLevelEventName = input.string("addlevelopendrive", "Scale-in level event name -- rest your add limit on THIS", group="Webhook")
+addFillEventName  = input.string("addfillopendrive",  "Scale-in fill event name", group="Webhook")
 
 //=============================
 // Inputs -- manual-trading alerts. These emit extra alert() events ("armed", "approaching") through
@@ -345,6 +355,7 @@ var float  stopLevel   = na    // ATR stop, frozen at entry
 var float  runMFE      = na    // best excursion in our favour since entry (pts)
 var float  addLevel    = na    // price the scale-in unit rests at; na until armed
 var bool   addFilled   = false
+var float  addFillPx   = na    // scale-in fill: the level, or the bar open on a gap-through; read by the alerts
 var int    tradeSeq    = 0
 var string tradeId     = ""
 var string exitReason  = ""
@@ -401,6 +412,7 @@ if tookEntryLong or tookEntryShort
     runMFE     := 0.0
     addLevel   := na
     addFilled  := false
+    addFillPx  := na
     tookTrade  := true
     tradeSeq   += 1
     tradeId    := makeTradeId(tradeSeq)
@@ -421,9 +433,12 @@ if useScaleIn and tradeDir != 0 and not addFilled
             strategy.entry("L-add", strategy.long, qty=addQty, limit=addLevel)
         else
             strategy.entry("S-add", strategy.short, qty=addQty, limit=addLevel)
+// addFillPx: the limit's fill -- the level, or the bar OPEN when the bar gapped through it (a
+// resting limit fills at the better price on a gap). Read by the add-fill and exit payloads.
 if useScaleIn and not addFilled and not na(addLevel) and
      ((tradeDir > 0 and low <= addLevel) or (tradeDir < 0 and high >= addLevel))
     addFilled := true
+    addFillPx := tradeDir > 0 ? math.min(open, addLevel) : math.max(open, addLevel)
 
 // ---- ATR STOP: a resting protective order, refreshed every bar we are in a position. There is no
 // take-profit by design (adding one costs net -- see the ATR stop input block).
@@ -514,6 +529,7 @@ plot(curDayATR,              "daily ATR",      color=na, display=display.data_wi
 plot(stopLevel,              "active stop",    color=na, display=display.data_window)
 plot(runMFE,                 "run MFE",        color=na, display=display.data_window)
 plot(addLevel,               "add level",      color=na, display=display.data_window)
+plot(addFillPx,              "add fill px",    color=na, display=display.data_window)
 plot(addFilled ? 1 : 0,      "add filled",     color=na, display=display.data_window)
 
 // Diagnostics -- the live state the entry logic reads.
@@ -614,6 +630,38 @@ if exitJustFired
           ',"pnl_pts":' + (na(entryPrice) ? "null" :
                str.tostring((exitPrice - entryPrice) * exitedDir, "0.00")) +
           ',"stop_hit":' + (exitReason == "atrstop" ? "true" : "false") +
+          ',"add_filled":' + (addFilled ? "true" : "false") +
+          ',"add_price":' + (addFilled ? _slStr(addFillPx) : "null") +
+          ',"add_pnl_pts":' + (addFilled and not na(addFillPx) ?
+               str.tostring((exitPrice - addFillPx) * exitedDir, "0.00") : "null") +
+          ',"symbol":"' + syminfo.ticker + '"' +
+          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London") + '"' +
+          '}', alert.freq_once_per_bar)
+
+// SCALE-IN alerts. Level event: on the bar the add is first armed and on every bar the level
+// moves (it ratchets with the running peak). Gated on the level CHANGING, not on runMFE, so a
+// flat peak emits nothing. Fill event: on the bar addFilled flips. Both only while in a position
+// and only with useScaleIn, so a consumer without the toggle never sees them.
+if useScaleIn and tradeDir != 0 and not addFilled and not na(addLevel) and addLevel != addLevel[1]
+    alert('{"event":"' + addLevelEventName + '","side":"' + (tradeDir > 0 ? "long" : "short") + '","id":"' + tradeId + '"' +
+          ',"add_level":' + str.tostring(addLevel, "0.00") +
+          ',"qty":' + str.tostring(addQty) +
+          ',"peak_mfe_pts":' + _slStr(runMFE) +
+          ',"entry_price":' + _slStr(entryPrice) +
+          ',"sl":' + _slStr(stopLevel) +
+          ',"order":"resting_limit","replace_existing":true' +
+          ',"symbol":"' + syminfo.ticker + '"' +
+          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London") + '"' +
+          '}', alert.freq_once_per_bar)
+
+if useScaleIn and tradeDir != 0 and addFilled and not addFilled[1]
+    alert('{"event":"' + addFillEventName + '","side":"' + (tradeDir > 0 ? "long" : "short") + '","id":"' + tradeId + '"' +
+          ',"price":' + _slStr(addFillPx) +
+          ',"qty":' + str.tostring(addQty) +
+          ',"units_total":' + str.tostring(math.abs(strategy.position_size), "0") +
+          ',"entry_price":' + _slStr(entryPrice) +
+          ',"sl":' + _slStr(stopLevel) +
+          ',"fill_mode":"resting_limit","already_filled":true' +
           ',"symbol":"' + syminfo.ticker + '"' +
           ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London") + '"' +
           '}', alert.freq_once_per_bar)
@@ -732,5 +780,6 @@ if tradeDir == 0 and not exitJustFired
     runMFE     := na
     addLevel   := na
     addFilled  := false
+    addFillPx  := na
     strategy.cancel("L-add")
     strategy.cancel("S-add")
