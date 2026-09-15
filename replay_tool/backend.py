@@ -24,6 +24,7 @@ import os
 import io
 import csv
 import json
+import math
 import glob
 import hashlib
 import threading
@@ -77,6 +78,19 @@ def _run_path(tag):
     return os.path.join(HERE, f"run_{tag}.parquet")
 
 
+def _finite(x):
+    """Scrub inf/NaN before they reach JSON. A run with zero losing trades used to produce an
+    infinite profit factor, which FastAPI refuses to serialize ("Out of range float values are not
+    JSON compliant"). Non-finite floats become null."""
+    if isinstance(x, float):
+        return x if math.isfinite(x) else None
+    if isinstance(x, dict):
+        return {k: _finite(v) for k, v in x.items()}
+    if isinstance(x, list):
+        return [_finite(v) for v in x]
+    return x
+
+
 def _load(tag):
     """Open a run's parquet (cached). Reads kv-metadata (meta+trades) once; keeps the ParquetFile
     handle so frame reads can push row-group filters without reopening."""
@@ -87,8 +101,8 @@ def _load(tag):
         raise HTTPException(404, f"no run '{tag}' (looked for {os.path.basename(path)})")
     pf = pq.ParquetFile(path)
     kv = pf.metadata.metadata or {}
-    meta = json.loads(kv.get(b"meta", b"{}"))
-    trades = json.loads(kv.get(b"trades", b"[]"))
+    meta = _finite(json.loads(kv.get(b"meta", b"{}")))
+    trades = _finite(json.loads(kv.get(b"trades", b"[]")))
     entry = dict(path=path, pf=pf, meta=meta, trades=trades, n=pf.metadata.num_rows)
     _CACHE[tag] = entry
     return entry
@@ -213,10 +227,42 @@ def _od_verify(dataset, cfg):
     return open_drive_sim.verify(dataset, cfg)
 
 
+def _odrb_schema():
+    import od_runbreak_sim  # noqa: F401
+    return dict(
+        strategy="od_runbreak",
+        label="OD Running-Extreme Break (post-reversal)",
+        params=[
+            dict(name="trig_pts", label="drive trigger (pt from open)", type="float", default=120, min=5, step=5, group="Setup"),
+            dict(name="rev_pts", label="reversal back through break (pt)", type="float", default=120, min=10, step=5, group="Setup"),
+            dict(name="attempt_mode", label="failed-attempt rule (off = naive)", type="bool", default=True, group="Setup"),
+            dict(name="thr", label="give-back that proves failure (pt)", type="float", default=40, min=5, step=5, group="Setup"),
+            dict(name="buf", label="clear the level by (pt) to enter", type="float", default=15, min=0, step=5, group="Setup"),
+            dict(name="sl_mode_ext", label="stop at structure (off = ATR)", type="bool", default=True, group="Exit"),
+            dict(name="sl_mult", label="stop dist xATR (if structure off)", type="float", default=1.0, min=0.25, step=0.25, group="Exit"),
+            dict(name="atr_days", label="ATR lookback (days)", type="int", default=3, min=1, max=60, group="Exit"),
+            dict(name="tp_pts", label="take-profit (pt, 0=off)", type="float", default=150, min=0, step=5, group="Exit"),
+            dict(name="trail_pts", label="trailing stop (pt, 0=off)", type="float", default=0, min=0, step=5, group="Exit"),
+            dict(name="max_trades", label="max trades / session", type="int", default=99, min=1, max=99, group="Exit"),
+        ],
+    )
+
+
+def _odrb_build(dataset, cfg, start=None, end=None):
+    import od_runbreak_sim
+    return od_runbreak_sim.build_run(dataset, cfg, start=start, end=end)
+
+
+def _odrb_verify(dataset, cfg):
+    import od_runbreak_sim
+    return od_runbreak_sim.verify(dataset, cfg)
+
+
 STRATEGY_REGISTRY = {
     "window_displacement_fade": dict(schema=_wdf_schema, build=_wdf_build, verify=_wdf_verify, tag_prefix="wdf"),
     "opening_range_breakout": dict(schema=_orb_schema, build=_orb_build, verify=_orb_verify, tag_prefix="orb"),
     "open_drive": dict(schema=_od_schema, build=_od_build, verify=_od_verify, tag_prefix="od"),
+    "od_runbreak": dict(schema=_odrb_schema, build=_odrb_build, verify=_odrb_verify, tag_prefix="odrb"),
 }
 
 
@@ -316,8 +362,8 @@ def params(strategy: str):
 def simulate(body: SimulateBody):
     if body.strategy not in STRATEGY_REGISTRY:
         raise HTTPException(404, f"unknown strategy '{body.strategy}'")
-    if body.dataset not in ("5yr", "oos"):
-        raise HTTPException(400, "dataset must be '5yr' or 'oos'")
+    if body.dataset not in ("5yr", "oos", "fwd2026"):
+        raise HTTPException(400, "dataset must be '5yr', 'oos' or 'fwd2026'")
     schema = STRATEGY_REGISTRY[body.strategy]["schema"]()
     cfg = _coerce(schema, body.params)
     start = body.start or None

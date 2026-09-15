@@ -8,7 +8,7 @@ const $ = (id) => document.getElementById(id);
 const fmt = (x, d = 2) => (x === null || x === undefined) ? "—" : Number(x).toFixed(d);
 
 const state = {
-  tag: null, meta: null, trades: [], nBars: 0,
+  tag: null, meta: null, trades: [], nBars: 0, scenario: "",
   cur: 0,                    // current bar index (the "playhead")
   winLen: 750,              // chart window size in bars
   win: null,               // {lo, hi, frames: array-of-per-bar-objects}
@@ -116,7 +116,8 @@ function showLoading(on) { $("loading").classList.toggle("hidden", !on); }
 async function fetchWindow(lo, hi) {
   lo = Math.max(0, lo); hi = Math.min(state.nBars, hi);
   const cols = "i,time,o,h,l,c,res,supp,anchor,run,r2,pos,entry_px,stop_level,stop_kind," +
-               "cum_usd,unreal_usd,entry_dir,exit_reason,exit_px,long_sig,short_sig,long_arm,short_arm";
+               "cum_usd,unreal_usd,entry_dir,exit_reason,exit_px,long_sig,short_sig,long_arm,short_arm," +
+               "paper_break,paper_break_px,reversal,reversal_px";
   const d = await api(`/run/${state.tag}/frames?from=${lo}&to=${hi}&cols=${cols}`);
   const n = d.n, out = new Array(n);
   const col = d.data;
@@ -210,10 +211,17 @@ function drawMarkersAndStop() {
     const t = toTs(f.time);
     // ARM dot: trend-into-S/R detected, BEFORE the pullback entry (the .pine's red/green dot).
     // green = long arm at support (below bar), red = short arm at resistance (above bar).
+    const rb = (state.meta.cfg && state.meta.cfg.strategy) === "od_runbreak";
     if (f.long_arm)
-      markers.push({ time: t, position: "belowBar", color: "#26a69a", shape: "circle", text: "•" });
+      markers.push({ time: t, position: "belowBar", color: "#26a69a", shape: "circle",
+        text: rb ? "OD paper ↑" : "•" });
     if (f.short_arm)
-      markers.push({ time: t, position: "aboveBar", color: "#ef5350", shape: "circle", text: "•" });
+      markers.push({ time: t, position: "aboveBar", color: "#ef5350", shape: "circle",
+        text: rb ? "OD paper ↓" : "•" });
+    if (rb && f.long_sig)
+      markers.push({ time: t, position: "belowBar", color: "#d29922", shape: "circle", text: "rev ↓120" });
+    if (rb && f.short_sig)
+      markers.push({ time: t, position: "aboveBar", color: "#d29922", shape: "circle", text: "rev ↑120" });
     if (f.entry_dir === 1 || f.entry_dir === -1) {
       const isLong = f.entry_dir === 1;
       markers.push({ time: t, position: isLong ? "belowBar" : "aboveBar",
@@ -277,8 +285,9 @@ function renderState(frame) {
   // trigger rails for open-drive, S/R lines otherwise.
   const isORB = strat === "opening_range_breakout";
   const isOD = strat === "open_drive";
-  const hiLbl = isORB ? "OR high" : isOD ? "drive-up lvl" : "resistance";
-  const loLbl = isORB ? "OR low" : isOD ? "drive-dn lvl" : "support";
+  const isRB = strat === "od_runbreak";
+  const hiLbl = isORB ? "OR high" : isOD ? "drive-up lvl" : isRB ? "failed-attempt level" : "resistance";
+  const loLbl = isORB ? "OR low" : isOD ? "drive-dn lvl" : isRB ? "running extreme (stop)" : "support";
   const rows = [
     ["time", ldnFull(f.time)],
     ["bar #", f.i],
@@ -286,7 +295,9 @@ function renderState(frame) {
     // S/R and R² only make sense for strategies that populate them -- hide when null.
     ...(f.res != null ? [[hiLbl, fmt(f.res)]] : []),
     ...(f.supp != null ? [[loLbl, fmt(f.supp)]] : []),
-    ...(f.anchor != null ? [["RTH open", fmt(f.anchor)]] : []),
+    ...(f.anchor != null ? [[isRB ? "paper OD entry" : "RTH open", fmt(f.anchor)]] : []),
+    ...(f.paper_break_px != null ? [["PAPER OD FIRED", `${fmt(f.paper_break_px)} (${f.paper_break > 0 ? "up" : "down"})`]] : []),
+    ...(f.reversal_px != null ? [["120pt REVERSAL", fmt(f.reversal_px)]] : []),
     ...(f.run != null ? [[runLabel, `${fmt(f.run, 1)} pt`]] : []),
     ...(f.r2 != null ? [["OLS R²", fmt(f.r2, 3)]] : []),
     ["position", `<span class="${posCls}">${posTxt}</span>`],
@@ -339,32 +350,63 @@ function renderSummary() {
 }
 // a trade is "in view" if any part of it overlaps the active filter window [viewLo, viewHi)
 const tradeInView = (t) => t.exit_i >= state.viewLo && t.entry_i < state.viewHi;
+// scenario filter (runs whose trades carry a `scenario` tag, e.g. open-drive): "" = all
+const hasScenarios = () => state.trades.some(t => t.scenario !== undefined);
+const scenarioOk = (t) => !state.scenario || t.scenario === state.scenario;
+function syncScenarioUI() {
+  const on = hasScenarios();
+  $("scenarioFilter").classList.toggle("hidden", !on);
+  for (const id of ["thScenario", "thT80", "thPeak", "thPre"]) $(id).classList.toggle("hidden", !on);
+  if (!on) state.scenario = "";
+}
+// Jump to a trade anywhere in the run: if it lies outside the active view, switch the view to the
+// month that contains it first (so the scenario filter can walk trades across the whole run).
+async function gotoTrade(t, atExit = false) {
+  pause();
+  const target = atExit ? t.exit_i : t.entry_i;
+  if (target < state.viewLo || target >= state.viewHi) {
+    const m = (state.index?.months || []).find(m => target >= m.lo_i && target < m.hi_i);
+    if (m) {
+      state.filterMode = "month"; $("monthSelect").value = `${m.lo_i}|${m.hi_i}`; syncFilterUI();
+      await setView(m.lo_i, m.hi_i);
+    }
+  }
+  await seekTo(target);
+}
 function renderTrades() {
   const tb = $("tradeTable").querySelector("tbody");
-  // keep the ORIGINAL index k on each row (for click-seek + highlight), but only render in-view rows
+  const scen = hasScenarios();
+  // keep the ORIGINAL index k on each row (for click-seek + highlight). With a scenario selected the
+  // table lists EVERY matching trade in the run (not just the view); otherwise only in-view rows.
   const rows = state.trades
     .map((t, k) => ({ t, k }))
-    .filter(({ t }) => tradeInView(t));
+    .filter(({ t }) => state.scenario ? scenarioOk(t) : tradeInView(t));
   const total = state.trades.length;
-  $("tradeCount").textContent = rows.length === total
-    ? `(${total})` : `(${rows.length} of ${total} in view)`;
+  $("tradeCount").textContent = state.scenario
+    ? `(${rows.length} of ${total} · ${state.scenario} · click a row: entry, click its exit time: exit)`
+    : (rows.length === total ? `(${total})` : `(${rows.length} of ${total} in view)`);
   tb.innerHTML = rows.map(({ t, k }) => {
     const dc = t.dir > 0 ? "long" : "short";
     const pc = t.pts >= 0 ? "pos" : "neg";
+    const extra = scen ? `
+      <td>${t.scenario ?? ""}</td>
+      <td>${t.t80 == null ? "–" : t.t80 + "m"}</td>
+      <td>${t.peak_min == null ? "–" : t.peak_min + "m"}</td>
+      <td class="${(t.pre_net ?? 0) >= 0 ? "pos" : "neg"}">${t.pre_net == null ? "–" : fmt(t.pre_net, 0)}</td>` : "";
     return `<tr data-k="${k}">
       <td>${k + 1}</td>
       <td class="${dc}">${t.dir > 0 ? "L" : "S"}</td>
       <td>${ldnShort(t.entry_time)}</td>
-      <td>${ldnShort(t.exit_time)}</td>
+      <td class="seek-exit" title="click: jump to this trade's EXIT bar">${ldnShort(t.exit_time)}</td>
       <td class="${pc}">${fmt(t.pts, 1)}</td>
       <td class="pos">${fmt(t.mfe, 0)}</td>
       <td class="neg">${fmt(t.mae, 0)}</td>
       <td>${t.reason}</td>
-      <td class="${t.cum_usd >= 0 ? "pos" : "neg"}">${fmt(t.cum_usd, 0)}</td>
+      <td class="${t.cum_usd >= 0 ? "pos" : "neg"}">${fmt(t.cum_usd, 0)}</td>${extra}
     </tr>`;
   }).join("");
   tb.querySelectorAll("tr").forEach((tr) =>
-    tr.onclick = () => seekTo(state.trades[+tr.dataset.k].entry_i));
+    tr.onclick = (e) => gotoTrade(state.trades[+tr.dataset.k], e.target.classList.contains("seek-exit")));
 }
 function highlightActiveTrade() {
   // active = the trade whose [entry_i, exit_i] contains cur
@@ -376,8 +418,9 @@ function highlightActiveTrade() {
   if (a === state.activeTrade) return;
   state.activeTrade = a;
   const rows = $("tradeTable").querySelectorAll("tbody tr");
-  rows.forEach((tr) => tr.classList.toggle("active", +tr.dataset.k === a));
-  if (a >= 0) rows[a]?.scrollIntoView({ block: "nearest" });
+  let hit = null;
+  rows.forEach((tr) => { const on = +tr.dataset.k === a; tr.classList.toggle("active", on); if (on) hit = tr; });
+  hit?.scrollIntoView({ block: "nearest" });   // rows may be a filtered subset, so look up by k
 }
 
 // ---- playhead + scrub ----
@@ -403,9 +446,9 @@ async function seekTo(idx) {
 }
 // Keep the playhead near the right using LOGICAL (bar-offset) ranges. Always show a full VIEW_BARS
 // width (clamped to the loaded window) so the view never collapses to a few bars at the edges.
-const VIEW_BARS = 240;
 function recenter() {
   const w = state.win; if (!w) return;
+  const VIEW_BARS = Math.min(state.viewBars || 240, state.winLen);   // "View" select; never wider than the loaded window
   const n = w.frames.length;
   const k = state.cur - w.lo;                 // playhead offset within the window array
   let to = Math.min(n, k + 6);                 // small headroom to the right of the playhead
@@ -447,6 +490,7 @@ async function loadRun(tag) {
   state.tag = tag; state.playing = false; state.win = null; state.activeTrade = -1;
   const d = await api(`/run/${tag}`);
   state.meta = d.meta; state.trades = d.trades; state.nBars = d.n_bars; state.cur = 0;
+  syncScenarioUI(); $("scenarioFilter").value = state.scenario;
   renderSummary(); renderParams();   // renderTrades() is driven by setView (needs the view window)
   // load the navigation index and default to the FIRST month (per the requested default filter)
   state.index = await api(`/run/${tag}/index`);
@@ -621,10 +665,14 @@ async function init() {
   $("btnFirst").onclick = () => { pause(); seekTo(state.viewLo); };
   $("btnLast").onclick = () => { pause(); seekTo(state.viewHi - 1); };
   // trade nav confined to the active view
-  $("btnNextTrade").onclick = () => { pause(); const t = state.trades.find(t => t.entry_i > state.cur && t.entry_i < state.viewHi); if (t) seekTo(t.entry_i); };
-  $("btnPrevTrade").onclick = () => { pause(); const prev = [...state.trades].reverse().find(t => t.entry_i < state.cur && t.entry_i >= state.viewLo); if (prev) seekTo(prev.entry_i); };
+  // Trade nav: confined to the active view normally; with a scenario selected it walks the whole run
+  // (gotoTrade switches the month view as needed).
+  $("btnNextTrade").onclick = () => { pause(); const t = state.trades.find(t => scenarioOk(t) && t.entry_i > state.cur && (state.scenario || t.entry_i < state.viewHi)); if (t) gotoTrade(t); };
+  $("btnPrevTrade").onclick = () => { pause(); const prev = [...state.trades].reverse().find(t => scenarioOk(t) && t.entry_i < state.cur && (state.scenario || t.entry_i >= state.viewLo)); if (prev) gotoTrade(prev); };
+  $("scenarioFilter").onchange = (e) => { state.scenario = e.target.value; renderTrades(); highlightActiveTrade(); };
   $("speed").onchange = (e) => state.speed = +e.target.value;
   $("winLen").onchange = (e) => { state.winLen = +e.target.value; state.win = null; seekTo(state.cur); };
+  $("viewBars").onchange = (e) => { state.viewBars = +e.target.value; recenter(); };
   $("scrub").oninput = (e) => { pause(); seekTo(+e.target.value); };
 
   // filter mode toggle + controls. Month/Contract apply immediately (they carry a valid selection);

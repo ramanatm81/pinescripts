@@ -266,7 +266,7 @@ def build_run(dataset, cfg, start=None, end=None):
     gl = -sum(t["pts"] for t in trades if t["pts"] <= 0)
     gp = sum(t["pts"] for t in trades if t["pts"] > 0)
     st = dict(n=nt, net=net, usd=net * 2.0, wins=wins, losses=nt - wins,
-              wr=100.0 * wins / nt if nt else 0.0, pf=(gp / gl) if gl > 0 else float("inf"),
+              wr=100.0 * wins / nt if nt else 0.0, pf=(gp / gl) if gl > 0 else None,
               avg=net / nt if nt else 0.0)
     meta_cfg = dict(strategy="window_displacement_fade", **{k: cfg[k] for k in cfg}, mult=2.0)
     meta = dict(file=a["path"], tag=None, n_bars=len(frames), cfg=meta_cfg, stats=st, exact=False,

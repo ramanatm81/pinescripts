@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Replay Backtest — Nara (slope-touch fade)</title>
+<title>Replay Backtest</title>
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
@@ -12,6 +12,7 @@
   <label>Run
     <select id="runSelect"></select>
   </label>
+  <button id="btnNewRun" class="newrun">+ New Run</button>
   <span id="fidelity" class="badge"></span>
 
   <div id="filterBar">
@@ -60,6 +61,13 @@
           <option value="3000">3000 bars</option>
         </select>
       </label>
+      <label class="winlen" title="Bars visible on screen (a full RTH session is 390)">View
+        <select id="viewBars">
+          <option value="240" selected>240 bars</option>
+          <option value="420">420 bars</option>
+          <option value="720">720 bars</option>
+        </select>
+      </label>
       <button id="btnPrevTrade" title="Previous trade">⟨ Trade</button>
       <button id="btnNextTrade" title="Next trade">Trade ⟩</button>
     </div>
@@ -82,10 +90,19 @@
     </div>
 
     <div class="panel" id="tradesPanel">
-      <h3>Trades <span id="tradeCount" class="dim"></span></h3>
+      <h3>Trades <span id="tradeCount" class="dim"></span>
+        <select id="scenarioFilter" title="Scenario filter: rows + Trade ⟨ ⟩ navigation follow it" class="hidden">
+          <option value="">all scenarios</option>
+          <option value="fast+loiter">fast +80 then loiter (no new high after 60m)</option>
+          <option value="fast+run">fast +80 then run on</option>
+          <option value="slow +80">slow to +80</option>
+          <option value="never +80">never reached +80</option>
+          <option value="stopped">ATR stop</option>
+        </select>
+      </h3>
       <div id="tradeTableWrap">
         <table id="tradeTable">
-          <thead><tr><th>#</th><th>dir</th><th>entry</th><th>exit</th><th>pts</th><th>MFE</th><th>MAE</th><th>reason</th><th>cum$</th></tr></thead>
+          <thead><tr><th>#</th><th>dir</th><th>entry</th><th>exit</th><th>pts</th><th>MFE</th><th>MAE</th><th>reason</th><th>cum$</th><th id="thScenario" class="hidden">scenario</th><th id="thT80" class="hidden">+80@</th><th id="thPeak" class="hidden">peak@</th><th id="thPre" class="hidden">pre-open</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -94,6 +111,40 @@
 </div>
 
 <div id="loading" class="loading hidden">loading…</div>
+
+<div id="newRunModal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head">
+      <span>New Simulation Run</span>
+      <button id="btnCloseModal" class="modal-x">×</button>
+    </div>
+    <div class="modal-row">
+      <label>Strategy</label>
+      <select id="mStrategy"></select>
+    </div>
+    <div class="modal-row">
+      <label>Dataset</label>
+      <select id="mDataset">
+        <option value="5yr" selected>5yr (MNQ)</option>
+        <option value="oos">OOS month</option>
+        <option value="fwd2026">2026 forward (May 19 - Aug 19)</option>
+      </select>
+    </div>
+    <div class="modal-row">
+      <label>Date range (CT)</label>
+      <span class="rangewrap">
+        <input type="month" id="mStart" placeholder="start"> <span class="dim">→</span>
+        <input type="month" id="mEnd" placeholder="end">
+        <span class="hint">blank = whole dataset</span>
+      </span>
+    </div>
+    <div id="mParams" class="modal-params"></div>
+    <div class="modal-foot">
+      <span id="mStatus" class="mstatus"></span>
+      <button id="btnGenerate" class="generate">Generate</button>
+    </div>
+  </div>
+</div>
 
 <script src="/static/vendor/lightweight-charts.js"></script>
 <script src="/static/app.js"></script>

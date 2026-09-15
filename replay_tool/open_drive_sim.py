@@ -252,11 +252,36 @@ def build_run(dataset, cfg, start=None, end=None):
             mfe = seg_hi - epx; mae = seg_lo - epx
         else:
             mfe = epx - seg_lo; mae = epx - seg_hi
+        reason = _EXIT_CODE.get(int(t_code[k]), "?")
+        # ---- scenario tags (post-hoc, for the replay UI's trade filter; not used by the sim) ----
+        # fav: favourable excursion of each bar's extreme vs the fill, in the trade's direction.
+        # t80: minutes from entry until +80 is first touched (None = never). peak_min: minutes from
+        # entry to the MFE bar. pre_net: net move of the 07:30-08:30 CT hour, signed WITH the trade.
+        fav = (h[ei + 1:xi + 1] - epx) if d > 0 else (epx - l[ei + 1:xi + 1])
+        t80 = None; peak_min = 0
+        if fav.size:
+            hit = np.nonzero(fav >= 80.0)[0]
+            if hit.size:
+                t80 = int(cm[ei + 1 + hit[0]] - cm[ei])
+            peak_min = int(cm[ei + 1 + int(np.argmax(fav))] - cm[ei])
+        j0 = max(0, ei - 420)
+        pm = (a["dates"][j0:ei] == a["dates"][ei]) & (cm[j0:ei] >= 450) & (cm[j0:ei] < 510)
+        pre_c = c[j0:ei][pm]
+        pre_net = float(d * (pre_c[-1] - pre_c[0])) if pre_c.size >= 55 else None
+        if reason == "atrstop":
+            scenario = "stopped"
+        elif t80 is None:
+            scenario = "never +80"
+        elif t80 <= 30:
+            scenario = "fast+loiter" if peak_min <= 60 else "fast+run"
+        else:
+            scenario = "slow +80"
         trades.append(dict(dir=d, entry_i=ri(ei), entry_time=_ct_iso(ep[ei]), entry_px=epx,
                            exit_i=ri(xi), exit_time=_ct_iso(ep[xi]), exit_px=xpx, pts=pts, usd=usd,
-                           reason=_EXIT_CODE.get(int(t_code[k]), "?"), bars_held=xi - ei,
+                           reason=reason, bars_held=xi - ei,
                            cum_usd=cum_running, mfe=mfe, mae=mae,
-                           mfe_usd=mfe * 2.0, mae_usd=mae * 2.0))
+                           mfe_usd=mfe * 2.0, mae_usd=mae * 2.0,
+                           t80=t80, peak_min=peak_min, pre_net=pre_net, scenario=scenario))
 
     base_cum = float(cum[rec_start - 1]) if rec_start > 0 else 0.0
     frames = []
@@ -286,7 +311,7 @@ def build_run(dataset, cfg, start=None, end=None):
     gl = -sum(t["pts"] for t in trades if t["pts"] <= 0)
     gp = sum(t["pts"] for t in trades if t["pts"] > 0)
     st = dict(n=nt, net=net, usd=net * 2.0, wins=wins, losses=nt - wins,
-              wr=100.0 * wins / nt if nt else 0.0, pf=(gp / gl) if gl > 0 else float("inf"),
+              wr=100.0 * wins / nt if nt else 0.0, pf=(gp / gl) if gl > 0 else None,
               avg=net / nt if nt else 0.0)
     meta_cfg = dict(strategy="open_drive", **{k: cfg[k] for k in cfg}, mult=2.0)
     meta = dict(file=a["path"], tag=None, n_bars=len(frames), cfg=meta_cfg, stats=st, exact=False,

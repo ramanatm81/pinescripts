@@ -135,7 +135,7 @@ def main():
     st = dict(n=n, net=net, usd=net * 2.0, wr=100.0 * wins / n if n else 0.0,
               wins=wins, losses=n - wins,
               pf=(sum(t["pts"] for t in trades if t["pts"] > 0) /
-                  -sum(t["pts"] for t in trades if t["pts"] <= 0)) if (n - wins) else float("inf"))
+                  -sum(t["pts"] for t in trades if t["pts"] <= 0)) if (n - wins) else None)
     print(f"STATS : trades={n} net={net:.0f}pt ${net*2:.0f} win%={st['wr']:.1f} PF={st['pf']:.2f}")
     cfg = dict(strategy="window_displacement_fade", win_len=a.win_len, thr=a.thr, tp=a.tp, sl=a.sl,
                prev_block=prev_block, prev_win=a.prev_win, prev_thr=a.prev_thr,

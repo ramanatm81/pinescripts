@@ -78,6 +78,30 @@ the `cols` string in `fetchWindow`. Miss the `pa.schema` one and the column is s
 itself, and `stop_level` is the ATR stop once in a position. Entries are resting-stop fills, so the
 entry marker sits at the rail (or at the bar open when the bar gapped through it).
 
+### Open-Drive scenario tags (`run_od_5yr_atr3_scenarios.parquet`)
+Every open-drive trade carries post-hoc tags in the trade table, and a **scenario** dropdown in
+the Trades panel filters the table AND the `⟨ Trade` / `Trade ⟩` buttons. With a scenario selected
+the table lists every matching trade in the WHOLE run (not just the current month), and clicking a
+row or pressing `Trade ⟩` switches the month view as needed and seeks to that entry. Click the
+row's **exit** time instead to land on the exit bar (the whole session is then behind the playhead).
+
+| scenario | meaning |
+|----------|---------|
+| `fast+loiter` | +80 touched within 30 min of entry, then no new high after 60 min |
+| `fast+run` | +80 within 30 min, then a new high later in the session |
+| `slow +80` | +80 reached, but later than 30 min |
+| `never +80` | never touched +80 |
+| `stopped` | ATR stop exit |
+
+Extra columns: `+80@` (minutes from entry to +80), `peak@` (minutes to MFE), `pre-open` (net move
+of the 07:30-08:30 CT hour, signed with the trade). Tags are computed in `open_drive_sim.build_run`
+and do not affect the simulation.
+
+**To see a whole session on one screen** set **Window** to 1500 and **View** to 720 bars (a full
+RTH session is 390), then drag the scrub to the trade's exit bar. Date-range filter dates are
+matched against the UTC date of the bar, so use the day before as the start (e.g. 22→23 to see the
+23rd's session).
+
 ---
 
 ## Create / run a DIFFERENT run for the UI
