@@ -18,6 +18,10 @@
 //             it back. NOT martingale -- the peak requirement pre-selects the good days. Doubles
 //             net (+14,840 -> +27,499) and lifts exTop10 (+6,601 -> +11,168), 6/6 yrs, on the
 //             merged 5yr+forward file. IN-SAMPLE ONLY, no walk-forward yet. See the input block.
+//             NEEDS pyramiding=2 in strategy() -- with the default (1) TradingView silently drops
+//             every same-direction strategy.entry, so the add never fills and nothing warns you.
+//             The first live test (2026-08-17..09-15 export) showed exactly that: 11 armed days,
+//             zero second units. Fixed in the declaration below.
 //   FILTER  : optional pre-open slope gate (see below). OFF by default.
 //
 // STOPS: FIXED LOSES, ATR-SCALED WINS. This corrects an earlier version of this file that shipped
@@ -100,7 +104,7 @@
 // =====================================================================================
 strategy("Open-Drive Momentum Strategy", overlay=true, max_labels_count=500, max_bars_back=5000,
      default_qty_type=strategy.fixed, default_qty_value=1, initial_capital=100000,
-     calc_on_every_tick=false, process_orders_on_close=true, slippage=0)
+     calc_on_every_tick=false, process_orders_on_close=true, slippage=0, pyramiding=2)
 
 //=============================
 // Inputs -- trigger
@@ -433,12 +437,14 @@ if useScaleIn and tradeDir != 0 and not addFilled
             strategy.entry("L-add", strategy.long, qty=addQty, limit=addLevel)
         else
             strategy.entry("S-add", strategy.short, qty=addQty, limit=addLevel)
-// addFillPx: the limit's fill -- the level, or the bar OPEN when the bar gapped through it (a
-// resting limit fills at the better price on a gap). Read by the add-fill and exit payloads.
-if useScaleIn and not addFilled and not na(addLevel) and
-     ((tradeDir > 0 and low <= addLevel) or (tradeDir < 0 and high >= addLevel))
+// addFilled / addFillPx come from the BROKER EMULATOR, not from price touching the level: the add
+// is a second open trade, so strategy.opentrades goes 1 -> 2 on the bar it fills, and its entry
+// price is the real fill (the level, or the bar open on a gap-through). An earlier version set the
+// flag from `low <= addLevel`, which lit up the data window on days where no order had been
+// accepted at all (pyramiding was 1, so TV dropped every add silently) -- see pyramiding=2 above.
+if useScaleIn and not addFilled and strategy.opentrades > 1
     addFilled := true
-    addFillPx := tradeDir > 0 ? math.min(open, addLevel) : math.max(open, addLevel)
+    addFillPx := strategy.opentrades.entry_price(strategy.opentrades - 1)
 
 // ---- ATR STOP: a resting protective order, refreshed every bar we are in a position. There is no
 // take-profit by design (adding one costs net -- see the ATR stop input block).
