@@ -446,6 +446,28 @@ if useScaleIn and not addFilled and strategy.opentrades > 1
     addFilled := true
     addFillPx := strategy.opentrades.entry_price(strategy.opentrades - 1)
 
+// DIAGNOSTIC: price has traded through the resting add level, so the broker emulator should have
+// filled it. If it did not, the order was REJECTED -- almost always because the chart's stored
+// Properties still say Pyramiding = 1 (the strategy() argument is only read when the script is
+// FIRST added to a chart; editing the source afterwards does not update it). "add touched" vs
+// "add filled" in the data window shows the gap; the label below says it out loud.
+var bool  addTouched  = false
+var int   addTouchBars = 0
+if useScaleIn and tradeDir != 0 and not addFilled and not na(addLevel) and
+     ((tradeDir > 0 and low <= addLevel) or (tradeDir < 0 and high >= addLevel))
+    addTouched   := true
+    addTouchBars += 1
+if tradeDir == 0
+    addTouched   := false
+    addTouchBars := 0
+bool addRejected = useScaleIn and addTouched and not addFilled and addTouchBars >= 3
+var label addWarn = na
+if addRejected and barstate.islast
+    label.delete(addWarn)
+    addWarn := label.new(bar_index, high, "SCALE-IN NOT FILLING\nprice traded through the add level " +
+         str.tostring(addTouchBars) + " bars ago, no 2nd unit.\nStrategy settings -> Properties -> Pyramiding: set 2\n(or remove and re-add the strategy)",
+         style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white, size=size.small)
+
 // ---- ATR STOP: a resting protective order, refreshed every bar we are in a position. There is no
 // take-profit by design (adding one costs net -- see the ATR stop input block).
 // The scale-in leg gets its OWN exit order at the SAME level -- strategy.exit is per-entry-id, so
@@ -537,6 +559,8 @@ plot(runMFE,                 "run MFE",        color=na, display=display.data_wi
 plot(addLevel,               "add level",      color=na, display=display.data_window)
 plot(addFillPx,              "add fill px",    color=na, display=display.data_window)
 plot(addFilled ? 1 : 0,      "add filled",     color=na, display=display.data_window)
+plot(addTouched ? 1 : 0,     "add touched",    color=na, display=display.data_window)
+plot(strategy.opentrades,    "open trades",    color=na, display=display.data_window)
 
 // Diagnostics -- the live state the entry logic reads.
 plot(rthOpenPx,              "RTH open px",    color=na, display=display.data_window)
