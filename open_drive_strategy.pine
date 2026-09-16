@@ -18,10 +18,15 @@
 //             it back. NOT martingale -- the peak requirement pre-selects the good days. Doubles
 //             net (+14,840 -> +27,499) and lifts exTop10 (+6,601 -> +11,168), 6/6 yrs, on the
 //             merged 5yr+forward file. IN-SAMPLE ONLY, no walk-forward yet. See the input block.
-//             NEEDS pyramiding=2 in strategy() -- with the default (1) TradingView silently drops
-//             every same-direction strategy.entry, so the add never fills and nothing warns you.
-//             The first live test (2026-08-17..09-15 export) showed exactly that: 11 armed days,
-//             zero second units. Fixed in the declaration below.
+//             NEEDS TWO strategy() SETTINGS or TradingView silently drops the add and nothing warns:
+//               pyramiding=2   -- default 1 rejects any same-direction strategy.entry.
+//               margin_long=0, margin_short=0 -- default margin is 100%: at 100k initial capital
+//                              and MNQ ~29,000 x $2 = $58k notional, ONE contract fits and the
+//                              SECOND is refused for insufficient funds. This was the live failure
+//                              (2026-08-17..09-16 exports: 10-11 armed days, zero second units,
+//                              Pyramiding already 2 in Properties).
+//             Both are stored in the chart's Properties tab when the strategy is first added;
+//             editing the source later does NOT update them -- check the tab, or re-add.
 //   FILTER  : optional pre-open slope gate (see below). OFF by default.
 //
 // STOPS: FIXED LOSES, ATR-SCALED WINS. This corrects an earlier version of this file that shipped
@@ -104,7 +109,8 @@
 // =====================================================================================
 strategy("Open-Drive Momentum Strategy", overlay=true, max_labels_count=500, max_bars_back=5000,
      default_qty_type=strategy.fixed, default_qty_value=1, initial_capital=100000,
-     calc_on_every_tick=false, process_orders_on_close=true, slippage=0, pyramiding=2)
+     calc_on_every_tick=false, process_orders_on_close=true, slippage=0, pyramiding=2,
+     margin_long=0, margin_short=0)
 
 //=============================
 // Inputs -- trigger
@@ -465,7 +471,7 @@ var label addWarn = na
 if addRejected and barstate.islast
     label.delete(addWarn)
     addWarn := label.new(bar_index, high, "SCALE-IN NOT FILLING\nprice traded through the add level " +
-         str.tostring(addTouchBars) + " bars ago, no 2nd unit.\nStrategy settings -> Properties -> Pyramiding: set 2\n(or remove and re-add the strategy)",
+         str.tostring(addTouchBars) + " bars ago, no 2nd unit.\nStrategy settings -> Properties:\n  Pyramiding = 2\n  Margin long / short = 0 (100% refuses the 2nd contract at 100k capital)\n(or remove and re-add the strategy)",
          style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white, size=size.small)
 
 // ---- ATR STOP: a resting protective order, refreshed every bar we are in a position. There is no
