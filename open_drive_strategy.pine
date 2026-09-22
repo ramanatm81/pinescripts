@@ -14,19 +14,6 @@
 //             you and never on the drive itself, which inverts the strategy.
 //   EXIT    : ATR stop (1.0x trailing daily ATR, frozen at entry) or EOD flatten, whichever first.
 //             No take-profit -- adding one costs net.
-//   SCALE-IN: optional, OFF by default. Add a unit when a trade that already ran +50 gives half of
-//             it back. NOT martingale -- the peak requirement pre-selects the good days. Doubles
-//             net (+14,840 -> +27,499) and lifts exTop10 (+6,601 -> +11,168), 6/6 yrs, on the
-//             merged 5yr+forward file. IN-SAMPLE ONLY, no walk-forward yet. See the input block.
-//             NEEDS TWO strategy() SETTINGS or TradingView silently drops the add and nothing warns:
-//               pyramiding=2   -- default 1 rejects any same-direction strategy.entry.
-//               margin_long=0, margin_short=0 -- default margin is 100%: at 100k initial capital
-//                              and MNQ ~29,000 x $2 = $58k notional, ONE contract fits and the
-//                              SECOND is refused for insufficient funds. This was the live failure
-//                              (2026-08-17..09-16 exports: 10-11 armed days, zero second units,
-//                              Pyramiding already 2 in Properties).
-//             Both are stored in the chart's Properties tab when the strategy is first added;
-//             editing the source later does NOT update them -- check the tab, or re-add.
 //   FILTER  : optional pre-open slope gate (see below). OFF by default.
 //
 // STOPS: FIXED LOSES, ATR-SCALED WINS. This corrects an earlier version of this file that shipped
@@ -107,10 +94,9 @@
 // bar-for-bar, but Pine only runs on TV -- the port<->pine chain is NOT closed until you export
 // from TV and diff. Treat every number above as port-only until then.
 // =====================================================================================
-strategy("Open-Drive Momentum Strategy", overlay=true, max_labels_count=500, max_bars_back=5000,
+strategy("Open-Drive Momentum Strategy", overlay=true, max_labels_count=500, max_lines_count=500, max_bars_back=5000,
      default_qty_type=strategy.fixed, default_qty_value=1, initial_capital=100000,
-     calc_on_every_tick=false, process_orders_on_close=true, slippage=0, pyramiding=2,
-     margin_long=0, margin_short=0)
+     calc_on_every_tick=false, process_orders_on_close=true, slippage=0)
 
 //=============================
 // Inputs -- trigger
@@ -119,6 +105,7 @@ trigPts     = input.float(120.0, "Drive trigger: distance from RTH open to enter
 // settleMin 0 = arm at the open. Delaying is strictly worse (see SETTLE WINDOW in the header);
 // the input exists only so the decay can be re-measured, not because 30 was ever right.
 settleMin   = input.int(0,    "Delay arming by N min after the open (0 = arm immediately)", minval=0, maxval=180, group="Trigger")
+showLevelLines = input.bool(true, "Draw open / +trig / -trig lines every day", group="Trigger")
 entryEndMin = input.int(330,  "No new entry after this many min past open", minval=10, maxval=390, group="Trigger")
 
 //=============================
@@ -149,30 +136,6 @@ slMult     = input.float(1.0, "Stop distance = this * daily ATR (avoid <= 0.5)",
 // The surface is monotonic 2->14 (2:+13,083 3:+13,594 5:+14,999 7:+15,815 14:+16,346), so this is
 // a known ~17% cost paid to make the stop actually exist on the platform you trade from.
 atrDays    = input.int(3,    "Daily-ATR lookback (days, trailing/past-only)", minval=1, maxval=60, group="ATR stop")
-
-//=============================
-// Inputs -- SCALE-IN on the pullback. Add a second unit when a trade that has already run
-// addPeakPts in your favour gives part of it back.
-//
-// This is NOT martingale, despite looking like one: it never averages into a losing trade. The
-// trigger requires the position to have gone addPeakPts ONSIDE first, and that pre-selects the good
-// days. On 5yr+fwd MNQ (2pt slip, merged file), the 594 days that qualify are already 65.3% winners
-// worth +46.2/trade on one unit; the 379 that never qualify are 40.4% winners worth -33.3. The add
-// scales the good half, it does not rescue the bad half.
-//     1 unit (baseline)          : net +14,840  exTop10  +6,601  WR 55.6%  5/6 yrs
-//     + 1 unit at 50% giveback   : net +27,499  exTop10 +11,168  WR 53.0%  6/6 yrs
-// The surface is smooth: peak 40/50/75/100 x giveback 0/25/50% all beat baseline, and the post-add
-// stop barely matters (keep-original +27,499 vs 2.0xATR +27,702) because the add sits well above
-// the original stop. addQty 2 or 3 scales roughly linearly -- that is leverage, not a better edge:
-// per-CONTRACT it is +33.8 vs +46.2 for one unit. Size it for the drawdown, not the headline net.
-//
-// NOT YET VALIDATED: in-sample on the merged 5yr+forward file, no walk-forward. Treat as a
-// candidate, not a shipped result.
-//=============================
-useScaleIn  = input.bool(false, "Scale-in: add a unit when a runner gives back", group="Scale-in")
-addPeakPts  = input.float(50.0, "Arm the add once MFE reaches this (pts)", minval=10.0, step=5.0, group="Scale-in")
-addBackPct  = input.float(50.0, "Add when price gives back this % of peak MFE", minval=0.0, maxval=100.0, step=5.0, group="Scale-in")
-addQty      = input.int(1,      "Units to add (1 = double the position)", minval=1, maxval=5, group="Scale-in")
 
 //=============================
 // Inputs -- side
@@ -211,15 +174,7 @@ slopeMin     = input.float(0.75, "Min |pre-open slope| to trade the day (pts/bar
 //                                       "price" is the STOP LEVEL, not the bar close.
 //                          "exit"    -- closed with no stop set (first atrDays of a chart only).
 //                        In every case: flatten if you are still holding, and cancel any unfilled
-//                        entry stop. "pnl_pts" carries the round-trip result in points for the
-//                        ORIGINAL unit; "add_filled" / "add_price" say whether a scale-in unit was
-//                        also in the position (flatten it too -- close_all covers it inside TV).
-//   addlevelopendrive -- SCALE-IN ONLY (useScaleIn). Fires on the bar the add limit is first armed
-//                        and again on every bar the level MOVES (it tracks the running peak, so it
-//                        ratchets toward the peak as the trade extends). PLACE / REPLACE YOUR
-//                        RESTING LIMIT AT "add_level". Cancel it on exitopendrive.
-//   addfillopendrive  -- the scale-in limit filled, at that bar's close. Same timing caveat as the
-//                        entry event: "already_filled":true, the position is now qty+addQty units.
+//                        entry stop. "pnl_pts" carries the round-trip result in points.
 // Roughly 27.5% of days never hit either level, so no entry event arrives -- your resting orders
 // simply expire. Cancel them at entryEndMin (default 330 min past the open = 20:00 LDN).
 //
@@ -236,8 +191,6 @@ slopeMin     = input.float(0.75, "Min |pre-open slope| to trade the day (pts/bar
 entryEventName = input.string("entryopendrive", "Entry event name (webhook JSON \"event\")", group="Webhook")
 exitEventName  = input.string("exitopendrive",  "Exit event name (webhook JSON \"event\")",  group="Webhook")
 armedEventName = input.string("levelsopendrive", "Levels event name -- place your stop orders on THIS", group="Webhook")
-addLevelEventName = input.string("addlevelopendrive", "Scale-in level event name -- rest your add limit on THIS", group="Webhook")
-addFillEventName  = input.string("addfillopendrive",  "Scale-in fill event name", group="Webhook")
 
 //=============================
 // Inputs -- manual-trading alerts. These emit extra alert() events ("armed", "approaching") through
@@ -362,10 +315,6 @@ bool armShort = inEntryWindow and enableShort and not tookTrade and slopeOK and 
 var int    tradeDir    = 0
 var float  entryPrice  = na
 var float  stopLevel   = na    // ATR stop, frozen at entry
-var float  runMFE      = na    // best excursion in our favour since entry (pts)
-var float  addLevel    = na    // price the scale-in unit rests at; na until armed
-var bool   addFilled   = false
-var float  addFillPx   = na    // scale-in fill: the level, or the bar open on a gap-through; read by the alerts
 var int    tradeSeq    = 0
 var string tradeId     = ""
 var string exitReason  = ""
@@ -419,73 +368,18 @@ if tookEntryLong or tookEntryShort
     // freeze the ATR stop from the ENTRY-day ATR; na (first atrDays of chart) = no stop
     stopLevel  := (useAtrStop and not na(curDayATR)) ?
          (tookEntryLong ? entryPrice - slMult * curDayATR : entryPrice + slMult * curDayATR) : na
-    runMFE     := 0.0
-    addLevel   := na
-    addFilled  := false
-    addFillPx  := na
     tookTrade  := true
     tradeSeq   += 1
     tradeId    := makeTradeId(tradeSeq)
     strategy.cancel("L")
     strategy.cancel("S")
 
-// ---- SCALE-IN. Track MFE from the entry, and once it clears addPeakPts freeze the add level at
-// the given giveback of that PEAK. The level is recomputed as the peak extends, so the add always
-// rests at the current peak's giveback -- but it is only ever a LIMIT back toward entry, never a
-// stop away from it, so this cannot chase a losing position.
-if useScaleIn and tradeDir != 0 and not addFilled
-    float fav = tradeDir > 0 ? high - entryPrice : entryPrice - low
-    runMFE := na(runMFE) ? fav : math.max(runMFE, fav)
-    if runMFE >= addPeakPts
-        addLevel := tradeDir > 0 ? entryPrice + runMFE * (addBackPct / 100.0)
-             : entryPrice - runMFE * (addBackPct / 100.0)
-        if tradeDir > 0
-            strategy.entry("L-add", strategy.long, qty=addQty, limit=addLevel)
-        else
-            strategy.entry("S-add", strategy.short, qty=addQty, limit=addLevel)
-// addFilled / addFillPx come from the BROKER EMULATOR, not from price touching the level: the add
-// is a second open trade, so strategy.opentrades goes 1 -> 2 on the bar it fills, and its entry
-// price is the real fill (the level, or the bar open on a gap-through). An earlier version set the
-// flag from `low <= addLevel`, which lit up the data window on days where no order had been
-// accepted at all (pyramiding was 1, so TV dropped every add silently) -- see pyramiding=2 above.
-if useScaleIn and not addFilled and strategy.opentrades > 1
-    addFilled := true
-    addFillPx := strategy.opentrades.entry_price(strategy.opentrades - 1)
-
-// DIAGNOSTIC: price has traded through the resting add level, so the broker emulator should have
-// filled it. If it did not, the order was REJECTED -- almost always because the chart's stored
-// Properties still say Pyramiding = 1 (the strategy() argument is only read when the script is
-// FIRST added to a chart; editing the source afterwards does not update it). "add touched" vs
-// "add filled" in the data window shows the gap; the label below says it out loud.
-var bool  addTouched  = false
-var int   addTouchBars = 0
-if useScaleIn and tradeDir != 0 and not addFilled and not na(addLevel) and
-     ((tradeDir > 0 and low <= addLevel) or (tradeDir < 0 and high >= addLevel))
-    addTouched   := true
-    addTouchBars += 1
-if tradeDir == 0
-    addTouched   := false
-    addTouchBars := 0
-bool addRejected = useScaleIn and addTouched and not addFilled and addTouchBars >= 3
-var label addWarn = na
-if addRejected and barstate.islast
-    label.delete(addWarn)
-    addWarn := label.new(bar_index, high, "SCALE-IN NOT FILLING\nprice traded through the add level " +
-         str.tostring(addTouchBars) + " bars ago, no 2nd unit.\nStrategy settings -> Properties:\n  Pyramiding = 2\n  Margin long / short = 0 (100% refuses the 2nd contract at 100k capital)\n(or remove and re-add the strategy)",
-         style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white, size=size.small)
-
 // ---- ATR STOP: a resting protective order, refreshed every bar we are in a position. There is no
 // take-profit by design (adding one costs net -- see the ATR stop input block).
-// The scale-in leg gets its OWN exit order at the SAME level -- strategy.exit is per-entry-id, so
-// without this the added unit would ride with no stop at all.
 if tradeDir > 0 and not na(stopLevel)
     strategy.exit("L-exit", from_entry="L", stop=stopLevel, comment="atrstop")
-    if useScaleIn
-        strategy.exit("L-add-exit", from_entry="L-add", stop=stopLevel, comment="atrstop")
 else if tradeDir < 0 and not na(stopLevel)
     strategy.exit("S-exit", from_entry="S", stop=stopLevel, comment="atrstop")
-    if useScaleIn
-        strategy.exit("S-add-exit", from_entry="S-add", stop=stopLevel, comment="atrstop")
 
 // ---- EXIT: EOD flatten (and the ATR stop above).
 // exitJustFired is a BAR-LOCAL flag (not var): it is true only on the bar the position closed, and
@@ -524,13 +418,25 @@ if tradeDir != 0 and strategy.position_size == 0 and bar_index > 0 and strategy.
 //=============================
 // PLOTS -- the anchor and the two trigger rails, so the setup is readable on the chart.
 //=============================
+// Drawn as line objects (not plots) so every day gets its own crisp open/+trig/-trig segment from
+// the RTH open to 15:00 CT, with price tags at the left edge. 3 lines + 3 labels per day; the
+// max_lines/labels_count of 500 keeps ~160 days, more than any visible 1-min window.
 bool showLevels = _minSinceOpen >= 0 and not eodClosed and not na(rthOpenPx)
-plot(showLevels ? rthOpenPx   : na, "RTH open",     color=color.new(color.gray, 30),   linewidth=1, style=plot.style_linebr)
-plot(showLevels ? driveUpLvl  : na, "drive-up lvl", color=color.new(color.teal, 40),   linewidth=1, style=plot.style_linebr)
-plot(showLevels ? driveDnLvl  : na, "drive-dn lvl", color=color.new(color.maroon, 40), linewidth=1, style=plot.style_linebr)
-// the resting scale-in limit, drawn only while it is live and unfilled
-plot(showLevels and useScaleIn and not addFilled ? addLevel : na, "add level",
-     color=color.new(color.orange, 20), linewidth=1, style=plot.style_linebr)
+var line lnOpen = na
+var line lnUp   = na
+var line lnDn   = na
+bool newAnchor = showLevels and (na(rthOpenPx[1]) or rthOpenPx != rthOpenPx[1])
+if showLevelLines and newAnchor
+    lnOpen := line.new(bar_index, rthOpenPx,  bar_index, rthOpenPx,  color=color.new(color.gray, 0),   width=1, style=line.style_dashed)
+    lnUp   := line.new(bar_index, driveUpLvl, bar_index, driveUpLvl, color=color.new(color.teal, 0),   width=2)
+    lnDn   := line.new(bar_index, driveDnLvl, bar_index, driveDnLvl, color=color.new(color.maroon, 0), width=2)
+    label.new(bar_index, rthOpenPx,  "open " + str.tostring(rthOpenPx, "#.00"), style=label.style_label_right, color=color.new(color.gray, 100), textcolor=color.gray, size=size.small)
+    label.new(bar_index, driveUpLvl, "+" + str.tostring(trigPts, "#") + "  " + str.tostring(driveUpLvl, "#.00"), style=label.style_label_right, color=color.new(color.teal, 100), textcolor=color.teal, size=size.small)
+    label.new(bar_index, driveDnLvl, "-" + str.tostring(trigPts, "#") + "  " + str.tostring(driveDnLvl, "#.00"), style=label.style_label_right, color=color.new(color.maroon, 100), textcolor=color.maroon, size=size.small)
+else if showLevelLines and showLevels and not na(lnOpen)
+    line.set_x2(lnOpen, bar_index)
+    line.set_x2(lnUp,   bar_index)
+    line.set_x2(lnDn,   bar_index)
 
 plotshape(tookEntryLong,  title="LONG entry",  style=shape.triangleup,   location=location.belowbar, color=color.new(color.teal, 0),   size=size.small, text="L")
 plotshape(tookEntryShort, title="SHORT entry", style=shape.triangledown, location=location.abovebar, color=color.new(color.maroon, 0), size=size.small, text="S")
@@ -555,18 +461,8 @@ plot(warnPts,                "P_warnPts",      color=na, display=display.data_wi
 plot(useAtrStop ? 1 : 0,     "P_useAtrStop",   color=na, display=display.data_window)
 plot(slMult,                 "P_slMult",       color=na, display=display.data_window)
 plot(atrDays,                "P_atrDays",      color=na, display=display.data_window)
-plot(useScaleIn ? 1 : 0,     "P_useScaleIn",   color=na, display=display.data_window)
-plot(addPeakPts,             "P_addPeakPts",   color=na, display=display.data_window)
-plot(addBackPct,             "P_addBackPct",   color=na, display=display.data_window)
-plot(addQty,                 "P_addQty",       color=na, display=display.data_window)
 plot(curDayATR,              "daily ATR",      color=na, display=display.data_window)
 plot(stopLevel,              "active stop",    color=na, display=display.data_window)
-plot(runMFE,                 "run MFE",        color=na, display=display.data_window)
-plot(addLevel,               "add level",      color=na, display=display.data_window)
-plot(addFillPx,              "add fill px",    color=na, display=display.data_window)
-plot(addFilled ? 1 : 0,      "add filled",     color=na, display=display.data_window)
-plot(addTouched ? 1 : 0,     "add touched",    color=na, display=display.data_window)
-plot(strategy.opentrades,    "open trades",    color=na, display=display.data_window)
 
 // Diagnostics -- the live state the entry logic reads.
 plot(rthOpenPx,              "RTH open px",    color=na, display=display.data_window)
@@ -666,38 +562,6 @@ if exitJustFired
           ',"pnl_pts":' + (na(entryPrice) ? "null" :
                str.tostring((exitPrice - entryPrice) * exitedDir, "0.00")) +
           ',"stop_hit":' + (exitReason == "atrstop" ? "true" : "false") +
-          ',"add_filled":' + (addFilled ? "true" : "false") +
-          ',"add_price":' + (addFilled ? _slStr(addFillPx) : "null") +
-          ',"add_pnl_pts":' + (addFilled and not na(addFillPx) ?
-               str.tostring((exitPrice - addFillPx) * exitedDir, "0.00") : "null") +
-          ',"symbol":"' + syminfo.ticker + '"' +
-          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London") + '"' +
-          '}', alert.freq_once_per_bar)
-
-// SCALE-IN alerts. Level event: on the bar the add is first armed and on every bar the level
-// moves (it ratchets with the running peak). Gated on the level CHANGING, not on runMFE, so a
-// flat peak emits nothing. Fill event: on the bar addFilled flips. Both only while in a position
-// and only with useScaleIn, so a consumer without the toggle never sees them.
-if useScaleIn and tradeDir != 0 and not addFilled and not na(addLevel) and addLevel != addLevel[1]
-    alert('{"event":"' + addLevelEventName + '","side":"' + (tradeDir > 0 ? "long" : "short") + '","id":"' + tradeId + '"' +
-          ',"add_level":' + str.tostring(addLevel, "0.00") +
-          ',"qty":' + str.tostring(addQty) +
-          ',"peak_mfe_pts":' + _slStr(runMFE) +
-          ',"entry_price":' + _slStr(entryPrice) +
-          ',"sl":' + _slStr(stopLevel) +
-          ',"order":"resting_limit","replace_existing":true' +
-          ',"symbol":"' + syminfo.ticker + '"' +
-          ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London") + '"' +
-          '}', alert.freq_once_per_bar)
-
-if useScaleIn and tradeDir != 0 and addFilled and not addFilled[1]
-    alert('{"event":"' + addFillEventName + '","side":"' + (tradeDir > 0 ? "long" : "short") + '","id":"' + tradeId + '"' +
-          ',"price":' + _slStr(addFillPx) +
-          ',"qty":' + str.tostring(addQty) +
-          ',"units_total":' + str.tostring(math.abs(strategy.position_size), "0") +
-          ',"entry_price":' + _slStr(entryPrice) +
-          ',"sl":' + _slStr(stopLevel) +
-          ',"fill_mode":"resting_limit","already_filled":true' +
           ',"symbol":"' + syminfo.ticker + '"' +
           ',"bar_time":"' + str.format_time(time, "yyyy-MM-dd HH:mm", "Europe/London") + '"' +
           '}', alert.freq_once_per_bar)
@@ -813,9 +677,3 @@ if not armedSent and not na(rthOpenPx) and _minSinceOpen >= settleMin and inEntr
 if tradeDir == 0 and not exitJustFired
     entryPrice := na
     stopLevel  := na
-    runMFE     := na
-    addLevel   := na
-    addFilled  := false
-    addFillPx  := na
-    strategy.cancel("L-add")
-    strategy.cancel("S-add")
